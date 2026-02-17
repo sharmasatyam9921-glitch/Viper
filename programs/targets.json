@@ -1,0 +1,58 @@
+{
+  "active_programs": [
+    {
+      "name": "U.S. Department of Defense",
+      "platform": "HackerOne",
+      "url": "https://hackerone.com/deptofdefense",
+      "scope": ["*.mil", "*.defense.gov"],
+      "bounty": false,
+      "notes": "VDP - good for practice, no bounty but great resume builder"
+    },
+    {
+      "name": "GitHub",
+      "platform": "HackerOne", 
+      "url": "https://hackerone.com/github",
+      "scope": ["*.github.com", "*.githubusercontent.com"],
+      "bounty": true,
+      "min_bounty": 617,
+      "notes": "Competitive but pays well"
+    },
+    {
+      "name": "Shopify",
+      "platform": "HackerOne",
+      "url": "https://hackerone.com/shopify",
+      "scope": ["*.shopify.com", "*.myshopify.com"],
+      "bounty": true,
+      "min_bounty": 500,
+      "notes": "Large scope, good for beginners"
+    },
+    {
+      "name": "AT&T",
+      "platform": "HackerOne",
+      "url": "https://hackerone.com/att",
+      "scope": ["*.att.com"],
+      "bounty": true,
+      "min_bounty": 200,
+      "notes": "Large attack surface"
+    },
+    {
+      "name": "PayPal",
+      "platform": "HackerOne",
+      "url": "https://hackerone.com/paypal",
+      "scope": ["*.paypal.com"],
+      "bounty": true,
+      "min_bounty": 100,
+      "notes": "High value targets, competitive"
+    },
+    {
+      "name": "Uber",
+      "platform": "HackerOne",
+      "url": "https://hackerone.com/uber",
+      "scope": ["*.uber.com"],
+      "bounty": true,
+      "min_bounty": 500,
+      "notes": "Good scope, API heavy"
+    }
+  ],
+  "selected": null
+}

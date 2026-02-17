@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# NEVER COMMIT - Secrets
+*.env
+.env*
+secrets.json
+api_keys.json
+*.pem
+*.key
+session.json
+credentials.json
+
+# State files (local)
+*_state.json
+dashboard/state.json
+
+# Reports (may contain target data)
+reports/*.json
+reports/*.html
+
+# Programs (target-specific)
+programs/*/
+!programs/README.md
+
+# Training (personal progress)
+training/progress.json
+training/knowledge_base.json
+training/report_*.md
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
