@@ -1,20 +1,24 @@
-"""HackAgent Core - Cognitive Engine"""
-
-from .hacker_mind import HackerMind, AttackPhase, ThreatModel, Hypothesis
-from .attack_patterns import PATTERNS, get_pattern, search_patterns
-from .exploit_db import ExploitDB, Exploit, ExploitType, Severity, seed_default_exploits
+from .ai_techniques import (
+    EncodingEngine,
+    PromptInjectionEngineV2 as PromptInjectionEngine,
+    RAGPoisoningEngine,
+    MultiAgentExploitEngine,
+    AdversarialDualAgentV2 as AdversarialDualAgent,
+    CollectiveMemoryV2 as CollectiveMemory,
+    MCPSecurityScannerV2 as MCPSecurityScanner,
+    MLInfrastructureExploitsV2 as MLInfrastructureExploits,
+)
+from .hacker_mind import HackerMind, AttackPhase
 
 __all__ = [
+    'EncodingEngine',
+    'PromptInjectionEngine',
+    'RAGPoisoningEngine', 
+    'MultiAgentExploitEngine',
+    'AdversarialDualAgent',
+    'CollectiveMemory',
+    'MCPSecurityScanner',
+    'MLInfrastructureExploits',
     'HackerMind',
-    'AttackPhase', 
-    'ThreatModel',
-    'Hypothesis',
-    'PATTERNS',
-    'get_pattern',
-    'search_patterns',
-    'ExploitDB',
-    'Exploit',
-    'ExploitType',
-    'Severity',
-    'seed_default_exploits',
+    'AttackPhase',
 ]
