@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — Settings</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --bg4: #21262d;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --success: #00c853; --danger: #ef4444; --warning: #f59e0b;
+  --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', monospace;
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font); }
+
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--text); background: rgba(99,102,241,.12); }
+.nav .brand { color: var(--accent2); font-weight: 700; font-size: 15px; margin-right: 12px; }
+
+.container { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+
+/* ── Tabs ── */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 24px;
+  overflow-x: auto; flex-wrap: nowrap; }
+.tab { padding: 8px 16px; font-size: 13px; color: var(--text2); cursor: pointer;
+  border-bottom: 2px solid transparent; transition: .2s; white-space: nowrap; user-select: none; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent2); border-bottom-color: var(--accent); }
+
+/* ── Panels ── */
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* ── Form elements ── */
+.field-group { margin-bottom: 20px; }
+.field-group h3 { font-size: 14px; color: var(--text); margin-bottom: 4px; }
+.field-group .desc { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+
+.field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.field label { flex: 0 0 180px; font-size: 13px; color: var(--text2); }
+.field input[type="text"], .field input[type="number"], .field input[type="url"],
+.field input[type="password"], .field select {
+  flex: 1; background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  padding: 8px 12px; border-radius: 8px; font-size: 13px; font-family: var(--font); outline: none;
+  transition: border-color .2s; }
+.field input:focus, .field select:focus { border-color: var(--accent); }
+.field textarea {
+  flex: 1; background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  padding: 8px 12px; border-radius: 8px; font-size: 13px; font-family: var(--mono);
+  outline: none; min-height: 80px; resize: vertical; }
+.field textarea:focus { border-color: var(--accent); }
+
+/* Toggle */
+.toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle .slider { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg4); border-radius: 11px; cursor: pointer; transition: .3s;
+  border: 1px solid var(--border); }
+.toggle .slider::before { content: ""; position: absolute; width: 16px; height: 16px;
+  left: 2px; bottom: 2px; background: var(--text2); border-radius: 50%; transition: .3s; }
+.toggle input:checked + .slider { background: var(--accent); border-color: var(--accent); }
+.toggle input:checked + .slider::before { transform: translateX(18px); background: #fff; }
+
+.field .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+.field .toggle-label { font-size: 12px; color: var(--muted); }
+
+/* Validation */
+.field.error input, .field.error select, .field.error textarea { border-color: var(--danger); }
+.field .error-msg { font-size: 11px; color: var(--danger); margin-top: 2px; display: none; }
+.field.error .error-msg { display: block; }
+
+/* ── Actions ── */
+.actions { display: flex; gap: 12px; margin-top: 24px; padding-top: 16px;
+  border-top: 1px solid var(--border); }
+.actions button { padding: 10px 24px; border-radius: 8px; font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: .2s; border: none; }
+.btn-save { background: var(--accent); color: #fff; }
+.btn-save:hover { filter: brightness(1.15); }
+.btn-reset { background: transparent; border: 1px solid var(--border) !important; color: var(--text2); }
+.btn-reset:hover { border-color: var(--danger) !important; color: var(--danger); }
+.btn-export { background: transparent; border: 1px solid var(--border) !important; color: var(--text2); }
+.btn-export:hover { border-color: var(--accent) !important; color: var(--accent); }
+
+/* ── Toast ── */
+.toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 24px; border-radius: 10px;
+  font-size: 13px; font-weight: 600; z-index: 1000; transform: translateY(100px);
+  opacity: 0; transition: all .3s ease; }
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.success { background: var(--success); color: #fff; }
+.toast.error { background: var(--danger); color: #fff; }
+.toast.info { background: var(--accent); color: #fff; }
+
+@media (max-width: 700px) {
+  .field { flex-direction: column; align-items: flex-start; }
+  .field label { flex: none; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand">VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="charts.html">Analytics</a>
+  <a href="chat.html">Chat</a>
+  <a href="terminal.html">Terminal</a>
+  <a href="settings_ui.html" class="active">Settings</a>
+</nav>
+
+<div class="container">
+  <div class="tabs" id="tabs">
+    <div class="tab active" data-panel="general">General</div>
+    <div class="tab" data-panel="llm">LLM</div>
+    <div class="tab" data-panel="stealth">Stealth</div>
+    <div class="tab" data-panel="guardrails">Guardrails</div>
+    <div class="tab" data-panel="skills">Attack Skills</div>
+    <div class="tab" data-panel="tools">Tools</div>
+    <div class="tab" data-panel="recon">Recon</div>
+    <div class="tab" data-panel="reporting">Reporting</div>
+    <div class="tab" data-panel="roe">RoE</div>
+  </div>
+
+  <div id="panels"></div>
+
+  <div class="actions">
+    <button class="btn-save" id="btn-save">Save Settings</button>
+    <button class="btn-reset" id="btn-reset">Reset to Defaults</button>
+    <button class="btn-export" id="btn-export">Export JSON</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Settings schema (defines UI for each tab) ──
+const SCHEMA = {
+  general: {
+    title: "General Settings",
+    fields: [
+      { key: "target", label: "Default Target", type: "url", placeholder: "https://target.com" },
+      { key: "max_iterations", label: "Max Iterations", type: "number", min: 1, max: 100, default: 15 },
+      { key: "time_limit_minutes", label: "Time Limit (min)", type: "number", min: 1, max: 1440, default: 60 },
+      { key: "profile", label: "Scan Profile", type: "select",
+        options: ["full", "quick", "stealth", "api_only", "recon_only", "aggressive"] },
+      { key: "verbose", label: "Verbose Output", type: "toggle", default: false },
+      { key: "auto_approve", label: "Auto-Approve Actions", type: "toggle", default: false },
+      { key: "dashboard_port", label: "Dashboard Port", type: "number", min: 1024, max: 65535, default: 8080 },
+      { key: "ws_port", label: "WebSocket Port", type: "number", min: 1024, max: 65535, default: 8081 },
+    ]
+  },
+  llm: {
+    title: "LLM Configuration",
+    fields: [
+      { key: "llm.primary_model", label: "Primary Model", type: "text", default: "claude-cli",
+        desc: "Primary LLM for orchestration" },
+      { key: "llm.secondary_model", label: "Secondary Model", type: "text", default: "ollama/deepseek-r1" },
+      { key: "llm.api_key", label: "API Key", type: "password", placeholder: "sk-..." },
+      { key: "llm.base_url", label: "API Base URL", type: "url", placeholder: "https://api.openai.com/v1" },
+      { key: "llm.temperature", label: "Temperature", type: "number", min: 0, max: 2, step: 0.1, default: 0.7 },
+      { key: "llm.max_tokens", label: "Max Tokens", type: "number", min: 100, max: 200000, default: 4096 },
+      { key: "llm.deep_think", label: "Enable Deep Think", type: "toggle", default: true },
+      { key: "llm.use_claude_cli", label: "Use Claude CLI (OAuth)", type: "toggle", default: true },
+      { key: "llm.ollama_url", label: "Ollama URL", type: "url", default: "http://localhost:11434" },
+    ]
+  },
+  stealth: {
+    title: "Stealth Settings",
+    fields: [
+      { key: "stealth.enabled", label: "Stealth Mode", type: "toggle", default: true },
+      { key: "stealth.rate_limit", label: "Requests/second", type: "number", min: 0.1, max: 100, step: 0.1, default: 5 },
+      { key: "stealth.jitter_ms", label: "Jitter (ms)", type: "number", min: 0, max: 10000, default: 500 },
+      { key: "stealth.rotate_ua", label: "Rotate User-Agent", type: "toggle", default: true },
+      { key: "stealth.rotate_ip", label: "Rotate Source IP", type: "toggle", default: false },
+      { key: "stealth.proxy_list", label: "Proxy List", type: "textarea", placeholder: "socks5://host:port\nhttp://host:port" },
+      { key: "stealth.waf_evasion", label: "WAF Evasion", type: "toggle", default: true },
+      { key: "stealth.encoding_chain", label: "Encoding Chain", type: "text", default: "url,double_url,unicode" },
+    ]
+  },
+  guardrails: {
+    title: "Safety Guardrails",
+    fields: [
+      { key: "guardrails.respect_robots_txt", label: "Respect robots.txt", type: "toggle", default: true },
+      { key: "guardrails.respect_scope", label: "Enforce Scope", type: "toggle", default: true },
+      { key: "guardrails.max_depth", label: "Max Crawl Depth", type: "number", min: 1, max: 20, default: 5 },
+      { key: "guardrails.max_requests", label: "Max Total Requests", type: "number", min: 100, max: 100000, default: 10000 },
+      { key: "guardrails.excluded_paths", label: "Excluded Paths", type: "textarea",
+        placeholder: "/admin\n/logout\n/delete", desc: "One path per line" },
+      { key: "guardrails.excluded_params", label: "Excluded Parameters", type: "textarea",
+        placeholder: "csrf_token\nsession_id" },
+      { key: "guardrails.safe_mode", label: "Safe Mode (read-only)", type: "toggle", default: false },
+      { key: "guardrails.no_destructive", label: "No Destructive Actions", type: "toggle", default: true },
+    ]
+  },
+  skills: {
+    title: "Attack Skills",
+    fields: [
+      { key: "skills.xss", label: "XSS Testing", type: "toggle", default: true },
+      { key: "skills.sqli", label: "SQL Injection", type: "toggle", default: true },
+      { key: "skills.ssrf", label: "SSRF Testing", type: "toggle", default: true },
+      { key: "skills.idor", label: "IDOR Testing", type: "toggle", default: true },
+      { key: "skills.auth_bypass", label: "Auth Bypass", type: "toggle", default: true },
+      { key: "skills.file_upload", label: "File Upload", type: "toggle", default: true },
+      { key: "skills.lfi_rfi", label: "LFI/RFI", type: "toggle", default: true },
+      { key: "skills.open_redirect", label: "Open Redirect", type: "toggle", default: true },
+      { key: "skills.cors", label: "CORS Misconfig", type: "toggle", default: true },
+      { key: "skills.jwt", label: "JWT Attacks", type: "toggle", default: true },
+      { key: "skills.ssti", label: "SSTI", type: "toggle", default: true },
+      { key: "skills.xxe", label: "XXE", type: "toggle", default: true },
+      { key: "skills.prototype_pollution", label: "Prototype Pollution", type: "toggle", default: true },
+      { key: "skills.graphql", label: "GraphQL", type: "toggle", default: true },
+    ]
+  },
+  tools: {
+    title: "External Tools",
+    fields: [
+      { key: "tools.nmap", label: "Nmap Path", type: "text", default: "nmap" },
+      { key: "tools.nuclei", label: "Nuclei Path", type: "text", default: "nuclei" },
+      { key: "tools.ffuf", label: "FFUF Path", type: "text", default: "ffuf" },
+      { key: "tools.sqlmap", label: "SQLMap Path", type: "text", default: "sqlmap" },
+      { key: "tools.nikto", label: "Nikto Path", type: "text", default: "nikto" },
+      { key: "tools.use_docker", label: "Use Docker for Tools", type: "toggle", default: false },
+      { key: "tools.docker_image", label: "Kali Docker Image", type: "text", default: "viper-kali:latest" },
+      { key: "tools.timeout", label: "Tool Timeout (sec)", type: "number", min: 10, max: 3600, default: 300 },
+    ]
+  },
+  recon: {
+    title: "Reconnaissance",
+    fields: [
+      { key: "recon.subdomain_enum", label: "Subdomain Enumeration", type: "toggle", default: true },
+      { key: "recon.port_scan", label: "Port Scanning", type: "toggle", default: true },
+      { key: "recon.port_range", label: "Port Range", type: "text", default: "1-1000",
+        desc: "e.g. 1-1000 or 1-65535 or 80,443,8080" },
+      { key: "recon.tech_detection", label: "Technology Detection", type: "toggle", default: true },
+      { key: "recon.js_analysis", label: "JavaScript Analysis", type: "toggle", default: true },
+      { key: "recon.api_discovery", label: "API Discovery", type: "toggle", default: true },
+      { key: "recon.secret_scanning", label: "Secret Scanning", type: "toggle", default: true },
+      { key: "recon.dns_enum", label: "DNS Enumeration", type: "toggle", default: true },
+      { key: "recon.cert_transparency", label: "Certificate Transparency", type: "toggle", default: true },
+      { key: "recon.wayback", label: "Wayback Machine", type: "toggle", default: true },
+    ]
+  },
+  reporting: {
+    title: "Report Generation",
+    fields: [
+      { key: "reporting.format", label: "Report Format", type: "select",
+        options: ["html", "pdf", "markdown", "json", "sarif"] },
+      { key: "reporting.auto_generate", label: "Auto-Generate on Complete", type: "toggle", default: true },
+      { key: "reporting.include_evidence", label: "Include Evidence", type: "toggle", default: true },
+      { key: "reporting.include_remediation", label: "Include Remediation", type: "toggle", default: true },
+      { key: "reporting.include_mitre", label: "Include MITRE Mapping", type: "toggle", default: true },
+      { key: "reporting.include_graph", label: "Include Attack Graph", type: "toggle", default: true },
+      { key: "reporting.company_name", label: "Company Name", type: "text", placeholder: "Client Corp" },
+      { key: "reporting.assessor_name", label: "Assessor Name", type: "text", placeholder: "Security Team" },
+      { key: "reporting.output_dir", label: "Output Directory", type: "text", default: "./reports" },
+    ]
+  },
+  roe: {
+    title: "Rules of Engagement",
+    fields: [
+      { key: "roe.in_scope", label: "In-Scope Domains", type: "textarea",
+        placeholder: "*.target.com\napi.target.com", desc: "One domain/pattern per line" },
+      { key: "roe.out_of_scope", label: "Out-of-Scope Domains", type: "textarea",
+        placeholder: "*.production.com\npayments.target.com" },
+      { key: "roe.allowed_methods", label: "Allowed HTTP Methods", type: "text",
+        default: "GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD" },
+      { key: "roe.testing_window", label: "Testing Window", type: "text",
+        placeholder: "Mon-Fri 09:00-18:00 UTC" },
+      { key: "roe.emergency_contact", label: "Emergency Contact", type: "text",
+        placeholder: "security@target.com" },
+      { key: "roe.authorization_ref", label: "Authorization Reference", type: "text",
+        placeholder: "Contract #12345" },
+      { key: "roe.notes", label: "Additional Notes", type: "textarea", placeholder: "Special instructions..." },
+    ]
+  },
+};
+
+let currentSettings = {};
+let originalSettings = {};
+
+// ── Helpers ──
+function getNestedValue(obj, path) {
+  return path.split(".").reduce((o, k) => (o || {})[k], obj);
+}
+
+function setNestedValue(obj, path, value) {
+  const keys = path.split(".");
+  const last = keys.pop();
+  const target = keys.reduce((o, k) => { if (!o[k]) o[k] = {}; return o[k]; }, obj);
+  target[last] = value;
+}
+
+function showToast(message, type = "info") {
+  const toast = document.getElementById("toast");
+  toast.textContent = message;
+  toast.className = `toast ${type} show`;
+  setTimeout(() => toast.classList.remove("show"), 3000);
+}
+
+// ── Build UI ──
+function buildPanels() {
+  const container = document.getElementById("panels");
+  container.innerHTML = "";
+
+  for (const [panelId, section] of Object.entries(SCHEMA)) {
+    const panel = document.createElement("div");
+    panel.className = `panel ${panelId === "general" ? "active" : ""}`;
+    panel.id = `panel-${panelId}`;
+
+    let html = `<div class="field-group"><h3>${section.title}</h3></div>`;
+
+    section.fields.forEach(f => {
+      const value = getNestedValue(currentSettings, f.key);
+      const displayVal = value !== undefined ? value : (f.default !== undefined ? f.default : "");
+
+      html += `<div class="field" data-key="${f.key}">`;
+      html += `<label>${f.label}</label>`;
+
+      if (f.type === "toggle") {
+        const checked = displayVal ? "checked" : "";
+        html += `<div class="toggle-wrap">
+          <label class="toggle"><input type="checkbox" data-key="${f.key}" ${checked}>
+          <span class="slider"></span></label>
+          <span class="toggle-label">${displayVal ? "Enabled" : "Disabled"}</span></div>`;
+      } else if (f.type === "select") {
+        html += `<select data-key="${f.key}">`;
+        (f.options || []).forEach(opt => {
+          const selected = String(displayVal) === String(opt) ? "selected" : "";
+          html += `<option value="${opt}" ${selected}>${opt}</option>`;
+        });
+        html += `</select>`;
+      } else if (f.type === "textarea") {
+        const textVal = Array.isArray(displayVal) ? displayVal.join("\n") : String(displayVal || "");
+        html += `<textarea data-key="${f.key}" placeholder="${f.placeholder || ""}">${textVal}</textarea>`;
+      } else {
+        const attrs = [];
+        if (f.min !== undefined) attrs.push(`min="${f.min}"`);
+        if (f.max !== undefined) attrs.push(`max="${f.max}"`);
+        if (f.step !== undefined) attrs.push(`step="${f.step}"`);
+        html += `<input type="${f.type}" data-key="${f.key}" value="${displayVal}"
+          placeholder="${f.placeholder || ""}" ${attrs.join(" ")}>`;
+      }
+
+      html += `<span class="error-msg"></span></div>`;
+
+      if (f.desc) {
+        html += `<div class="field"><label></label><span style="font-size:11px;color:var(--muted)">${f.desc}</span></div>`;
+      }
+    });
+
+    panel.innerHTML = html;
+    container.appendChild(panel);
+  }
+
+  // Toggle label updates
+  container.querySelectorAll('.toggle input').forEach(input => {
+    input.addEventListener("change", () => {
+      const label = input.closest(".toggle-wrap").querySelector(".toggle-label");
+      if (label) label.textContent = input.checked ? "Enabled" : "Disabled";
+    });
+  });
+}
+
+// ── Collect values ──
+function collectSettings() {
+  const settings = JSON.parse(JSON.stringify(currentSettings));
+
+  document.querySelectorAll("[data-key]").forEach(el => {
+    const key = el.dataset.key;
+    let value;
+
+    if (el.type === "checkbox") {
+      value = el.checked;
+    } else if (el.type === "number") {
+      value = parseFloat(el.value) || 0;
+    } else if (el.tagName === "TEXTAREA") {
+      // Keep as string (server decides if it splits on newlines)
+      value = el.value;
+    } else {
+      value = el.value;
+    }
+
+    setNestedValue(settings, key, value);
+  });
+
+  return settings;
+}
+
+// ── Validation ──
+function validate() {
+  let valid = true;
+  document.querySelectorAll(".field.error").forEach(f => f.classList.remove("error"));
+
+  document.querySelectorAll("input[type='number']").forEach(input => {
+    const min = parseFloat(input.min);
+    const max = parseFloat(input.max);
+    const val = parseFloat(input.value);
+    if (input.value && ((!isNaN(min) && val < min) || (!isNaN(max) && val > max))) {
+      const field = input.closest(".field");
+      field.classList.add("error");
+      field.querySelector(".error-msg").textContent = `Value must be between ${min} and ${max}`;
+      field.querySelector(".error-msg").style.display = "block";
+      valid = false;
+    }
+  });
+
+  return valid;
+}
+
+// ── Tab switching ──
+document.getElementById("tabs").addEventListener("click", (e) => {
+  const tab = e.target.closest(".tab");
+  if (!tab) return;
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+  tab.classList.add("active");
+  document.getElementById(`panel-${tab.dataset.panel}`).classList.add("active");
+});
+
+// ── Load settings ──
+async function loadSettings() {
+  try {
+    const r = await fetch("/api/settings");
+    if (r.ok) {
+      currentSettings = await r.json();
+      originalSettings = JSON.parse(JSON.stringify(currentSettings));
+      buildPanels();
+      showToast("Settings loaded", "success");
+    } else {
+      // Use defaults
+      currentSettings = {};
+      buildPanels();
+      showToast("Using default settings", "info");
+    }
+  } catch (e) {
+    currentSettings = {};
+    buildPanels();
+    showToast("API unavailable — using defaults", "info");
+  }
+}
+
+// ── Save ──
+document.getElementById("btn-save").addEventListener("click", async () => {
+  if (!validate()) {
+    showToast("Fix validation errors first", "error");
+    return;
+  }
+
+  const settings = collectSettings();
+
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settings),
+    });
+
+    if (r.ok) {
+      currentSettings = settings;
+      originalSettings = JSON.parse(JSON.stringify(settings));
+      showToast("Settings saved successfully", "success");
+    } else {
+      const err = await r.json().catch(() => ({}));
+      showToast(`Save failed: ${err.error || r.statusText}`, "error");
+    }
+  } catch (e) {
+    showToast("Save failed — server unreachable", "error");
+  }
+});
+
+// ── Reset ──
+document.getElementById("btn-reset").addEventListener("click", () => {
+  if (!confirm("Reset all settings to defaults? This cannot be undone.")) return;
+  currentSettings = {};
+  buildPanels();
+  showToast("Settings reset to defaults", "info");
+});
+
+// ── Export ──
+document.getElementById("btn-export").addEventListener("click", () => {
+  const settings = collectSettings();
+  const blob = new Blob([JSON.stringify(settings, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `viper-settings-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast("Settings exported", "success");
+});
+
+// ── Init ──
+loadSettings();
+</script>
+</body>
+</html>

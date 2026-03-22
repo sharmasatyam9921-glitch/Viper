@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — Analytics</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --critical: #ff4444; --high: #ff8c00; --medium: #ffd700;
+  --low: #4da6ff; --info: #888888; --success: #00c853;
+  --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', monospace;
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font); }
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--text); background: rgba(99,102,241,.12); }
+.nav .brand { color: var(--accent2); font-weight: 700; font-size: 15px; margin-right: 12px; }
+
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); }
+.toolbar button { background: var(--accent); color: #fff; border: none; padding: 6px 14px;
+  border-radius: 6px; font-size: 13px; cursor: pointer; }
+.toolbar button.outline { background: transparent; border: 1px solid var(--border); color: var(--text2); }
+.toolbar button.outline:hover { border-color: var(--accent); color: var(--text); }
+.toolbar .spacer { flex: 1; }
+.toolbar .status { font-size: 12px; color: var(--text2); }
+#auto-refresh-indicator { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.on { background: var(--success); }
+.off { background: var(--muted); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 16px; padding: 16px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px; }
+.card h3 { font-size: 13px; color: var(--text2); text-transform: uppercase;
+  letter-spacing: .5px; margin-bottom: 12px; }
+.card canvas { width: 100% !important; max-height: 280px; }
+.card.wide { grid-column: span 2; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .card.wide { grid-column: span 1; } }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand">VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="charts.html" class="active">Analytics</a>
+  <a href="chat.html">Chat</a>
+  <a href="terminal.html">Terminal</a>
+  <a href="settings_ui.html">Settings</a>
+</nav>
+
+<div class="toolbar">
+  <span class="status"><span id="auto-refresh-indicator" class="on"></span> Auto-refresh: 30s</span>
+  <button class="outline" id="btn-toggle-refresh">Pause</button>
+  <div class="spacer"></div>
+  <span class="status" id="last-update"></span>
+  <button id="btn-refresh">Refresh Now</button>
+</div>
+
+<div class="grid">
+  <div class="card"><h3>Severity Distribution</h3><canvas id="c-severity"></canvas></div>
+  <div class="card"><h3>CVSS Score Histogram</h3><canvas id="c-cvss"></canvas></div>
+  <div class="card"><h3>Findings by Type</h3><canvas id="c-type"></canvas></div>
+  <div class="card"><h3>Technologies Detected</h3><canvas id="c-tech"></canvas></div>
+  <div class="card"><h3>Ports Distribution</h3><canvas id="c-ports"></canvas></div>
+  <div class="card"><h3>Attack Chain Success Rate</h3><canvas id="c-chain"></canvas></div>
+  <div class="card wide"><h3>Phase Progression Timeline</h3><canvas id="c-timeline"></canvas></div>
+  <div class="card"><h3>Endpoints by Category</h3><canvas id="c-endpoints"></canvas></div>
+  <div class="card"><h3>Secrets by Type</h3><canvas id="c-secrets"></canvas></div>
+  <div class="card"><h3>MITRE Technique Coverage</h3><canvas id="c-mitre"></canvas></div>
+  <div class="card wide"><h3>Scan Activity Timeline</h3><canvas id="c-activity"></canvas></div>
+  <div class="card"><h3>Top 10 Vulnerable Hosts</h3><canvas id="c-hosts"></canvas></div>
+  <div class="card"><h3>Finding Confidence Distribution</h3><canvas id="c-confidence"></canvas></div>
+  <div class="card"><h3>Attack Types Attempted</h3><canvas id="c-attack-types"></canvas></div>
+  <div class="card"><h3>Service Exposure Map</h3><canvas id="c-exposure"></canvas></div>
+</div>
+
+<script>
+Chart.defaults.color = "#8b949e";
+Chart.defaults.borderColor = "rgba(48,54,61,0.4)";
+Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+
+const SEV_COLORS = { critical: "#ff4444", high: "#ff8c00", medium: "#ffd700", low: "#4da6ff", info: "#888888" };
+const charts = {};
+let autoRefresh = true;
+let refreshTimer = null;
+
+// ── Data fetching helpers ──
+async function fetchJSON(url) {
+  try { const r = await fetch(url); if (r.ok) return await r.json(); } catch(e) {}
+  return null;
+}
+
+function countBy(arr, key) {
+  const m = {};
+  (arr || []).forEach(item => {
+    const v = (typeof key === "function" ? key(item) : item[key]) || "unknown";
+    m[v] = (m[v] || 0) + 1;
+  });
+  return m;
+}
+
+function topN(obj, n=10) {
+  return Object.entries(obj).sort((a,b)=>b[1]-a[1]).slice(0,n);
+}
+
+// ── Chart factories ──
+function makeChart(id, type, config) {
+  const ctx = document.getElementById(id);
+  if (!ctx) return null;
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(ctx, { type, ...config });
+  return charts[id];
+}
+
+function updateChart(id, labels, data, extra={}) {
+  if (!charts[id]) return;
+  const c = charts[id];
+  c.data.labels = labels;
+  if (c.data.datasets[0]) {
+    c.data.datasets[0].data = data;
+    Object.assign(c.data.datasets[0], extra);
+  }
+  c.update("none");
+}
+
+// ── Initialize all charts ──
+function initCharts() {
+  // 1. Severity (donut)
+  makeChart("c-severity", "doughnut", {
+    data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+    options: { responsive: true, plugins: { legend: { position: "right" } }, cutout: "60%" }
+  });
+  // 2. CVSS (bar)
+  makeChart("c-cvss", "bar", {
+    data: { labels: [], datasets: [{ label: "Count", data: [], backgroundColor: "#6366f1" }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { x: { title: { display: true, text: "CVSS Range" } }, y: { beginAtZero: true } } }
+  });
+  // 3. Findings by type (horizontal bar)
+  makeChart("c-type", "bar", {
+    data: { labels: [], datasets: [{ label: "Findings", data: [], backgroundColor: "#818cf8" }] },
+    options: { responsive: true, indexAxis: "y", plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true } } }
+  });
+  // 4. Technologies (bar)
+  makeChart("c-tech", "bar", {
+    data: { labels: [], datasets: [{ label: "Count", data: [], backgroundColor: "#00c853" }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { maxRotation: 45 } }, y: { beginAtZero: true } } }
+  });
+  // 5. Ports (bar)
+  makeChart("c-ports", "bar", {
+    data: { labels: [], datasets: [{ label: "Count", data: [], backgroundColor: "#c084fc" }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true } } }
+  });
+  // 6. Attack chain success (pie)
+  makeChart("c-chain", "pie", {
+    data: { labels: ["Success", "Failed", "Partial"], datasets: [{ data: [0,0,0],
+      backgroundColor: ["#00c853","#ff4444","#ffd700"] }] },
+    options: { responsive: true, plugins: { legend: { position: "right" } } }
+  });
+  // 7. Phase timeline (line)
+  makeChart("c-timeline", "line", {
+    data: { labels: [], datasets: [{ label: "Findings", data: [], borderColor: "#6366f1",
+      backgroundColor: "rgba(99,102,241,0.1)", fill: true, tension: 0.3 }] },
+    options: { responsive: true, scales: { y: { beginAtZero: true } } }
+  });
+  // 8. Endpoints by category (bar)
+  makeChart("c-endpoints", "bar", {
+    data: { labels: [], datasets: [{ label: "Endpoints", data: [], backgroundColor: "#38bdf8" }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true } } }
+  });
+  // 9. Secrets by type (pie)
+  makeChart("c-secrets", "pie", {
+    data: { labels: [], datasets: [{ data: [], backgroundColor: ["#fbbf24","#f59e0b","#d97706","#b45309","#92400e","#78350f"] }] },
+    options: { responsive: true, plugins: { legend: { position: "right" } } }
+  });
+  // 10. MITRE technique coverage (radar)
+  makeChart("c-mitre", "radar", {
+    data: { labels: [], datasets: [{ label: "Techniques", data: [],
+      backgroundColor: "rgba(99,102,241,0.2)", borderColor: "#6366f1", pointBackgroundColor: "#818cf8" }] },
+    options: { responsive: true, scales: { r: { beginAtZero: true, ticks: { display: false } } } }
+  });
+  // 11. Scan activity (area/line)
+  makeChart("c-activity", "line", {
+    data: { labels: [], datasets: [
+      { label: "Scans", data: [], borderColor: "#818cf8", backgroundColor: "rgba(129,140,248,0.1)", fill: true, tension: 0.3 },
+      { label: "Findings", data: [], borderColor: "#ff4444", backgroundColor: "rgba(255,68,68,0.1)", fill: true, tension: 0.3 },
+    ]},
+    options: { responsive: true, scales: { y: { beginAtZero: true } } }
+  });
+  // 12. Top 10 vulnerable hosts (horizontal bar)
+  makeChart("c-hosts", "bar", {
+    data: { labels: [], datasets: [{ label: "Vulnerabilities", data: [], backgroundColor: "#ff6b6b" }] },
+    options: { responsive: true, indexAxis: "y", plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true } } }
+  });
+  // 13. Finding confidence (histogram/bar)
+  makeChart("c-confidence", "bar", {
+    data: { labels: [], datasets: [{ label: "Count", data: [], backgroundColor: "#a78bfa" }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { x: { title: { display: true, text: "Confidence %" } }, y: { beginAtZero: true } } }
+  });
+  // 14. Attack types attempted (bar)
+  makeChart("c-attack-types", "bar", {
+    data: { labels: [], datasets: [{ label: "Attempts", data: [], backgroundColor: "#ff8c00" }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { maxRotation: 45 } }, y: { beginAtZero: true } } }
+  });
+  // 15. Service exposure (bubble)
+  makeChart("c-exposure", "bubble", {
+    data: { datasets: [{ label: "Services", data: [], backgroundColor: "rgba(224,135,249,0.6)" }] },
+    options: { responsive: true,
+      scales: { x: { title: { display: true, text: "Port" } }, y: { title: { display: true, text: "Hosts" }, beginAtZero: true } } }
+  });
+}
+
+// ── Refresh data ──
+async function refreshAll() {
+  const [overview, findings, byType, bySev, timeline, graph, attacks, attackStats] = await Promise.all([
+    fetchJSON("/api/overview"),
+    fetchJSON("/api/findings?limit=500"),
+    fetchJSON("/api/findings/by-type"),
+    fetchJSON("/api/findings/by-severity"),
+    fetchJSON("/api/findings/timeline"),
+    fetchJSON("/api/evograph/graph"),
+    fetchJSON("/api/attacks/history"),
+    fetchJSON("/api/attacks/stats"),
+  ]);
+
+  const allFindings = findings?.findings || findings?.items || (Array.isArray(findings) ? findings : []);
+
+  // 1. Severity distribution
+  if (bySev) {
+    const items = Array.isArray(bySev) ? bySev : Object.entries(bySev).map(([k,v])=>({severity:k,count:v}));
+    const labels = items.map(i => i.severity || i.label || i.name);
+    const data = items.map(i => i.count || i.value || 0);
+    const colors = labels.map(l => SEV_COLORS[l.toLowerCase()] || "#6e7681");
+    updateChart("c-severity", labels, data, { backgroundColor: colors });
+  }
+
+  // 2. CVSS histogram
+  {
+    const buckets = {"0-1":0,"1-2":0,"2-3":0,"3-4":0,"4-5":0,"5-6":0,"6-7":0,"7-8":0,"8-9":0,"9-10":0};
+    allFindings.forEach(f => {
+      const cvss = parseFloat(f.cvss || f.cvss_score || 0);
+      if (cvss > 0) {
+        const idx = Math.min(Math.floor(cvss), 9);
+        const key = `${idx}-${idx+1}`;
+        if (buckets[key] !== undefined) buckets[key]++;
+      }
+    });
+    updateChart("c-cvss", Object.keys(buckets), Object.values(buckets));
+  }
+
+  // 3. Findings by type
+  if (byType) {
+    const items = Array.isArray(byType) ? byType : Object.entries(byType).map(([k,v])=>({type:k,count:v}));
+    const sorted = items.sort((a,b) => (b.count||0) - (a.count||0)).slice(0, 12);
+    updateChart("c-type", sorted.map(i=>i.type||i.label||i.name), sorted.map(i=>i.count||i.value||0));
+  }
+
+  // 4. Technologies
+  if (graph) {
+    const techs = (graph.nodes || []).filter(n =>
+      (n.node_type||n.type||"").toLowerCase() === "technology");
+    const techCount = countBy(techs, n => n.label || n.name || n.id);
+    const top = topN(techCount, 12);
+    updateChart("c-tech", top.map(t=>t[0]), top.map(t=>t[1]));
+  }
+
+  // 5. Ports
+  if (graph) {
+    const ports = (graph.nodes || []).filter(n =>
+      (n.node_type||n.type||"").toLowerCase() === "port");
+    const portCount = countBy(ports, n => n.label || n.name || n.id);
+    const top = topN(portCount, 15);
+    updateChart("c-ports", top.map(t=>t[0]), top.map(t=>t[1]));
+  }
+
+  // 6. Attack chain success
+  if (attackStats) {
+    const s = attackStats.success || attackStats.successful || 0;
+    const f = attackStats.failed || 0;
+    const p = attackStats.partial || 0;
+    updateChart("c-chain", ["Success","Failed","Partial"], [s, f, p]);
+  }
+
+  // 7. Phase timeline
+  if (timeline) {
+    const items = Array.isArray(timeline) ? timeline : (timeline.timeline || timeline.items || []);
+    updateChart("c-timeline", items.map(i => i.time || i.date || i.label), items.map(i => i.count || i.value || 0));
+  }
+
+  // 8. Endpoints by category
+  if (graph) {
+    const eps = (graph.nodes || []).filter(n =>
+      (n.node_type||n.type||"").toLowerCase() === "endpoint");
+    const cats = countBy(eps, n => {
+      const url = (n.label || n.name || n.id || "").toLowerCase();
+      if (url.includes("api")) return "API";
+      if (url.includes("auth") || url.includes("login")) return "Auth";
+      if (url.includes("admin")) return "Admin";
+      if (url.includes("upload")) return "Upload";
+      if (url.match(/\.(js|css|png|jpg|svg|woff)/)) return "Static";
+      return "Other";
+    });
+    const entries = Object.entries(cats).sort((a,b)=>b[1]-a[1]);
+    updateChart("c-endpoints", entries.map(e=>e[0]), entries.map(e=>e[1]));
+  }
+
+  // 9. Secrets by type
+  if (graph) {
+    const secrets = (graph.nodes || []).filter(n =>
+      (n.node_type||n.type||"").toLowerCase() === "secret");
+    const types = countBy(secrets, n => n.label || n.name || "unknown");
+    const top = topN(types, 6);
+    updateChart("c-secrets", top.map(t=>t[0]), top.map(t=>t[1]));
+  }
+
+  // 10. MITRE technique coverage
+  {
+    const techniques = {};
+    allFindings.forEach(f => {
+      const mitre = f.mitre_id || f.mitre || f.technique_id || "";
+      if (mitre) {
+        const tactic = mitre.split(".")[0] || mitre;
+        techniques[tactic] = (techniques[tactic] || 0) + 1;
+      }
+    });
+    const top = topN(techniques, 10);
+    if (top.length > 0) {
+      updateChart("c-mitre", top.map(t=>t[0]), top.map(t=>t[1]));
+    } else {
+      // Fallback: show empty radar with sample tactics
+      const tactics = ["Recon","Initial Access","Execution","Persistence","Priv Esc","Defense Evasion","Discovery","Collection"];
+      updateChart("c-mitre", tactics, tactics.map(()=>0));
+    }
+  }
+
+  // 11. Scan activity timeline
+  if (attacks) {
+    const items = Array.isArray(attacks) ? attacks : (attacks.history || attacks.items || []);
+    // Group by hour
+    const byHour = {};
+    items.forEach(a => {
+      const ts = a.timestamp || a.time || a.created_at || "";
+      const hour = ts.substring(0, 13) || "unknown";
+      if (!byHour[hour]) byHour[hour] = { scans: 0, findings: 0 };
+      byHour[hour].scans++;
+      if (a.success || a.found) byHour[hour].findings++;
+    });
+    const sorted = Object.entries(byHour).sort();
+    const c = charts["c-activity"];
+    if (c) {
+      c.data.labels = sorted.map(s => s[0]);
+      c.data.datasets[0].data = sorted.map(s => s[1].scans);
+      c.data.datasets[1].data = sorted.map(s => s[1].findings);
+      c.update("none");
+    }
+  }
+
+  // 12. Top 10 vulnerable hosts
+  {
+    const hostCount = countBy(allFindings, f => f.domain || f.host || f.target || "unknown");
+    const top = topN(hostCount, 10);
+    updateChart("c-hosts", top.map(t=>t[0]), top.map(t=>t[1]));
+  }
+
+  // 13. Finding confidence
+  {
+    const buckets = {"0-20":0,"20-40":0,"40-60":0,"60-80":0,"80-100":0};
+    allFindings.forEach(f => {
+      const conf = parseFloat(f.confidence || f.confidence_pct || 50);
+      if (conf <= 20) buckets["0-20"]++;
+      else if (conf <= 40) buckets["20-40"]++;
+      else if (conf <= 60) buckets["40-60"]++;
+      else if (conf <= 80) buckets["60-80"]++;
+      else buckets["80-100"]++;
+    });
+    updateChart("c-confidence", Object.keys(buckets), Object.values(buckets));
+  }
+
+  // 14. Attack types attempted
+  if (attacks) {
+    const items = Array.isArray(attacks) ? attacks : (attacks.history || attacks.items || []);
+    const types = countBy(items, a => a.attack_type || a.type || a.tool || "unknown");
+    const top = topN(types, 12);
+    updateChart("c-attack-types", top.map(t=>t[0]), top.map(t=>t[1]));
+  }
+
+  // 15. Service exposure (bubble)
+  if (graph) {
+    const services = (graph.nodes || []).filter(n =>
+      ["service","port"].includes((n.node_type||n.type||"").toLowerCase()));
+    const bubbles = [];
+    const seen = new Set();
+    services.forEach(s => {
+      const label = s.label || s.name || s.id || "";
+      const port = parseInt(label) || parseInt(label.split("/")[0]) || Math.random()*65535;
+      if (!seen.has(label)) {
+        seen.add(label);
+        const neighbors = (s.neighbors_count || s.degree || 1);
+        bubbles.push({ x: port, y: neighbors, r: Math.max(4, Math.min(neighbors * 2, 20)), label });
+      }
+    });
+    const c = charts["c-exposure"];
+    if (c) {
+      c.data.datasets[0].data = bubbles;
+      c.update("none");
+    }
+  }
+
+  document.getElementById("last-update").textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+}
+
+// ── Auto-refresh ──
+function startAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refreshAll, 30000);
+  autoRefresh = true;
+  document.getElementById("auto-refresh-indicator").className = "on";
+  document.getElementById("btn-toggle-refresh").textContent = "Pause";
+}
+
+function stopAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = null;
+  autoRefresh = false;
+  document.getElementById("auto-refresh-indicator").className = "off";
+  document.getElementById("btn-toggle-refresh").textContent = "Resume";
+}
+
+document.getElementById("btn-toggle-refresh").addEventListener("click", () => {
+  autoRefresh ? stopAutoRefresh() : startAutoRefresh();
+});
+document.getElementById("btn-refresh").addEventListener("click", refreshAll);
+
+// ── Init ──
+initCharts();
+refreshAll();
+startAutoRefresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — Terminal</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --success: #00c853; --danger: #ef4444;
+  --font: 'Inter', system-ui, sans-serif;
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; flex-shrink: 0; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--text); background: rgba(99,102,241,.12); }
+.nav .brand { color: var(--accent2); font-weight: 700; font-size: 15px; margin-right: 12px; }
+.nav .spacer { flex: 1; }
+.nav .status { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; }
+.ws-dot.connected { background: var(--success); }
+.ws-dot.disconnected { background: var(--danger); }
+.ws-dot.connecting { background: var(--accent2); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.toolbar button { background: transparent; border: 1px solid var(--border); color: var(--text2);
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: .2s; }
+.toolbar button:hover { border-color: var(--accent); color: var(--text); }
+.toolbar select { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  padding: 4px 8px; border-radius: 6px; font-size: 12px; outline: none; }
+
+#terminal-container { flex: 1; padding: 4px; background: #1a1b26; }
+#terminal-container .xterm { height: 100%; }
+
+.reconnect-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: rgba(13,17,23,.95); border: 1px solid var(--border); border-radius: 12px;
+  padding: 24px 32px; text-align: center; display: none; z-index: 100; }
+.reconnect-overlay.show { display: block; }
+.reconnect-overlay h3 { color: var(--accent2); margin-bottom: 8px; font-size: 16px; }
+.reconnect-overlay p { color: var(--text2); font-size: 13px; margin-bottom: 12px; }
+.reconnect-overlay button { background: var(--accent); color: #fff; border: none;
+  padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand">VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="charts.html">Analytics</a>
+  <a href="chat.html">Chat</a>
+  <a href="terminal.html" class="active">Terminal</a>
+  <a href="settings_ui.html">Settings</a>
+  <div class="spacer"></div>
+  <div class="status">
+    <span class="ws-dot disconnected" id="ws-dot"></span>
+    <span id="ws-status">Disconnected</span>
+  </div>
+</nav>
+
+<div class="toolbar">
+  <button id="btn-reconnect">Reconnect</button>
+  <button id="btn-clear">Clear</button>
+  <button id="btn-copy">Copy Selection</button>
+  <select id="font-size">
+    <option value="12">12px</option>
+    <option value="14" selected>14px</option>
+    <option value="16">16px</option>
+    <option value="18">18px</option>
+  </select>
+</div>
+
+<div id="terminal-container" style="position:relative;">
+  <div class="reconnect-overlay" id="reconnect-overlay">
+    <h3>Connection Lost</h3>
+    <p>Terminal WebSocket disconnected.</p>
+    <button onclick="connectTerminal()">Reconnect</button>
+  </div>
+</div>
+
+<script>
+const TERM_WS_URL = `ws://${location.hostname || "localhost"}:8082`;
+const wsDot = document.getElementById("ws-dot");
+const wsStatusEl = document.getElementById("ws-status");
+const overlay = document.getElementById("reconnect-overlay");
+
+// ── Monokai-inspired dark theme ──
+const theme = {
+  background: "#1a1b26",
+  foreground: "#c0caf5",
+  cursor: "#c0caf5",
+  cursorAccent: "#1a1b26",
+  selectionBackground: "rgba(99, 102, 241, 0.3)",
+  black: "#15161e",
+  red: "#f7768e",
+  green: "#9ece6a",
+  yellow: "#e0af68",
+  blue: "#7aa2f7",
+  magenta: "#bb9af7",
+  cyan: "#7dcfff",
+  white: "#a9b1d6",
+  brightBlack: "#414868",
+  brightRed: "#f7768e",
+  brightGreen: "#9ece6a",
+  brightYellow: "#e0af68",
+  brightBlue: "#7aa2f7",
+  brightMagenta: "#bb9af7",
+  brightCyan: "#7dcfff",
+  brightWhite: "#c0caf5",
+};
+
+// ── Terminal init ──
+const term = new Terminal({
+  theme,
+  fontFamily: "'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Menlo', monospace",
+  fontSize: 14,
+  cursorBlink: true,
+  cursorStyle: "bar",
+  allowTransparency: true,
+  scrollback: 5000,
+  convertEol: true,
+});
+
+const fitAddon = new FitAddon.FitAddon();
+const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+term.loadAddon(fitAddon);
+term.loadAddon(webLinksAddon);
+
+const container = document.getElementById("terminal-container");
+term.open(container);
+fitAddon.fit();
+
+// Handle resize
+window.addEventListener("resize", () => { fitAddon.fit(); sendResize(); });
+new ResizeObserver(() => { fitAddon.fit(); sendResize(); }).observe(container);
+
+// ── WebSocket connection ──
+let ws = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 10;
+
+function setStatus(status) {
+  wsDot.className = `ws-dot ${status}`;
+  wsStatusEl.textContent = status === "connected" ? "Connected" :
+    status === "connecting" ? "Connecting..." : "Disconnected";
+  overlay.classList.toggle("show", status === "disconnected" && reconnectAttempts >= 3);
+}
+
+function sendResize() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  }
+}
+
+function connectTerminal() {
+  if (ws && ws.readyState <= WebSocket.OPEN) {
+    ws.close();
+  }
+
+  setStatus("connecting");
+  overlay.classList.remove("show");
+
+  try {
+    ws = new WebSocket(TERM_WS_URL);
+  } catch (e) {
+    setStatus("disconnected");
+    term.writeln("\r\n\x1b[31mWebSocket connection failed. Terminal server not available.\x1b[0m");
+    term.writeln("\x1b[33mStart the terminal server: python dashboard/terminal_server.py\x1b[0m\r\n");
+    return;
+  }
+
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    setStatus("connected");
+    reconnectAttempts = 0;
+    term.writeln("\r\n\x1b[32m[Connected to terminal]\x1b[0m\r\n");
+    sendResize();
+  };
+
+  ws.onmessage = (evt) => {
+    if (typeof evt.data === "string") {
+      // JSON control message
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === "output") {
+          term.write(msg.data);
+        }
+      } catch (e) {
+        term.write(evt.data);
+      }
+    } else {
+      // Binary data
+      term.write(new Uint8Array(evt.data));
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus("disconnected");
+    reconnectAttempts++;
+    if (reconnectAttempts < MAX_RECONNECT) {
+      const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), 10000);
+      setTimeout(connectTerminal, delay);
+    } else {
+      term.writeln("\r\n\x1b[31m[Disconnected — max reconnect attempts reached]\x1b[0m");
+      overlay.classList.add("show");
+    }
+  };
+
+  ws.onerror = () => {};
+}
+
+// ── Terminal input ──
+term.onData((data) => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "input", data }));
+  }
+});
+
+// ── Toolbar actions ──
+document.getElementById("btn-reconnect").addEventListener("click", () => {
+  reconnectAttempts = 0;
+  connectTerminal();
+});
+
+document.getElementById("btn-clear").addEventListener("click", () => {
+  term.clear();
+});
+
+document.getElementById("btn-copy").addEventListener("click", () => {
+  const sel = term.getSelection();
+  if (sel) {
+    navigator.clipboard.writeText(sel).then(() => {
+      // Brief visual feedback
+      const btn = document.getElementById("btn-copy");
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy Selection", 1500);
+    });
+  }
+});
+
+document.getElementById("font-size").addEventListener("change", (e) => {
+  term.options.fontSize = parseInt(e.target.value);
+  fitAddon.fit();
+});
+
+// ── Clipboard paste ──
+document.addEventListener("paste", (e) => {
+  const text = e.clipboardData.getData("text");
+  if (text && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "input", data: text }));
+  }
+});
+
+// ── Init ──
+term.writeln("\x1b[1;35m   __     _____ ____  _____ ____    _  _    ___  \x1b[0m");
+term.writeln("\x1b[1;35m   \\ \\   / /_ _|  _ \\| ____|  _ \\  | || |  / _ \\ \x1b[0m");
+term.writeln("\x1b[1;35m    \\ \\ / / | || |_) |  _| | |_) | | || |_| | | |\x1b[0m");
+term.writeln("\x1b[1;35m     \\ V /  | ||  __/| |___|  _ <  |__   _| |_| |\x1b[0m");
+term.writeln("\x1b[1;35m      \\_/  |___|_|   |_____|_| \\_\\    |_|(_)___/ \x1b[0m");
+term.writeln("");
+term.writeln("\x1b[36mConnecting to terminal server...\x1b[0m");
+term.writeln("");
+
+connectTerminal();
+</script>
+</body>
+</html>

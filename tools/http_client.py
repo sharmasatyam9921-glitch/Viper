@@ -36,35 +36,101 @@ class RequestResult:
 
 class RateLimiter:
     """Respect rate limits like a good hacker."""
-    
+
     def __init__(self, requests_per_second: float = 2.0):
         self.rps = requests_per_second
         self.min_interval = 1.0 / requests_per_second
         self.last_request: Dict[str, float] = {}  # domain -> timestamp
         self.backoff: Dict[str, float] = {}  # domain -> backoff multiplier
-    
+
     async def wait(self, domain: str):
         """Wait if needed before making request."""
         now = time.time()
-        
+
         if domain in self.last_request:
             elapsed = now - self.last_request[domain]
             wait_time = self.min_interval * self.backoff.get(domain, 1.0)
-            
+
             if elapsed < wait_time:
                 await asyncio.sleep(wait_time - elapsed)
-        
+
         self.last_request[domain] = time.time()
-    
+
     def got_rate_limited(self, domain: str):
         """Increase backoff for domain."""
         current = self.backoff.get(domain, 1.0)
         self.backoff[domain] = min(current * 2, 60.0)  # Max 60s backoff
-    
+
     def reset_backoff(self, domain: str):
         """Reset backoff after successful request."""
         if domain in self.backoff:
             del self.backoff[domain]
+
+
+class AdaptiveRateLimiter(RateLimiter):
+    """
+    Enhanced rate limiter with per-domain tracking, 429 detection,
+    exponential backoff, and auto-pause after repeated rate limits.
+    """
+
+    def __init__(self, default_rps: float = 2.0, per_domain_limits: Dict[str, float] = None):
+        super().__init__(default_rps)
+        self.per_domain_limits = per_domain_limits or {}
+        self.consecutive_429s: Dict[str, int] = {}
+        self.paused_until: Dict[str, float] = {}  # domain -> timestamp
+
+    async def wait(self, domain: str):
+        """Wait with adaptive timing and per-domain limits."""
+        now = time.time()
+
+        # Check if domain is paused
+        if domain in self.paused_until:
+            if now < self.paused_until[domain]:
+                wait = self.paused_until[domain] - now
+                await asyncio.sleep(wait)
+            else:
+                del self.paused_until[domain]
+
+        # Use per-domain RPS if set, otherwise default
+        rps = self.per_domain_limits.get(domain, self.rps)
+        min_interval = 1.0 / rps
+
+        if domain in self.last_request:
+            elapsed = now - self.last_request[domain]
+            wait_time = min_interval * self.backoff.get(domain, 1.0)
+            if elapsed < wait_time:
+                await asyncio.sleep(wait_time - elapsed)
+
+        self.last_request[domain] = time.time()
+
+    def got_rate_limited(self, domain: str, retry_after: Optional[int] = None):
+        """Track 429s with exponential backoff and auto-pause."""
+        self.consecutive_429s[domain] = self.consecutive_429s.get(domain, 0) + 1
+
+        if retry_after:
+            self.backoff[domain] = retry_after
+        else:
+            current = self.backoff.get(domain, 1.0)
+            self.backoff[domain] = min(current * 2, 120.0)
+
+        # Auto-pause after 5 consecutive 429s
+        if self.consecutive_429s[domain] >= 5:
+            self.paused_until[domain] = time.time() + 300.0  # 5 min pause
+
+    def reset_backoff(self, domain: str):
+        """Reset backoff and 429 counter after successful request."""
+        if domain in self.backoff:
+            del self.backoff[domain]
+        if domain in self.consecutive_429s:
+            del self.consecutive_429s[domain]
+
+    def set_domain_limit(self, domain: str, rps: float):
+        """Set per-domain rate limit."""
+        self.per_domain_limits[domain] = rps
+
+    def is_paused(self, domain: str) -> bool:
+        """Check if a domain is currently paused."""
+        return domain in self.paused_until and time.time() < self.paused_until[domain]
 
 
 USER_AGENTS = [
@@ -141,7 +207,7 @@ class HackerHTTPClient:
         verify_ssl: bool = True,
         rotate_ua: bool = True,
     ):
-        self.rate_limiter = RateLimiter(requests_per_second)
+        self.rate_limiter = AdaptiveRateLimiter(requests_per_second)
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.proxy = proxy
         self.verify_ssl = verify_ssl
@@ -267,7 +333,14 @@ class HackerHTTPClient:
                 rate_limited = response.status == 429
                 if rate_limited:
                     self.rate_limits_hit += 1
-                    self.rate_limiter.got_rate_limited(domain)
+                    retry_after = None
+                    ra_header = response.headers.get("Retry-After")
+                    if ra_header:
+                        try:
+                            retry_after = int(ra_header)
+                        except ValueError:
+                            pass
+                    self.rate_limiter.got_rate_limited(domain, retry_after=retry_after)
                 else:
                     self.rate_limiter.reset_backoff(domain)
                 
