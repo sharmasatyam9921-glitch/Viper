@@ -1,12 +1,18 @@
 """
 VIPER 4.0 Approval Gate — CLI-based approval for phase transitions and dangerous tools.
 Supports interactive (prompt user) and daemon (auto-approve) modes.
+
+F4: Tool Confirmation Gate — fine-grained tool-level confirmations with
+    dangerous-tool detection (name match + argument-pattern match).
 """
 
+import logging
 import sys
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from .agent_state import PhaseTransitionRequest, ToolConfirmationRequest
+
+logger = logging.getLogger("viper.approval")
 
 # ── ANSI colors (graceful fallback if terminal doesn't support them) ──────
 
@@ -26,6 +32,8 @@ def _dim(t: str) -> str: return _c("2", t)
 
 
 # ── Default dangerous tools ──────────────────────────────────────────────
+# Exact tool-name matches.  For tools that are only dangerous with
+# specific arguments (e.g. "nmap -sU"), see DANGEROUS_ARG_PATTERNS below.
 
 DEFAULT_DANGEROUS_TOOLS = {
     "execute_nmap",
@@ -38,6 +46,30 @@ DEFAULT_DANGEROUS_TOOLS = {
     "msf_restart",
     "brute_force",
     "post_exploit",
+}
+
+# Extended set: well-known offensive tool names (F4)
+DANGEROUS_TOOLS = DEFAULT_DANGEROUS_TOOLS | {
+    "sqlmap", "hydra", "msfconsole", "msfvenom",
+    "nuclei --severity critical", "nmap -sU", "nmap --script exploit",
+    "reverse_shell", "bind_shell", "file_upload",
+}
+
+# Argument patterns that elevate a *safe* tool to dangerous status.
+# Keys are tool-name prefixes, values are (arg_key, substring) pairs.
+DANGEROUS_ARG_PATTERNS: Dict[str, list] = {
+    "nuclei_scan": [("severity", "critical")],
+    "execute_nmap": [
+        ("flags", "-sU"),
+        ("flags", "--script exploit"),
+        ("flags", "--script vuln"),
+    ],
+    "kali_shell": [
+        ("command", "reverse_shell"),
+        ("command", "bind_shell"),
+        ("command", "msfvenom"),
+        ("command", "msfconsole"),
+    ],
 }
 
 
@@ -65,11 +97,111 @@ class ApprovalGate:
     ):
         self.auto_approve = auto_approve
         self.dangerous_tools = dangerous_tools if dangerous_tools is not None else DEFAULT_DANGEROUS_TOOLS
+        # Merge extended DANGEROUS_TOOLS into instance set so callers that
+        # pass a custom set still benefit from the baseline.
+        self.dangerous_tools = self.dangerous_tools | DANGEROUS_TOOLS
+
+    # ── F4: Tool-level confirmation gate ──────────────────────────────
+
+    def is_dangerous(self, tool_name: str, args: Optional[dict] = None) -> bool:
+        """Check if a tool requires confirmation.
+
+        Matches against:
+          1. Exact tool name in the dangerous-tools set.
+          2. Argument patterns defined in DANGEROUS_ARG_PATTERNS.
+        """
+        if tool_name in self.dangerous_tools:
+            return True
+
+        # Check argument-based escalation
+        if args:
+            for prefix, patterns in DANGEROUS_ARG_PATTERNS.items():
+                if not tool_name.startswith(prefix):
+                    continue
+                for arg_key, substring in patterns:
+                    val = str(args.get(arg_key, "")).lower()
+                    if substring.lower() in val:
+                        return True
+
+        return False
+
+    async def confirm_tool(
+        self,
+        tool_name: str,
+        args: dict,
+        rationale: str,
+    ) -> Tuple[bool, dict]:
+        """Ask the user to confirm a dangerous tool execution.
+
+        Returns ``(approved, modified_args)``.
+
+        * In daemon / auto-approve mode: always returns ``(True, args)``.
+        * In interactive mode: prints tool details and waits for y/n/m(odify).
+        """
+        if not self.is_dangerous(tool_name, args):
+            return True, args
+
+        if self.auto_approve:
+            logger.debug("Auto-approving dangerous tool %s", tool_name)
+            return True, args
+
+        # ── Interactive CLI prompt ────────────────────────────────────
+        print()
+        print(_separator("="))
+        print(_bold(_red("  TOOL CONFIRMATION REQUIRED")))
+        print(_separator("="))
+        print(f"  Tool      : {_red(tool_name)}")
+        print(f"  Rationale : {rationale}")
+
+        if args:
+            print(f"\n  {_bold('Arguments:')}")
+            for k, v in args.items():
+                val_str = str(v)
+                if len(val_str) > 200:
+                    val_str = val_str[:200] + "..."
+                print(f"    {k}: {val_str}")
+
+        print(_separator("-"))
+        print(f"  {_green('[y]')} Approve   {_yellow('[m]')} Modify args   {_red('[n]')} Reject")
+        print(_separator("-"))
+
+        while True:
+            try:
+                choice = input("  Decision> ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return False, args
+
+            if choice in ("y", "yes", "approve"):
+                return True, args
+            elif choice in ("m", "modify"):
+                modified = dict(args) if args else {}
+                print(f"  {_dim('Enter key=value pairs, one per line. Empty line to finish.')}")
+                while True:
+                    try:
+                        line = input("    > ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        break
+                    if not line:
+                        break
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        modified[k.strip()] = v.strip()
+                    else:
+                        print(f"    {_dim('Format: key=value')}")
+                return True, modified
+            elif choice in ("n", "no", "reject"):
+                return False, args
+            else:
+                print(f"  {_dim('Enter y, m, or n')}")
 
     # ── Phase transitions ─────────────────────────────────────────────
 
     def is_dangerous_tool(self, tool_name: str) -> bool:
-        """Return True if *tool_name* is in the dangerous-tools set."""
+        """Return True if *tool_name* is in the dangerous-tools set.
+        (Legacy alias — prefer ``is_dangerous()`` which also checks args.)
+        """
         return tool_name in self.dangerous_tools
 
     def check_phase_transition(

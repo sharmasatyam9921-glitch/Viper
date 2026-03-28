@@ -1,0 +1,102 @@
+{
+  "permissions": {
+    "filesystem": {
+      "allowedPaths": [
+        "C:\\Users\\sharm\\clawd\\skills\\hackagent",
+        "C:\\Users\\sharm\\clawd\\skills\\hackagent\\**"
+      ],
+      "readOnly": false,
+      "allowSymlinks": false
+    },
+    "network": {
+      "allowLocalhost": true,
+      "allowPrivateNetworks": false,
+      "allowedDomains": [
+        "*.hackerone.com",
+        "*.yogosha.com", 
+        "*.intigriti.com",
+        "*.github.com",
+        "*.githubusercontent.com"
+      ],
+      "allowArbitraryRequests": false,
+      "scopeValidation": true,
+      "requireScopeFile": true
+    },
+    "execution": {
+      "allowShellCommands": true,
+      "allowedCommands": [
+        "nuclei",
+        "subfinder", 
+        "httpx",
+        "nmap",
+        "python",
+        "powershell",
+        "curl",
+        "dig",
+        "nslookup"
+      ],
+      "workingDirectory": "C:\\Users\\sharm\\clawd\\skills\\hackagent",
+      "environmentVariables": {
+        "PYTHONPATH": "C:\\Users\\sharm\\clawd\\skills\\hackagent"
+      }
+    },
+    "apis": {
+      "hackerone": {
+        "credentialsFile": ".env",
+        "rateLimiting": true
+      },
+      "nuclei": {
+        "credentialsFile": ".env",
+        "allowTemplateUpdates": true
+      }
+    }
+  },
+  "bugBountyConstraints": {
+    "requireScopeValidation": true,
+    "scopeFile": "scopes/current_scope.json",
+    "ethicalGuidelines": {
+      "noDestructiveActions": true,
+      "respectRateLimits": true,
+      "requirePoCValidation": true,
+      "noSensitiveDataAccess": true
+    },
+    "targetValidation": {
+      "verifyInScope": true,
+      "checkExclusions": true,
+      "validateSubdomains": true
+    }
+  },
+  "aiModelRouting": {
+    "defaultModel": "anthropic/claude-3-sonnet-20241022",
+    "taskSpecificModels": {
+      "vulnerability_analysis": "anthropic/claude-3-opus-20240229",
+      "report_generation": "anthropic/claude-3-sonnet-20241022", 
+      "quick_verification": "google/gemini-flash-1.5-8b",
+      "exploit_development": "anthropic/claude-3-opus-20240229"
+    },
+    "fallbackModel": "anthropic/claude-3-haiku-20240307"
+  },
+  "outputConfiguration": {
+    "findingsDirectory": "findings/",
+    "reportsDirectory": "reports/",
+    "logsDirectory": "logs/",
+    "stateFile": "state/viper_state.json",
+    "submissionTracker": "state/submission_tracker.json"
+  },
+  "scanConfiguration": {
+    "maxConcurrentTargets": 3,
+    "defaultIntensity": "moderate",
+    "timeoutSettings": {
+      "reconnaissance": 300,
+      "vulnerability_scanning": 600,
+      "exploitation": 180
+    },
+    "retryAttempts": 2
+  },
+  "notificationSettings": {
+    "enabled": true,
+    "channels": ["discord", "telegram"],
+    "severityThreshold": "medium",
+    "realTimeUpdates": true
+  }
+}

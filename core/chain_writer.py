@@ -11,10 +11,101 @@ Inspired by open-source pentesting frameworks.
 import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("viper.chain_writer")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# G7: Granular Finding Types
+# ═══════════════════════════════════════════════════════════════════
+
+class FindingType(Enum):
+    """20+ typed finding categories for attack chain granularity."""
+    SERVICE_IDENTIFIED = "service_identified"
+    VULNERABILITY_CONFIRMED = "vulnerability_confirmed"
+    EXPLOIT_SUCCESS = "exploit_success"
+    ACCESS_GAINED = "access_gained"
+    PRIVILEGE_ESCALATION = "privilege_escalation"
+    CREDENTIAL_FOUND = "credential_found"
+    DATA_ACCESSED = "data_accessed"
+    DEFENSE_DETECTED = "defense_detected"
+    DEFENSE_BYPASSED = "defense_bypassed"
+    LATERAL_MOVEMENT = "lateral_movement"
+    PERSISTENCE_ESTABLISHED = "persistence_established"
+    INFORMATION_DISCLOSURE = "information_disclosure"
+    CONFIGURATION_ISSUE = "configuration_issue"
+    AUTHENTICATION_BYPASS = "authentication_bypass"
+    INJECTION_CONFIRMED = "injection_confirmed"
+    FILE_ACCESS = "file_access"
+    COMMAND_EXECUTION = "command_execution"
+    NETWORK_ACCESS = "network_access"
+    SECRET_FOUND = "secret_found"
+    MISCONFIGURATION = "misconfiguration"
+    # Extended types from RedAmon
+    DATA_EXFILTRATION = "data_exfiltration"
+    DENIAL_OF_SERVICE = "denial_of_service_success"
+    SOCIAL_ENGINEERING = "social_engineering_success"
+    REMOTE_CODE_EXECUTION = "remote_code_execution"
+    SESSION_HIJACKED = "session_hijacked"
+    CUSTOM = "custom"
+
+
+@dataclass
+class TypedFinding:
+    """
+    A granular, typed finding for attack chain enrichment.
+
+    Each finding carries a FindingType, severity, confidence score,
+    description, related CVEs/IPs, and raw evidence.
+    """
+    finding_type: FindingType
+    severity: str = "info"          # critical, high, medium, low, info
+    confidence: float = 0.8         # 0.0 - 1.0
+    description: str = ""
+    related_cves: List[str] = field(default_factory=list)
+    related_ips: List[str] = field(default_factory=list)
+    evidence: str = ""
+    title: str = ""
+    url: str = ""
+    step_id: str = ""
+
+    def to_dict(self) -> Dict:
+        return {
+            "finding_type": self.finding_type.value,
+            "severity": self.severity,
+            "confidence": self.confidence,
+            "description": self.description,
+            "related_cves": self.related_cves,
+            "related_ips": self.related_ips,
+            "evidence": self.evidence[:5000],
+            "title": self.title,
+            "url": self.url,
+            "step_id": self.step_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "TypedFinding":
+        ft = data.get("finding_type", "custom")
+        try:
+            finding_type = FindingType(ft)
+        except ValueError:
+            finding_type = FindingType.CUSTOM
+        return cls(
+            finding_type=finding_type,
+            severity=data.get("severity", "info"),
+            confidence=data.get("confidence", 0.8),
+            description=data.get("description", ""),
+            related_cves=data.get("related_cves", []),
+            related_ips=data.get("related_ips", []),
+            evidence=data.get("evidence", ""),
+            title=data.get("title", ""),
+            url=data.get("url", ""),
+            step_id=data.get("step_id", ""),
+        )
 
 
 class ChainWriter:
@@ -130,6 +221,66 @@ class ChainWriter:
         self._executor.submit(self._write_finding, finding_data)
 
         return finding_id
+
+    def add_typed_finding(
+        self,
+        chain_id: str,
+        typed_finding: "TypedFinding",
+        step_id: str = None,
+    ) -> str:
+        """
+        Record a granular, typed finding and enrich the graph with structured metadata.
+
+        This extends add_finding with FindingType enum semantics, confidence scoring,
+        related CVEs/IPs, and full evidence attachment.
+
+        Args:
+            chain_id: The active chain to attach this finding to.
+            typed_finding: A TypedFinding dataclass instance.
+            step_id: Optional step that produced this finding.
+
+        Returns:
+            finding_id string.
+        """
+        step_id = step_id or typed_finding.step_id
+        finding_id = f"tfind-{uuid.uuid4().hex[:8]}"
+
+        finding_data = {
+            "finding_id": finding_id,
+            "chain_id": chain_id,
+            "step_id": step_id,
+            "finding_type": typed_finding.finding_type.value,
+            "severity": typed_finding.severity,
+            "confidence": typed_finding.confidence,
+            "title": typed_finding.title or typed_finding.description[:80],
+            "description": typed_finding.description,
+            "url": typed_finding.url,
+            "evidence": typed_finding.evidence[:5000],
+            "related_cves": typed_finding.related_cves,
+            "related_ips": typed_finding.related_ips,
+            "typed": True,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        if chain_id in self._active_chains:
+            self._active_chains[chain_id]["findings"].append(finding_data)
+
+        self._executor.submit(self._write_typed_finding, finding_data)
+
+        logger.debug(
+            f"Typed finding {finding_id}: {typed_finding.finding_type.value} "
+            f"[{typed_finding.severity}] conf={typed_finding.confidence:.2f}"
+        )
+        return finding_id
+
+    def add_typed_findings_batch(
+        self,
+        chain_id: str,
+        findings: List["TypedFinding"],
+        step_id: str = None,
+    ) -> List[str]:
+        """Add multiple typed findings at once. Returns list of finding_ids."""
+        return [self.add_typed_finding(chain_id, f, step_id) for f in findings]
 
     def add_decision(
         self,
@@ -275,6 +426,40 @@ class ChainWriter:
             )
         except Exception as e:
             logger.error(f"Failed to write finding {finding_data.get('finding_id')}: {e}")
+
+    def _write_typed_finding(self, finding_data: Dict):
+        """Write a typed finding to the graph with enriched properties."""
+        try:
+            # Use the standard chain finding writer
+            self._graph.add_chain_finding(
+                finding_data["finding_id"],
+                finding_data["chain_id"],
+                **{k: v for k, v in finding_data.items() if k not in ("finding_id", "chain_id")},
+            )
+            # If there are related CVEs, create CVE nodes and link them
+            for cve in finding_data.get("related_cves", []):
+                try:
+                    cve_node = self._graph.backend.add_node(
+                        "CVE", cve, {"cve_id": cve, "linked_finding": finding_data["finding_id"]}
+                    )
+                    findings = self._graph.find("ChainFinding", finding_id=finding_data["finding_id"])
+                    if findings:
+                        self._graph.link(findings[0]["id"], cve_node, "RELATED_CVE")
+                except Exception:
+                    pass
+            # If there are related IPs, link them
+            for ip in finding_data.get("related_ips", []):
+                try:
+                    ip_node = self._graph.backend.add_node(
+                        "IP", ip, {"address": ip, "linked_finding": finding_data["finding_id"]}
+                    )
+                    findings = self._graph.find("ChainFinding", finding_id=finding_data["finding_id"])
+                    if findings:
+                        self._graph.link(findings[0]["id"], ip_node, "RELATED_IP")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Failed to write typed finding {finding_data.get('finding_id')}: {e}")
 
     def _write_decision(self, decision_data: Dict):
         try:

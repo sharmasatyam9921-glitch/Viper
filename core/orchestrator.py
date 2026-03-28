@@ -18,6 +18,17 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("viper.orchestrator")
 
+# ═══════════════════════════════════════════════════════════════════════
+# MULTI-AGENT SUPPORT (Phase 1 upgrade)
+# ═══════════════════════════════════════════════════════════════════════
+
+try:
+    from core.agent_bus import AgentBus, Priority
+    from core.agent_registry import AgentRegistry
+    _HAS_AGENT_BUS = True
+except ImportError:
+    _HAS_AGENT_BUS = False
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # PURE-PYTHON STATE MACHINE
@@ -155,6 +166,7 @@ class ViperOrchestrator:
         think_engine=None,
         tool_registry: Optional[Dict[str, Callable]] = None,
         guardrail=None,
+        enable_agents: bool = False,
     ):
         self.graph = graph_engine
         self.router = model_router
@@ -164,6 +176,12 @@ class ViperOrchestrator:
         self.tool_registry = tool_registry or {}
         self.guardrail = guardrail
         self._machine = self._build_machine()
+
+        # Multi-agent subsystem (Phase 1)
+        self.agent_bus: Optional[Any] = None
+        self.agent_registry: Optional[Any] = None
+        self._agent_tasks: List[Any] = []
+        self._enable_agents = enable_agents and _HAS_AGENT_BUS
 
     # ------------------------------------------------------------------
     # Machine construction
@@ -212,6 +230,75 @@ class ViperOrchestrator:
     # Public API
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Multi-agent lifecycle (Phase 1)
+    # ------------------------------------------------------------------
+
+    async def _start_agents(self) -> None:
+        """Initialize and start the multi-agent subsystem."""
+        if not self._enable_agents:
+            return
+
+        from core.agent_bus import AgentBus
+        from core.agent_registry import AgentRegistry
+
+        self.agent_bus = AgentBus()
+        self.agent_registry = AgentRegistry(check_interval=30.0)
+
+        # Import and instantiate agents
+        try:
+            from agents.recon_agent import ReconAgent
+            from agents.vuln_agent import VulnAgent
+            from agents.exploit_agent import ExploitAgent
+            from agents.chain_agent import ChainAgent
+
+            self._agents = [
+                ReconAgent(self.agent_bus, self.agent_registry),
+                VulnAgent(self.agent_bus, self.agent_registry),
+                ExploitAgent(self.agent_bus, self.agent_registry, guardrail=self.guardrail),
+                ChainAgent(self.agent_bus, self.agent_registry),
+            ]
+
+            for agent in self._agents:
+                await agent.start()
+
+            await self.agent_bus.start()
+            await self.agent_registry.start()
+            logger.info("Multi-agent subsystem started with %d agents", len(self._agents))
+        except Exception as exc:
+            logger.error("Failed to start multi-agent subsystem: %s", exc)
+            self._enable_agents = False
+
+    async def _stop_agents(self) -> None:
+        """Stop the multi-agent subsystem."""
+        if not self.agent_bus:
+            return
+        try:
+            for agent in getattr(self, "_agents", []):
+                await agent.stop()
+            await self.agent_bus.stop()
+            await self.agent_registry.stop()
+            logger.info("Multi-agent subsystem stopped")
+        except Exception as exc:
+            logger.error("Error stopping agents: %s", exc)
+
+    async def publish_to_agents(self, topic: str, payload: Any, priority: str = "MEDIUM") -> str:
+        """Publish a message to the agent bus (convenience method).
+
+        Can be used from tool_registry callables to feed data into agents.
+        """
+        if not self.agent_bus:
+            return ""
+        from core.agent_bus import Priority as P
+        prio_map = {"CRITICAL": P.CRITICAL, "HIGH": P.HIGH, "MEDIUM": P.MEDIUM, "LOW": P.LOW}
+        return await self.agent_bus.publish(
+            topic=topic, payload=payload, priority=prio_map.get(priority, P.MEDIUM),
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def invoke(self, target: str, objective: str, **kwargs) -> dict:
         """
         Run VIPER against *target* with the given *objective*.
@@ -227,6 +314,18 @@ class ViperOrchestrator:
             max_iterations=kwargs.get("max_iterations", 30),
         )
         state["target"] = target
+
+        # Start multi-agent subsystem if enabled
+        if self._enable_agents:
+            await self._start_agents()
+            # Seed the recon agent with the target
+            if self.agent_bus:
+                from core.agent_bus import Priority
+                await self.agent_bus.publish(
+                    "recon",
+                    payload={"target": target, "objective": objective},
+                    priority=Priority.HIGH,
+                )
 
         # Start chain tracking
         if self.chain_writer:
@@ -244,6 +343,10 @@ class ViperOrchestrator:
         if self.chain_writer and "chain_id" in final_state:
             status = "completed" if final_state.get("task_complete") else "interrupted"
             self.chain_writer.end_chain(final_state["chain_id"], status=status)
+
+        # Stop multi-agent subsystem
+        if self._enable_agents:
+            await self._stop_agents()
 
         return self._build_response(final_state, elapsed)
 

@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — Analytics</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --bg4: #21262d;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --critical: #ff4444; --high: #ff8c00; --medium: #ffd700;
+  --low: #4da6ff; --info: #888; --success: #00c853; --danger: #ef4444;
+  --neon-pink: #ff006e; --neon-cyan: #00d4ff; --neon-green: #39ff14;
+  --neon-purple: #b24dff; --neon-orange: #ff6600;
+  --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', monospace;
+  --glass: rgba(22,27,34,0.8); --glass-border: rgba(99,102,241,0.15);
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; flex-shrink: 0; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--text); background: rgba(99,102,241,.12); }
+.nav .brand { color: var(--accent2); font-weight: 700; font-size: 15px; margin-right: 12px; }
+.nav .spacer { flex: 1; }
+
+/* ── Toolbar ── */
+.toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.toolbar .refresh-badge { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.toolbar button { background: transparent; border: 1px solid var(--border); color: var(--text2);
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: .2s; }
+.toolbar button:hover { border-color: var(--accent); color: var(--text); }
+.toolbar .spacer { flex: 1; }
+
+/* ── Grid layout ── */
+.grid { flex: 1; overflow-y: auto; padding: 16px; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 16px;
+  align-content: start; }
+.grid::-webkit-scrollbar { width: 6px; }
+.grid::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+/* ── Chart card ── */
+.chart-card { background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: 12px; padding: 16px; display: flex; flex-direction: column;
+  backdrop-filter: blur(6px); transition: .2s; position: relative; }
+.chart-card:hover { border-color: rgba(99,102,241,.3); box-shadow: 0 4px 20px rgba(0,0,0,.3); }
+.chart-card.wide { grid-column: span 2; }
+.chart-card .card-header { display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px; }
+.chart-card .card-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.chart-card .card-subtitle { font-size: 11px; color: var(--muted); }
+.chart-card .export-btn { background: transparent; border: 1px solid var(--border); color: var(--muted);
+  padding: 2px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; transition: .2s; }
+.chart-card .export-btn:hover { color: var(--text); border-color: var(--accent); }
+.chart-canvas-wrap { flex: 1; position: relative; min-height: 200px; }
+.chart-canvas-wrap canvas { width: 100% !important; }
+
+/* ── Gauge ── */
+.gauge-container { display: flex; align-items: center; justify-content: center; flex-direction: column; }
+.gauge-score { font-size: 48px; font-weight: 700; font-family: var(--mono); }
+.gauge-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* ── MITRE heatmap ── */
+.mitre-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 4px; }
+.mitre-cell { padding: 8px 6px; border-radius: 6px; text-align: center; font-size: 10px;
+  font-weight: 600; transition: .2s; cursor: default; position: relative; }
+.mitre-cell:hover { transform: scale(1.05); z-index: 2; }
+.mitre-cell .mitre-count { font-size: 16px; font-weight: 700; display: block; margin-bottom: 2px;
+  font-family: var(--mono); }
+.mitre-cell .mitre-name { opacity: 0.8; line-height: 1.2; }
+
+/* ── Treemap ── */
+.treemap { display: flex; flex-wrap: wrap; gap: 3px; min-height: 200px; }
+.treemap-item { border-radius: 6px; display: flex; align-items: center; justify-content: center;
+  flex-direction: column; font-size: 11px; font-weight: 600; padding: 8px; cursor: default;
+  transition: .2s; overflow: hidden; text-align: center; }
+.treemap-item:hover { filter: brightness(1.2); transform: scale(1.02); }
+.treemap-item .tm-count { font-size: 18px; font-family: var(--mono); }
+.treemap-item .tm-name { font-size: 10px; opacity: 0.8; margin-top: 2px; }
+
+/* ── Stats row ── */
+.stats-row { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat-card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: 10px;
+  padding: 16px; text-align: center; backdrop-filter: blur(6px); }
+.stat-card .stat-value { font-size: 28px; font-weight: 700; font-family: var(--mono);
+  background: linear-gradient(135deg, var(--accent2), var(--neon-cyan)); -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent; }
+.stat-card .stat-label { font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+@media (max-width: 900px) {
+  .grid { grid-template-columns: 1fr; }
+  .chart-card.wide { grid-column: span 1; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand">VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="insights_v2.html" class="active">Analytics</a>
+  <a href="chat_v2.html">Chat</a>
+  <a href="terminal_v2.html">Terminal</a>
+  <a href="cypherfix_v2.html">Remediation</a>
+  <a href="settings_ui.html">Settings</a>
+  <div class="spacer"></div>
+</nav>
+
+<div class="toolbar">
+  <button onclick="refreshAll()">&#8635; Refresh</button>
+  <button onclick="exportAllCharts()">&#8681; Export All</button>
+  <div class="spacer"></div>
+  <span class="refresh-badge" id="refresh-badge">Last refresh: --</span>
+</div>
+
+<div class="grid" id="grid">
+  <!-- Stats row -->
+  <div class="stats-row" id="stats-row">
+    <div class="stat-card"><div class="stat-value" id="stat-total">--</div><div class="stat-label">Total Findings</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-critical" style="background:linear-gradient(135deg,#ff4444,#ff6b6b);-webkit-background-clip:text;-webkit-text-fill-color:transparent">--</div><div class="stat-label">Critical</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-high" style="background:linear-gradient(135deg,#ff8c00,#ffaa33);-webkit-background-clip:text;-webkit-text-fill-color:transparent">--</div><div class="stat-label">High</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-medium" style="background:linear-gradient(135deg,#ffd700,#ffe066);-webkit-background-clip:text;-webkit-text-fill-color:transparent">--</div><div class="stat-label">Medium</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-low" style="background:linear-gradient(135deg,#4da6ff,#80bfff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">--</div><div class="stat-label">Low</div></div>
+    <div class="stat-card"><div class="stat-value" id="stat-fp-rate">--</div><div class="stat-label">FP Rate</div></div>
+  </div>
+
+  <!-- CVSS Scatter -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">CVSS Distribution</div><div class="card-subtitle">Findings by CVSS score</div></div>
+      <button class="export-btn" onclick="exportChart('cvssChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="cvssChart"></canvas></div>
+  </div>
+
+  <!-- Kill Chain Funnel -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Kill Chain Funnel</div><div class="card-subtitle">Findings per attack phase</div></div>
+      <button class="export-btn" onclick="exportChart('killChainChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="killChainChart"></canvas></div>
+  </div>
+
+  <!-- Attack Surface Radar -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Attack Surface Radar</div><div class="card-subtitle">By category</div></div>
+      <button class="export-btn" onclick="exportChart('radarChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="radarChart"></canvas></div>
+  </div>
+
+  <!-- Severity Gauge -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Overall Risk Score</div><div class="card-subtitle">Severity gauge</div></div>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="gaugeChart"></canvas></div>
+  </div>
+
+  <!-- Finding Timeline -->
+  <div class="chart-card wide">
+    <div class="card-header">
+      <div><div class="card-title">Finding Timeline</div><div class="card-subtitle">Discoveries over time</div></div>
+      <button class="export-btn" onclick="exportChart('timelineChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="timelineChart"></canvas></div>
+  </div>
+
+  <!-- Tech Treemap -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Tech Vulnerability Treemap</div><div class="card-subtitle">Technologies and vuln counts</div></div>
+    </div>
+    <div class="chart-canvas-wrap"><div class="treemap" id="treemap"></div></div>
+  </div>
+
+  <!-- FP Rate Donut -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Validation Status</div><div class="card-subtitle">Validated vs FP vs Unvalidated</div></div>
+      <button class="export-btn" onclick="exportChart('fpChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="fpChart"></canvas></div>
+  </div>
+
+  <!-- Q-Learning Progress -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Q-Learning Progress</div><div class="card-subtitle">Reward over sessions</div></div>
+      <button class="export-btn" onclick="exportChart('qChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="qChart"></canvas></div>
+  </div>
+
+  <!-- Top Endpoints -->
+  <div class="chart-card">
+    <div class="card-header">
+      <div><div class="card-title">Top Vulnerable Endpoints</div><div class="card-subtitle">Most findings</div></div>
+      <button class="export-btn" onclick="exportChart('endpointsChart')">PNG</button>
+    </div>
+    <div class="chart-canvas-wrap"><canvas id="endpointsChart"></canvas></div>
+  </div>
+
+  <!-- MITRE Heatmap -->
+  <div class="chart-card wide">
+    <div class="card-header">
+      <div><div class="card-title">MITRE ATT&CK Coverage</div><div class="card-subtitle">Tactics heatmap</div></div>
+    </div>
+    <div class="chart-canvas-wrap"><div class="mitre-grid" id="mitre-grid"></div></div>
+  </div>
+</div>
+
+<script>
+// ── Chart defaults ──
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = 'rgba(48,54,61,0.6)';
+Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+
+const charts = {};
+const COLORS = {
+  critical: '#ff4444', high: '#ff8c00', medium: '#ffd700', low: '#4da6ff', info: '#888',
+  neonPink: '#ff006e', neonCyan: '#00d4ff', neonGreen: '#39ff14', neonPurple: '#b24dff', neonOrange: '#ff6600',
+  accent: '#6366f1', accent2: '#818cf8'
+};
+const SEVERITY_COLORS = [COLORS.critical, COLORS.high, COLORS.medium, COLORS.low, COLORS.info];
+
+let refreshInterval;
+
+// ── Data fetchers ──
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(r.status);
+    return await r.json();
+  } catch(e) { return null; }
+}
+
+async function refreshAll() {
+  document.getElementById('refresh-badge').textContent = 'Refreshing...';
+
+  const [severity, timeline, byType, attackStats, evoStats, killChain] = await Promise.all([
+    fetchJSON('/api/findings/by-severity'),
+    fetchJSON('/api/findings/timeline'),
+    fetchJSON('/api/findings/by-type'),
+    fetchJSON('/api/attacks/stats'),
+    fetchJSON('/api/evograph/stats'),
+    fetchJSON('/api/attacks/kill-chain')
+  ]);
+
+  // Use real data or demo data
+  updateStats(severity || demoSeverity());
+  updateCVSS(severity || demoSeverity());
+  updateKillChain(killChain || demoKillChain());
+  updateRadar(attackStats || demoAttackStats());
+  updateGauge(severity || demoSeverity());
+  updateTimeline(timeline || demoTimeline());
+  updateTreemap(byType || demoByType());
+  updateFP(attackStats || demoAttackStats());
+  updateQLearning(evoStats || demoEvoStats());
+  updateEndpoints(attackStats || demoAttackStats());
+  updateMITRE(attackStats || demoAttackStats());
+
+  document.getElementById('refresh-badge').textContent = `Last refresh: ${new Date().toLocaleTimeString()}`;
+}
+
+// ── Demo data generators ──
+function demoSeverity() { return { critical: 3, high: 12, medium: 24, low: 18, info: 8, total: 65 }; }
+function demoKillChain() {
+  return { recon: 42, weaponize: 28, delivery: 19, exploit: 14, install: 8, c2: 5, action: 3 };
+}
+function demoAttackStats() {
+  return {
+    categories: { injection: 15, xss: 12, auth: 8, config: 18, crypto: 6, info_disc: 10 },
+    validated: 38, false_positive: 12, unvalidated: 15,
+    endpoints: [
+      { url: '/api/users', count: 8 }, { url: '/login', count: 6 }, { url: '/api/search', count: 5 },
+      { url: '/upload', count: 4 }, { url: '/api/admin', count: 4 }, { url: '/graphql', count: 3 },
+      { url: '/api/export', count: 3 }, { url: '/reset-password', count: 2 }
+    ],
+    mitre: {
+      'Reconnaissance': 8, 'Resource Development': 3, 'Initial Access': 12,
+      'Execution': 9, 'Persistence': 4, 'Privilege Escalation': 6,
+      'Defense Evasion': 5, 'Credential Access': 7, 'Discovery': 11,
+      'Lateral Movement': 2, 'Collection': 4, 'C2': 3, 'Exfiltration': 2, 'Impact': 5
+    },
+    technologies: [
+      { name: 'Apache', vulns: 12 }, { name: 'PHP', vulns: 9 }, { name: 'jQuery', vulns: 7 },
+      { name: 'WordPress', vulns: 15 }, { name: 'MySQL', vulns: 5 }, { name: 'nginx', vulns: 4 },
+      { name: 'Node.js', vulns: 6 }, { name: 'OpenSSL', vulns: 3 }, { name: 'React', vulns: 2 }
+    ]
+  };
+}
+function demoTimeline() {
+  const labels = []; const critical=[]; const high=[]; const medium=[]; const low=[];
+  for (let i = 23; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 3600000);
+    labels.push(d.getHours() + ':00');
+    critical.push(Math.floor(Math.random() * 3));
+    high.push(Math.floor(Math.random() * 5));
+    medium.push(Math.floor(Math.random() * 8));
+    low.push(Math.floor(Math.random() * 6));
+  }
+  return { labels, critical, high, medium, low };
+}
+function demoByType() {
+  return { sqli: 8, xss: 12, rce: 3, ssrf: 4, idor: 6, lfi: 5, csrf: 7, open_redirect: 3, xxe: 2 };
+}
+function demoEvoStats() {
+  const rewards = []; const sessions = [];
+  for (let i = 0; i < 30; i++) {
+    sessions.push(`S${i+1}`);
+    rewards.push(Math.min(1, 0.1 + i * 0.03 + (Math.random() - 0.3) * 0.15));
+  }
+  return { sessions, rewards };
+}
+
+// ── Chart updates ──
+function updateStats(data) {
+  const d = data || {};
+  document.getElementById('stat-total').textContent = d.total || 0;
+  document.getElementById('stat-critical').textContent = d.critical || 0;
+  document.getElementById('stat-high').textContent = d.high || 0;
+  document.getElementById('stat-medium').textContent = d.medium || 0;
+  document.getElementById('stat-low').textContent = d.low || 0;
+}
+
+function updateCVSS(data) {
+  const d = data || {};
+  const points = [];
+  const sevMap = { critical: {min:9,max:10}, high: {min:7,max:8.9}, medium: {min:4,max:6.9}, low: {min:0.1,max:3.9} };
+  ['critical','high','medium','low'].forEach(sev => {
+    const count = d[sev] || 0;
+    for (let i = 0; i < count; i++) {
+      const range = sevMap[sev];
+      points.push({ x: i, y: range.min + Math.random() * (range.max - range.min), sev });
+    }
+  });
+  destroyChart('cvssChart');
+  charts.cvssChart = new Chart(document.getElementById('cvssChart'), {
+    type: 'scatter',
+    data: {
+      datasets: ['critical','high','medium','low'].map(sev => ({
+        label: sev.charAt(0).toUpperCase() + sev.slice(1),
+        data: points.filter(p => p.sev === sev).map(p => ({ x: p.x, y: p.y })),
+        backgroundColor: COLORS[sev] + '99',
+        borderColor: COLORS[sev],
+        pointRadius: 6, pointHoverRadius: 9
+      }))
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { min: 0, max: 10, title: { display: true, text: 'CVSS Score' } },
+        x: { title: { display: true, text: 'Finding Index' } } },
+      plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, padding: 12 } } }
+    }
+  });
+}
+
+function updateKillChain(data) {
+  const d = data || {};
+  const phases = ['recon','weaponize','delivery','exploit','install','c2','action'];
+  const labels = ['Reconnaissance','Weaponization','Delivery','Exploitation','Installation','C2','Actions'];
+  const values = phases.map(p => d[p] || 0);
+  destroyChart('killChainChart');
+  charts.killChainChart = new Chart(document.getElementById('killChainChart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: values.map((_, i) => {
+          const colors = [COLORS.neonCyan, COLORS.accent2, COLORS.neonPurple, COLORS.neonPink, COLORS.neonOrange, COLORS.critical, COLORS.high];
+          return colors[i] + 'cc';
+        }),
+        borderColor: 'transparent', borderRadius: 6, barPercentage: 0.7
+      }]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      scales: { x: { grid: { color: 'rgba(48,54,61,0.3)' } } },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+function updateRadar(data) {
+  const cats = data?.categories || {};
+  const labels = Object.keys(cats).map(k => k.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()));
+  const values = Object.values(cats);
+  destroyChart('radarChart');
+  charts.radarChart = new Chart(document.getElementById('radarChart'), {
+    type: 'radar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Findings',
+        data: values,
+        backgroundColor: 'rgba(99,102,241,0.15)',
+        borderColor: COLORS.accent2,
+        pointBackgroundColor: COLORS.accent2,
+        pointBorderColor: '#fff', pointRadius: 4
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { r: { angleLines: { color: 'rgba(48,54,61,0.3)' }, grid: { color: 'rgba(48,54,61,0.3)' },
+        ticks: { display: false }, pointLabels: { font: { size: 11 } } } },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+function updateGauge(data) {
+  const d = data || {};
+  const score = Math.min(100, (d.critical||0) * 15 + (d.high||0) * 8 + (d.medium||0) * 3 + (d.low||0));
+  const color = score > 70 ? COLORS.critical : score > 40 ? COLORS.high : score > 20 ? COLORS.medium : COLORS.neonGreen;
+  document.getElementById('stat-fp-rate').textContent = score + '%';
+  destroyChart('gaugeChart');
+  charts.gaugeChart = new Chart(document.getElementById('gaugeChart'), {
+    type: 'doughnut',
+    data: {
+      datasets: [{
+        data: [score, 100 - score],
+        backgroundColor: [color + 'cc', 'rgba(48,54,61,0.3)'],
+        borderWidth: 0, circumference: 270, rotation: 225
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '80%',
+      plugins: {
+        legend: { display: false },
+        tooltip: { enabled: false }
+      }
+    },
+    plugins: [{
+      id: 'gaugeText',
+      afterDraw(chart) {
+        const { ctx, chartArea: { left, right, top, bottom } } = chart;
+        const cx = (left + right) / 2, cy = (top + bottom) / 2 + 10;
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.fillStyle = color;
+        ctx.font = `bold 36px 'JetBrains Mono', monospace`;
+        ctx.fillText(score, cx, cy);
+        ctx.fillStyle = '#8b949e';
+        ctx.font = `12px 'Inter', sans-serif`;
+        ctx.fillText('Risk Score', cx, cy + 24);
+        ctx.restore();
+      }
+    }]
+  });
+}
+
+function updateTimeline(data) {
+  const d = data || {};
+  destroyChart('timelineChart');
+  charts.timelineChart = new Chart(document.getElementById('timelineChart'), {
+    type: 'line',
+    data: {
+      labels: d.labels || [],
+      datasets: [
+        { label: 'Critical', data: d.critical || [], borderColor: COLORS.critical, backgroundColor: COLORS.critical + '20',
+          fill: true, tension: 0.4, pointRadius: 2 },
+        { label: 'High', data: d.high || [], borderColor: COLORS.high, backgroundColor: COLORS.high + '15',
+          fill: true, tension: 0.4, pointRadius: 2 },
+        { label: 'Medium', data: d.medium || [], borderColor: COLORS.medium, backgroundColor: COLORS.medium + '10',
+          fill: true, tension: 0.4, pointRadius: 2 },
+        { label: 'Low', data: d.low || [], borderColor: COLORS.low, backgroundColor: COLORS.low + '10',
+          fill: true, tension: 0.4, pointRadius: 2 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, grid: { color: 'rgba(48,54,61,0.3)' } },
+        x: { grid: { display: false } } },
+      plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, padding: 12 } } },
+      interaction: { mode: 'index', intersect: false }
+    }
+  });
+}
+
+function updateTreemap(data) {
+  // Use attackStats technologies if available, else use byType
+  const el = document.getElementById('treemap');
+  let items;
+  if (data?.technologies) {
+    items = data.technologies;
+  } else {
+    items = Object.entries(data || {}).map(([name, vulns]) => ({ name, vulns }));
+  }
+  if (!items.length) items = demoAttackStats().technologies;
+  const total = items.reduce((s, i) => s + (i.vulns || i.count || 0), 0);
+  const tmColors = [COLORS.neonPink, COLORS.accent2, COLORS.neonCyan, COLORS.neonGreen, COLORS.neonOrange, COLORS.neonPurple, COLORS.critical, COLORS.high, COLORS.medium];
+  el.innerHTML = items.sort((a,b) => (b.vulns||b.count||0) - (a.vulns||a.count||0)).map((item, i) => {
+    const v = item.vulns || item.count || 0;
+    const pct = Math.max(8, (v / total) * 100);
+    const c = tmColors[i % tmColors.length];
+    return `<div class="treemap-item" style="flex-basis:${pct}%;min-width:80px;background:${c}22;border:1px solid ${c}44;color:${c}">
+      <span class="tm-count">${v}</span><span class="tm-name">${escapeHtml(item.name)}</span></div>`;
+  }).join('');
+}
+
+function updateFP(data) {
+  const d = data || {};
+  const validated = d.validated || 38;
+  const fp = d.false_positive || 12;
+  const unvalidated = d.unvalidated || 15;
+  const fpRate = Math.round(fp / (validated + fp + unvalidated) * 100);
+  document.getElementById('stat-fp-rate').textContent = fpRate + '%';
+  destroyChart('fpChart');
+  charts.fpChart = new Chart(document.getElementById('fpChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Validated', 'False Positive', 'Unvalidated'],
+      datasets: [{ data: [validated, fp, unvalidated],
+        backgroundColor: [COLORS.neonGreen + 'cc', COLORS.critical + 'cc', COLORS.muted || '#6e7681'],
+        borderWidth: 0 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '65%',
+      plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, padding: 12 } } }
+    }
+  });
+}
+
+function updateQLearning(data) {
+  const d = data || {};
+  destroyChart('qChart');
+  charts.qChart = new Chart(document.getElementById('qChart'), {
+    type: 'line',
+    data: {
+      labels: d.sessions || [],
+      datasets: [{
+        label: 'Reward',
+        data: d.rewards || [],
+        borderColor: COLORS.neonGreen,
+        backgroundColor: COLORS.neonGreen + '15',
+        fill: true, tension: 0.3, pointRadius: 3,
+        pointBackgroundColor: COLORS.neonGreen
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { min: 0, max: 1, grid: { color: 'rgba(48,54,61,0.3)' } },
+        x: { grid: { display: false } } },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+function updateEndpoints(data) {
+  const endpoints = (data?.endpoints || []).slice(0, 10);
+  destroyChart('endpointsChart');
+  charts.endpointsChart = new Chart(document.getElementById('endpointsChart'), {
+    type: 'bar',
+    data: {
+      labels: endpoints.map(e => e.url),
+      datasets: [{
+        data: endpoints.map(e => e.count),
+        backgroundColor: endpoints.map((_, i) => {
+          const grad = [COLORS.neonPink, COLORS.neonCyan, COLORS.accent2, COLORS.neonGreen, COLORS.neonPurple, COLORS.neonOrange];
+          return grad[i % grad.length] + 'aa';
+        }),
+        borderRadius: 4, barPercentage: 0.7
+      }]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { beginAtZero: true, grid: { color: 'rgba(48,54,61,0.3)' } },
+        y: { ticks: { font: { family: "'JetBrains Mono', monospace", size: 11 } } }
+      },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+function updateMITRE(data) {
+  const mitre = data?.mitre || {};
+  const el = document.getElementById('mitre-grid');
+  const maxVal = Math.max(1, ...Object.values(mitre));
+  el.innerHTML = Object.entries(mitre).map(([tactic, count]) => {
+    const intensity = count / maxVal;
+    const r = Math.round(99 + intensity * 156);
+    const g = Math.round(102 - intensity * 60);
+    const b = Math.round(241 - intensity * 200);
+    const bg = `rgba(${r},${g},${b},${0.1 + intensity * 0.35})`;
+    const border = `rgba(${r},${g},${b},${0.3 + intensity * 0.4})`;
+    const textColor = `rgb(${r},${g},${b})`;
+    return `<div class="mitre-cell" style="background:${bg};border:1px solid ${border};color:${textColor}">
+      <span class="mitre-count">${count}</span><span class="mitre-name">${escapeHtml(tactic)}</span></div>`;
+  }).join('');
+}
+
+// ── Utilities ──
+function destroyChart(id) { if (charts[id]) { charts[id].destroy(); delete charts[id]; } }
+function escapeHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function exportChart(id) {
+  const chart = charts[id];
+  if (!chart) return;
+  const link = document.createElement('a');
+  link.download = `viper4_${id}_${Date.now()}.png`;
+  link.href = chart.toBase64Image();
+  link.click();
+}
+
+function exportAllCharts() {
+  Object.keys(charts).forEach(id => exportChart(id));
+}
+
+// ── Init ──
+refreshAll();
+refreshInterval = setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>

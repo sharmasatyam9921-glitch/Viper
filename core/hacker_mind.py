@@ -28,7 +28,7 @@ import hashlib
 class AttackPhase(Enum):
     RECON = "recon"
     ENUMERATION = "enumeration"
-    VULNERABILITY_AgentLYSIS = "vulnerability_Agentlysis"
+    VULNERABILITY_ANALYSIS = "vulnerability_analysis"
     EXPLOITATION = "exploitation"
     POST_EXPLOITATION = "post_exploitation"
     REPORTING = "reporting"
@@ -135,8 +135,8 @@ class HackerMind:
             thought["reasoning"], thought["decision"] = self._think_recon(context)
         elif self.phase == AttackPhase.ENUMERATION:
             thought["reasoning"], thought["decision"] = self._think_enumeration(context)
-        elif self.phase == AttackPhase.VULNERABILITY_AgentLYSIS:
-            thought["reasoning"], thought["decision"] = self._think_vuln_Agentlysis(context)
+        elif self.phase == AttackPhase.VULNERABILITY_ANALYSIS:
+            thought["reasoning"], thought["decision"] = self._think_vuln_analysis(context)
         elif self.phase == AttackPhase.EXPLOITATION:
             thought["reasoning"], thought["decision"] = self._think_exploitation(context)
         
@@ -170,7 +170,7 @@ class HackerMind:
         """Enumeration thinking - dig deeper into what we found."""
         reasoning = []
         
-        # Agentlyze what we have
+        # Analyze what we have
         interesting_endpoints = self._identify_interesting_endpoints()
         reasoning.append(f"Interesting endpoints: {len(interesting_endpoints)}")
         
@@ -182,15 +182,15 @@ class HackerMind:
             decision = "TEST_HYPOTHESES"
             self.hypotheses.extend(new_hypotheses)
         elif self.hypotheses:
-            decision = "ADVANCE_TO_VULN_AgentLYSIS"
-            self.phase = AttackPhase.VULNERABILITY_AgentLYSIS
+            decision = "ADVANCE_TO_VULN_ANALYSIS"
+            self.phase = AttackPhase.VULNERABILITY_ANALYSIS
         else:
             decision = "DEEPER_ENUMERATION"
         
         return "\n".join(reasoning), decision
     
-    def _think_vuln_Agentlysis(self, context: str) -> Tuple[str, str]:
-        """Vulnerability Agentlysis thinking."""
+    def _think_vuln_analysis(self, context: str) -> Tuple[str, str]:
+        """Vulnerability Analysis thinking."""
         reasoning = []
         
         # Prioritize hypotheses
@@ -243,7 +243,7 @@ class HackerMind:
         patterns = {
             "auth": [r"/login", r"/auth", r"/signin", r"/oauth", r"/token"],
             "api": [r"/api/", r"/v1/", r"/v2/", r"/graphql"],
-            "admin": [r"/admin", r"/dashboard", r"/panel", r"/mAgentge"],
+            "admin": [r"/admin", r"/dashboard", r"/panel", r"/manage"],
             "file": [r"/upload", r"/download", r"/file", r"/export", r"/import"],
             "user": [r"/user", r"/profile", r"/account", r"/settings"],
             "debug": [r"/debug", r"/test", r"/dev", r"/staging"],
@@ -405,7 +405,7 @@ class HackerMind:
             self.technology_stack[source] = detail
     
     def process_response(self, url: str, status: int, headers: Dict, body: str):
-        """Agentlyze an HTTP response like a hacker would."""
+        """Analyze an HTTP response like a hacker would."""
         
         # Tech fingerprinting
         server = headers.get("Server", "")
@@ -416,7 +416,7 @@ class HackerMind:
         if powered_by:
             self.observe("technology", powered_by, "X-Powered-By header")
         
-        # Error Agentlysis
+        # Error Analysis
         if status >= 400:
             self.observe("error", f"{status} at {url}", url)
             
@@ -608,7 +608,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     for _ in range(3):
-        decision = mind.think("Agentlyzing target...")
+        decision = mind.think("Analyzing target...")
         print(f"\nDecision: {decision}")
         print(f"Status: {mind.get_status()}")
     

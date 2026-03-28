@@ -12,16 +12,20 @@ Usage:
 """
 
 import base64
+import csv
 import hashlib
+import io
 import json
 import math
 import os
 import queue
 import sqlite3
 import struct
+import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -91,9 +95,52 @@ def _get_graph_engine():
     if _graph_engine is None and V4_AVAILABLE:
         try:
             _graph_engine = GraphEngine()
+            # Populate graph from viper.db so Graph tab has real data
+            _populate_graph_from_db(_graph_engine)
         except Exception:
             pass
     return _graph_engine
+
+
+def _populate_graph_from_db(ge):
+    """Populate the knowledge graph from viper.db findings/targets."""
+    if not VIPER_DB.exists():
+        return
+    try:
+        targets = _query(VIPER_DB, "SELECT * FROM targets LIMIT 200")
+        for t in targets:
+            domain = t.get("domain", t.get("url", ""))
+            if domain:
+                ge.add_target(domain)
+
+        findings = _query(VIPER_DB,
+            "SELECT f.*, t.domain, t.url as target_url FROM findings f "
+            "LEFT JOIN targets t ON f.target_id = t.id LIMIT 500")
+        for f in findings:
+            domain = f.get("domain", "")
+            vuln = f.get("vuln_type", f.get("type", "unknown"))
+            sev = f.get("severity", "medium")
+            url = f.get("url", f.get("target_url", ""))
+            if domain and vuln:
+                ge.add_finding(domain, vuln, severity=sev, url=url,
+                               confidence=f.get("confidence", 0.5))
+
+        # Add technologies if available
+        techs = _query(VIPER_DB,
+            "SELECT t.domain, ts.tech_name FROM tech_stack ts "
+            "JOIN targets t ON ts.target_id = t.id LIMIT 200")
+        for tech in techs:
+            domain = tech.get("domain", "")
+            name = tech.get("tech_name", "")
+            if domain and name:
+                try:
+                    ge.add_technology(name, domain)
+                except Exception:
+                    pass
+
+        logger.info("Graph populated from DB: %d nodes", len(ge.backend.graph.nodes) if hasattr(ge.backend, 'graph') else 0)
+    except Exception as e:
+        logger.debug("Graph population error: %s", e)
 
 def _get_settings():
     global _settings_manager
@@ -114,8 +161,9 @@ def _connect(db_path):
     if not db_path.exists():
         return None
     try:
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
     except Exception:
         return None
@@ -488,6 +536,336 @@ _broadcaster_thread = threading.Thread(target=_stats_broadcaster, daemon=True)
 _broadcaster_thread.start()
 
 
+# ── Log tailer thread (live log streaming) ──
+
+def _log_tailer():
+    """Tail today's VIPER log file and push new lines via WebSocket + SSE."""
+    file_pos = 0
+    current_date = ""
+    while True:
+        time.sleep(1.5)
+        has_clients = len(_ws_clients) > 0 or event_bus.subscriber_count > 0
+        if not has_clients:
+            continue
+        try:
+            today = datetime.now().strftime("%Y%m%d")
+            log_file = LOGS_DIR / f"viper_{today}.log"
+            if not log_file.exists():
+                file_pos = 0
+                continue
+            # Reset position on date change
+            if today != current_date:
+                current_date = today
+                file_pos = 0
+            file_size = log_file.stat().st_size
+            if file_size <= file_pos:
+                if file_size < file_pos:
+                    file_pos = 0  # File was truncated/rotated
+                continue
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(file_pos)
+                new_lines = f.readlines()
+                file_pos = f.tell()
+            for line in new_lines[-50:]:  # Cap to 50 lines per batch
+                line = line.rstrip()
+                if not line:
+                    continue
+                # Parse log level from line format: [HH:MM:SS] [MODULE] [LEVEL] msg
+                level = "INFO"
+                for lv in ("ERROR", "WARN", "SUCCESS", "CRITICAL", "DEBUG"):
+                    if f"[{lv}]" in line:
+                        level = lv
+                        break
+                payload = {"text": line, "level": level, "timestamp": time.time()}
+                if len(_ws_clients) > 0:
+                    _ws_broadcast("log_line", payload)
+                if event_bus.subscriber_count > 0:
+                    event_bus.publish("log_line", payload)
+
+                # ── Typed agent events for Agent Monitor ──
+                _emit_typed_agent_event(line, time.time())
+        except Exception:
+            pass
+
+
+_log_tailer_thread = threading.Thread(target=_log_tailer, daemon=True)
+_log_tailer_thread.start()
+
+
+# ── Agent Monitor: typed event emitter ──
+
+import re as _re
+
+# Agent color/name mapping
+_AGENT_NAMES = {
+    "recon": "recon_agent",
+    "vuln": "vuln_agent",
+    "exploit": "exploit_agent",
+    "chain": "chain_agent",
+    "react": "react_engine",
+    "think": "think_engine",
+}
+
+# Patterns for typed event detection
+_AGENT_PATTERNS = [
+    (_re.compile(r"\[ReACT\]", _re.I), "react_step"),
+    (_re.compile(r"\[STRATEGY\]|\[DeepThink\]|\[DEEP.?THINK\]", _re.I), "deep_think"),
+    (_re.compile(r"\[\+\]|\[SUCCESS\]|\[FINDING\]|\[VULN\]", _re.I), "finding_new"),
+    (_re.compile(r"\bPhase\b.*(?:RECON|SCAN|EXPLOIT|REPORT|ENUM)", _re.I), "phase_update"),
+    (_re.compile(r"\[RECON\]|\brecon.?agent\b", _re.I), "agent_event"),
+    (_re.compile(r"\[VULN\]|\bvuln.?agent\b", _re.I), "agent_event"),
+    (_re.compile(r"\[EXPLOIT\]|\bexploit.?agent\b", _re.I), "agent_event"),
+    (_re.compile(r"\[CHAIN\]|\bchain.?agent\b", _re.I), "agent_event"),
+]
+
+# Extract agent name from log line
+_AGENT_TAG_RE = _re.compile(r"\[(RECON|VULN|EXPLOIT|CHAIN|ReACT|STRATEGY|DeepThink|THINK)\]", _re.I)
+_TIMESTAMP_RE = _re.compile(r"(\d{2}:\d{2}:\d{2})")
+
+
+def _detect_agent(line):
+    """Detect which agent a log line belongs to."""
+    m = _AGENT_TAG_RE.search(line)
+    if m:
+        tag = m.group(1).lower()
+        if tag in ("strategy", "deepthink", "think"):
+            return "think_engine"
+        if tag == "react":
+            return "react_engine"
+        return _AGENT_NAMES.get(tag, tag + "_agent")
+    for name in ("recon", "vuln", "exploit", "chain"):
+        if name in line.lower():
+            return _AGENT_NAMES[name]
+    return None
+
+
+def _emit_typed_agent_event(line, ts):
+    """Parse a log line and emit typed WebSocket events for the Agent Monitor."""
+    has_clients = len(_ws_clients) > 0 or event_bus.subscriber_count > 0
+    if not has_clients:
+        return
+
+    agent = _detect_agent(line)
+    ts_match = _TIMESTAMP_RE.search(line)
+    time_str = ts_match.group(1) if ts_match else ""
+
+    for pattern, event_type in _AGENT_PATTERNS:
+        if pattern.search(line):
+            payload = {
+                "agent": agent or "system",
+                "text": line,
+                "event_type": event_type,
+                "time": time_str,
+                "timestamp": ts,
+            }
+            if len(_ws_clients) > 0:
+                _ws_broadcast(event_type, payload)
+            if event_bus.subscriber_count > 0:
+                event_bus.publish(event_type, payload)
+            break
+
+
+def get_agent_monitor():
+    """Build real-time agent monitor data from logs and DB."""
+    state = get_state()
+    metrics = state.get("metrics", {})
+    agents_data = []
+
+    agent_defs = [
+        {"name": "recon_agent", "label": "RECON AGENT", "topic": "recon"},
+        {"name": "vuln_agent", "label": "VULN AGENT", "topic": "vuln"},
+        {"name": "exploit_agent", "label": "EXPLOIT AGENT", "topic": "exploit"},
+        {"name": "chain_agent", "label": "CHAIN AGENT", "topic": "chain"},
+    ]
+
+    # Parse current state from the LAST 100 log lines (most reliable source)
+    current_target = ""
+    current_phase = "idle"
+    status_str = "idle"
+    current_action = ""
+    last_cycle_time = ""
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        log_file = LOGS_DIR / f"viper_{today}.log"
+        if log_file.exists():
+            recent = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
+            for ln in reversed(recent):
+                if "Full Hunt:" in ln and not current_target:
+                    # Extract target from "VIPER Full Hunt: <target>"
+                    import re as _re
+                    m = _re.search(r"Full Hunt:\s*(.+?)(?:\s*===|\s*$)", ln)
+                    if m:
+                        current_target = m.group(1).strip()
+                if "Phase" in ln and "===" in ln and current_phase == "idle":
+                    m = _re.search(r"Phase\s+\d+[^:]*:\s*(.+?)(?:\s*===|\s*\()", ln)
+                    if m:
+                        current_phase = m.group(1).strip()
+                        status_str = "running"
+                if "Cycle complete" in ln:
+                    status_str = "waiting"
+                    break
+                if "EXHAUSTION" in ln and "stopping" in ln.lower():
+                    status_str = "exhausted"
+                    break
+                if "[ReACT]" in ln and "Action:" in ln:
+                    m = _re.search(r"Action:\s*(.+)", ln)
+                    if m:
+                        current_action = m.group(1).strip()
+    except Exception:
+        pass
+
+    started_at = metrics.get("start_time", "")
+    progress = 0
+
+    # Parse today's log for agent activity
+    agent_activity = {}
+    agent_findings = {}
+    agent_last_seen = {}
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        log_file = LOGS_DIR / f"viper_{today}.log"
+        if log_file.exists():
+            lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-500:]
+            for ln in lines:
+                agent = _detect_agent(ln)
+                if agent:
+                    agent_activity[agent] = agent_activity.get(agent, 0) + 1
+                    agent_last_seen[agent] = ln
+                    if any(tag in ln for tag in ("[+]", "[SUCCESS]", "[FINDING]", "found", "discovered")):
+                        agent_findings[agent] = agent_findings.get(agent, 0) + 1
+    except Exception:
+        pass
+
+    # Compute uptime from started_at
+    uptime = 0
+    if started_at:
+        try:
+            st = datetime.fromisoformat(started_at) if isinstance(started_at, str) else datetime.fromtimestamp(started_at)
+            uptime = int((datetime.now() - st).total_seconds())
+        except Exception:
+            uptime = state.get("elapsed", 0)
+
+    # Map phase to active agent
+    phase_agent_map = {
+        "recon": "recon_agent", "scan": "vuln_agent", "exploit": "exploit_agent",
+        "report": "chain_agent", "enum": "recon_agent", "surface": "recon_agent",
+        "vuln": "vuln_agent", "chain": "chain_agent",
+    }
+    active_agent = phase_agent_map.get(current_phase.lower().split("_")[0] if current_phase else "", "")
+
+    for ad in agent_defs:
+        is_active = ad["name"] == active_agent and status_str not in ("idle", "done", "error")
+        a_status = "running" if is_active else ("idle" if status_str in ("idle", "done") else "standby")
+        a_task = current_action if is_active else None
+        a_phase = current_phase if is_active else None
+        a_findings = agent_findings.get(ad["name"], 0)
+        a_uptime = uptime if is_active else 0
+
+        # Check DB findings count for this agent's topic
+        if VIPER_DB.exists() and a_findings == 0:
+            try:
+                cnt = _scalar(VIPER_DB,
+                    "SELECT COUNT(*) FROM findings WHERE vuln_type LIKE ? OR details LIKE ?",
+                    (f"%{ad['topic']}%", f"%{ad['topic']}%"))
+                a_findings = cnt or 0
+            except Exception:
+                pass
+
+        agents_data.append({
+            "name": ad["name"],
+            "label": ad["label"],
+            "topic": ad["topic"],
+            "status": a_status,
+            "current_task": a_task,
+            "phase": a_phase,
+            "progress": progress if is_active else 0,
+            "findings": a_findings,
+            "uptime": a_uptime,
+            "activity_count": agent_activity.get(ad["name"], 0),
+        })
+
+    # Bus message stats
+    bus_messages = sum(agent_activity.values())
+
+    # Active scans count
+    active_scans = 1 if status_str not in ("idle", "done", "error", "") else 0
+
+    return {
+        "agents": agents_data,
+        "bus_messages": bus_messages,
+        "active_scans": active_scans,
+        "current_target": current_target,
+        "current_phase": current_phase,
+        "status": status_str,
+        "progress": progress,
+        "uptime": uptime,
+    }
+
+
+def get_react_current():
+    """Return the current ReACT step for the visualizer."""
+    result = {
+        "step": 0, "total_steps": 0, "reward": 0, "q_table_size": 0,
+        "think": "", "action": "", "observation": "", "step_reward": 0,
+        "deep_think": None,
+    }
+
+    # Read from state files first
+    react_file = STATE_DIR / "react_state.json"
+    if react_file.exists():
+        try:
+            data = json.loads(react_file.read_text())
+            result.update({
+                "step": data.get("step", 0),
+                "total_steps": data.get("total_steps", data.get("max_steps", 0)),
+                "reward": data.get("total_reward", data.get("reward", 0)),
+                "q_table_size": data.get("q_table_size", 0),
+                "think": data.get("thought", data.get("think", "")),
+                "action": data.get("action", ""),
+                "observation": data.get("observation", ""),
+                "step_reward": data.get("step_reward", 0),
+            })
+        except Exception:
+            pass
+
+    # Fall back to latest react trace
+    if not result["action"]:
+        latest = get_react_latest()
+        if latest and latest.get("steps"):
+            last_step = latest["steps"][-1] if latest["steps"] else {}
+            result.update({
+                "step": len(latest["steps"]),
+                "think": last_step.get("thought", last_step.get("think", "")),
+                "action": last_step.get("action", ""),
+                "observation": last_step.get("observation", str(last_step.get("status", ""))),
+                "step_reward": 1.0 if last_step.get("result") else -0.5,
+            })
+        trace = latest.get("trace") or {}
+        if trace:
+            result["total_steps"] = trace.get("total_steps", result["total_steps"])
+            result["reward"] = trace.get("total_reward", result["reward"])
+
+    # Deep think data
+    deep_file = STATE_DIR / "deep_think.json"
+    if deep_file.exists():
+        try:
+            result["deep_think"] = json.loads(deep_file.read_text())
+        except Exception:
+            pass
+
+    # Q-table size from evograph
+    if result["q_table_size"] == 0 and EVOGRAPH_DB.exists():
+        try:
+            for tbl in ("q_table", "qtable", "q_values"):
+                if _table_exists(EVOGRAPH_DB, tbl):
+                    result["q_table_size"] = _scalar(EVOGRAPH_DB, f"SELECT COUNT(*) FROM {tbl}") or 0
+                    break
+        except Exception:
+            pass
+
+    return result
+
+
 # ── API data helpers ──
 
 def get_overview():
@@ -536,6 +914,22 @@ def get_overview():
         except Exception:
             pass
 
+    # Merge live metrics from viper_state.json (updated during scans)
+    try:
+        state = get_state()
+        if state and "metrics" in state:
+            m = state["metrics"]
+            data["live"] = {
+                "total_requests": m.get("total_requests", 0),
+                "total_findings": m.get("total_findings", 0),
+                "validated_findings": m.get("validated_findings", 0),
+                "false_positives_caught": m.get("false_positives_caught", 0),
+                "sessions_run": m.get("sessions_run", 0),
+                "uptime_seconds": m.get("uptime_seconds", 0),
+            }
+    except Exception:
+        pass
+
     return data
 
 
@@ -571,7 +965,31 @@ def get_risk_score():
     else:
         grade = "A"
 
-    return {"score": score, "grade": grade, "breakdown": breakdown, "raw_weight": raw}
+    # Determine trend based on recent findings
+    trend = "stable"
+    try:
+        recent_24h = _scalar(
+            VIPER_DB,
+            "SELECT COUNT(*) FROM findings WHERE found_at >= datetime('now', '-1 day')",
+        )
+        recent_48h = _scalar(
+            VIPER_DB,
+            "SELECT COUNT(*) FROM findings WHERE found_at >= datetime('now', '-2 day') AND found_at < datetime('now', '-1 day')",
+        )
+        if recent_24h > recent_48h:
+            trend = "worsening"
+        elif recent_24h < recent_48h:
+            trend = "improving"
+    except Exception:
+        pass
+
+    return {
+        "score": score, "grade": grade, "breakdown": breakdown, "raw_weight": raw,
+        "trend": trend,
+        "critical": breakdown.get("critical", 0),
+        "high": breakdown.get("high", 0),
+        "medium": breakdown.get("medium", 0),
+    }
 
 
 def get_findings(severity=None, vuln_type=None, domain=None, page=1, limit=50):
@@ -1362,6 +1780,420 @@ def get_session_detail(session_id):
     return {}
 
 
+# ── Sandboxed Terminal Execution ──
+# Two modes:
+#   LOCAL  — pentest tools only (nuclei, subfinder, curl, etc.), no system access
+#   TARGET — full shell via SSH/session proxy to authorized remote target
+#
+# Target sessions are registered via POST /api/terminal/connect
+# {target: "192.168.1.100", method: "ssh", user: "root", port: 22}
+
+_TERMINAL_SESSIONS = {}  # session_id -> {target, method, ...}
+_active_scans = {}  # scan_id -> {id, target, status, phase, findings, log}
+
+# Hard blocks — NEVER allowed in any mode
+_HARD_BLOCKED = [
+    "rm -rf /", "mkfs", "dd if=/dev/zero", ":()", "fork bomb",
+    "shutdown -h now", "init 0", "halt -f",
+    # Host system attacks
+    "powershell -enc", "reg add", "schtasks /create",
+]
+
+# Pentest tools allowed in local mode (no target session)
+_LOCAL_ALLOWED = {
+    # Recon
+    "nmap", "naabu", "subfinder", "amass", "httpx", "katana", "gau",
+    "hakrawler", "waybackurls", "ffuf", "gobuster", "dirb", "dirsearch",
+    "nikto", "whatweb",
+    # Scanners
+    "nuclei", "sqlmap", "commix", "xsstrike", "dalfox", "tplmap",
+    "wfuzz", "arjun", "paramspider",
+    # Network
+    "curl", "wget", "dig", "nslookup", "whois", "host", "traceroute",
+    "ping", "nc", "netcat",
+    # Exploitation
+    "hydra", "medusa", "msfconsole", "msfvenom",
+    # Crypto / encoding
+    "base64", "openssl", "hashcat", "john",
+    # Pipe utilities (allowed in pipelines)
+    "jq", "grep", "head", "tail", "wc", "sort", "uniq", "awk", "sed",
+    "tr", "cut", "tee", "xargs",
+}
+
+
+def _sandboxed_execute(cmd: str, session_id: str) -> dict:
+    """Execute a command in pentest terminal.
+
+    Two modes:
+    - No target session: only pentest tools allowed (local recon against remote targets)
+    - Target session active: full shell proxied to remote target via SSH
+
+    Security:
+    - Hard-blocked patterns always rejected
+    - Local mode: allowlist-only, sensitive env stripped, temp cwd, 60s timeout
+    - Target mode: proxied via SSH to remote host, never runs on host
+    - Output capped at 50KB
+    """
+    import shlex
+    import shutil as _shutil
+
+    cmd_stripped = cmd.strip()
+    if not cmd_stripped:
+        return {"output": "", "exit_code": 0, "session_id": session_id}
+
+    cmd_lower = cmd_stripped.lower()
+
+    # Block shell metacharacters that enable command chaining/injection
+    _SHELL_METACHARS = [";", "&&", "||", "$(", "`", "<(", ">(", ">>", ">{",
+                        "${", "\\n", "\n"]
+    for meta in _SHELL_METACHARS:
+        if meta in cmd_stripped:
+            return {
+                "output": f"[BLOCKED] Shell metacharacter '{meta}' detected.\n"
+                          "Commands must be single tools — no chaining (;), "
+                          "substitution ($(...)), or redirection.\n"
+                          "Use pipes (|) with allowed filter tools only.",
+                "exit_code": -1, "session_id": session_id,
+            }
+
+    # Hard blocks — always
+    for pattern in _HARD_BLOCKED:
+        if pattern.lower() in cmd_lower:
+            return {
+                "output": f"[BLOCKED] '{pattern}' is never allowed.",
+                "exit_code": -1, "session_id": session_id,
+            }
+
+    # Check if there's an active target session
+    session = _TERMINAL_SESSIONS.get(session_id)
+
+    if session and session.get("target"):
+        # ── TARGET MODE: proxy command to remote host ──
+        target = session["target"]
+        method = session.get("method", "ssh")
+        user = session.get("user", "root")
+        port = session.get("port", 22)
+        key_file = session.get("key_file")
+
+        if method == "ssh":
+            ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no",
+                       "-o", "ConnectTimeout=10"]
+            if key_file:
+                ssh_cmd += ["-i", key_file]
+            ssh_cmd += ["-p", str(port), f"{user}@{target}", cmd_stripped]
+
+            try:
+                bash_path = _shutil.which("bash")
+                full_cmd = " ".join(ssh_cmd)
+                if bash_path:
+                    result = subprocess.run(
+                        [bash_path, "-c", full_cmd],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                else:
+                    result = subprocess.run(
+                        ssh_cmd, capture_output=True, text=True, timeout=60,
+                    )
+                output = (result.stdout + result.stderr)[:50000]
+                return {
+                    "output": output,
+                    "exit_code": result.returncode,
+                    "session_id": session_id,
+                    "target": target,
+                    "mode": "ssh",
+                }
+            except subprocess.TimeoutExpired:
+                return {"output": "[TIMEOUT] SSH command exceeded 60s.", "exit_code": -1, "session_id": session_id}
+            except Exception as e:
+                return {"output": f"[SSH ERROR] {e}", "exit_code": -1, "session_id": session_id}
+        else:
+            return {"output": f"[ERROR] Unknown proxy method: {method}. Use 'ssh'.", "exit_code": -1, "session_id": session_id}
+
+    # ── LOCAL MODE: pentest tools only ──
+    # Parse the base command of each pipe segment
+    pipe_parts = cmd_stripped.split("|")
+    for i, part in enumerate(pipe_parts):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            tokens = shlex.split(part)
+        except ValueError:
+            tokens = part.split()
+        if not tokens:
+            continue
+        base_cmd = os.path.basename(tokens[0]).lower().replace(".exe", "")
+
+        # First command in pipeline must be an allowed tool
+        # Subsequent pipe commands can be utilities (grep, head, jq, etc.)
+        if i == 0 and base_cmd not in _LOCAL_ALLOWED:
+            return {
+                "output": (
+                    f"[LOCAL MODE] '{base_cmd}' is not a pentest tool.\n"
+                    f"Allowed: {', '.join(sorted(list(_LOCAL_ALLOWED)[:25]))}...\n\n"
+                    "To run commands ON a target, connect first:\n"
+                    "  POST /api/terminal/connect {\"target\": \"192.168.1.100\", \"user\": \"root\"}\n"
+                    "  Or type: !connect root@192.168.1.100"
+                ),
+                "exit_code": -1, "session_id": session_id,
+            }
+        elif i > 0 and base_cmd not in _LOCAL_ALLOWED:
+            return {
+                "output": f"[BLOCKED] '{base_cmd}' not allowed in pipe. Use: grep, head, tail, jq, sort, etc.",
+                "exit_code": -1, "session_id": session_id,
+            }
+
+    # Execute locally with sandboxed env
+    try:
+        bash_path = _shutil.which("bash")
+        env = os.environ.copy()
+        go_bin = os.path.expanduser("~/go/bin")
+        if os.path.isdir(go_bin):
+            env["PATH"] = go_bin + os.pathsep + env.get("PATH", "")
+        # Strip sensitive env vars
+        for key in ["AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GITHUB_TOKEN",
+                     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SHODAN_API_KEY"]:
+            env.pop(key, None)
+
+        import tempfile
+        sandbox_dir = os.path.join(tempfile.gettempdir(), "viper_sandbox")
+        os.makedirs(sandbox_dir, exist_ok=True)
+
+        if bash_path:
+            result = subprocess.run(
+                [bash_path, "-c", cmd_stripped],
+                capture_output=True, text=True,
+                timeout=60, cwd=sandbox_dir, env=env,
+            )
+        else:
+            result = subprocess.run(
+                cmd_stripped, shell=True, capture_output=True, text=True,
+                timeout=60, cwd=sandbox_dir, env=env,
+            )
+        output = (result.stdout + result.stderr)[:50000]
+        return {"output": output, "exit_code": result.returncode, "session_id": session_id, "mode": "local"}
+    except subprocess.TimeoutExpired:
+        return {"output": "[TIMEOUT] Command exceeded 60s.", "exit_code": -1, "session_id": session_id}
+    except Exception as e:
+        return {"output": f"[ERROR] {e}", "exit_code": -1, "session_id": session_id}
+
+
+# ── NLP Command Mapping for Terminal ──
+
+NLP_COMMANDS = {
+    "scan ports": "nmap -sV {target}",
+    "port scan": "nmap -sV {target}",
+    "find subdomains": "subfinder -d {target}",
+    "subdomain enum": "subfinder -d {target}",
+    "crawl website": "katana -u {target} -d 3",
+    "crawl": "katana -u {target} -d 3",
+    "spider": "katana -u {target} -d 3",
+    "check headers": "curl -I {target}",
+    "http headers": "curl -I {target}",
+    "nuclei scan": "nuclei -u {target} -severity critical,high",
+    "vulnerability scan": "nuclei -u {target} -severity critical,high",
+    "vuln scan": "nuclei -u {target} -severity critical,high",
+    "directory brute": "ffuf -u {target}/FUZZ -w wordlists/common.txt",
+    "dir brute": "ffuf -u {target}/FUZZ -w wordlists/common.txt",
+    "fuzz directories": "ffuf -u {target}/FUZZ -w wordlists/common.txt",
+    "find urls": "gau {target}",
+    "url discovery": "gau {target}",
+    "get urls": "gau {target}",
+    "whois": "whois {target}",
+    "dns lookup": "dig {target} ANY",
+    "dns records": "dig {target} ANY",
+    "ssl check": "sslscan {target}",
+    "ssl scan": "sslscan {target}",
+    "tech detect": "httpx -u {target} -tech-detect",
+    "detect technology": "httpx -u {target} -tech-detect",
+    "screenshot": "gowitness single {target}",
+    "take screenshot": "gowitness single {target}",
+    "find js files": "katana -u {target} -d 2 -jc -ef css,png,jpg,gif,svg,woff",
+    "js files": "katana -u {target} -d 2 -jc -ef css,png,jpg,gif,svg,woff",
+    "check cors": "curl -s -I -H 'Origin: https://evil.com' {target} | grep -i access-control",
+    "cors check": "curl -s -I -H 'Origin: https://evil.com' {target} | grep -i access-control",
+    "find parameters": "paramspider -d {target}",
+    "param discovery": "paramspider -d {target}",
+    "xss scan": "dalfox url {target}",
+    "sqli scan": "sqlmap -u {target} --batch --level 2",
+    "sql injection": "sqlmap -u {target} --batch --level 2",
+    "check waf": "wafw00f {target}",
+    "waf detect": "wafw00f {target}",
+}
+
+
+def _nlp_to_command(query):
+    """Convert natural language query to a shell command."""
+    query_lower = query.lower().strip()
+
+    # Extract target from query (last URL-like or IP-like token)
+    tokens = query.split()
+    target = ""
+    for tok in reversed(tokens):
+        if "." in tok or ":" in tok or "/" in tok:
+            target = tok
+            break
+
+    # Try matching against NLP_COMMANDS
+    best_match = None
+    best_score = 0
+    for key, cmd_template in NLP_COMMANDS.items():
+        words = key.split()
+        score = sum(1 for w in words if w in query_lower)
+        if score > best_score:
+            best_score = score
+            best_match = (key, cmd_template)
+
+    if best_match and best_score > 0:
+        cmd = best_match[1].format(target=target) if target else best_match[1].replace(" {target}", "")
+        return {
+            "command": cmd,
+            "explanation": f"Matched '{best_match[0]}' pattern. Uses {cmd.split()[0]} tool.",
+            "confidence": min(1.0, best_score / len(best_match[0].split())),
+        }
+
+    return {
+        "command": "",
+        "explanation": "Could not map query to a known command. Try being more specific.",
+        "confidence": 0,
+    }
+
+
+# ── Chat History Store ──
+
+_chat_history = []  # In-memory chat history (persisted to state/chat_history.json)
+_chat_lock = threading.Lock()
+
+CHAT_HISTORY_FILE = STATE_DIR / "chat_history.json"
+
+
+def _load_chat_history():
+    """Load chat history from file."""
+    global _chat_history
+    if CHAT_HISTORY_FILE.exists():
+        try:
+            _chat_history = json.loads(CHAT_HISTORY_FILE.read_text())
+        except Exception:
+            _chat_history = []
+
+
+def _save_chat_history():
+    """Persist chat history to file."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        CHAT_HISTORY_FILE.write_text(json.dumps(_chat_history[-500:], default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+# ── CodeFix Job Tracker ──
+
+_codefix_jobs = {}  # job_id -> {status, finding_id, repo_path, started, result}
+_codefix_lock = threading.Lock()
+
+
+def _start_codefix_job(finding_id, repo_path):
+    """Start a codefix job (stub — queues for processing)."""
+    job_id = str(uuid.uuid4())[:8]
+    with _codefix_lock:
+        _codefix_jobs[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "finding_id": finding_id,
+            "repo_path": repo_path,
+            "started": time.time(),
+            "result": None,
+        }
+    # In a real implementation, this would dispatch to CypherFix engine
+    # For now, simulate async processing
+    def _run():
+        time.sleep(2)
+        with _codefix_lock:
+            if job_id in _codefix_jobs:
+                _codefix_jobs[job_id]["status"] = "completed"
+                _codefix_jobs[job_id]["result"] = {
+                    "patches": [],
+                    "message": f"CodeFix analysis complete for finding #{finding_id}. No auto-patches generated yet — CypherFix engine integration pending.",
+                }
+    threading.Thread(target=_run, daemon=True).start()
+    return job_id
+
+
+def get_insights_charts():
+    """Aggregated chart data for all insight charts — single endpoint."""
+    result = {
+        "cvss_distribution": [],
+        "kill_chain": [],
+        "tech_vulns": [],
+        "timeline": [],
+        "severity_pie": [],
+        "top_vuln_types": [],
+    }
+
+    if not VIPER_DB.exists():
+        return result
+
+    # Severity pie
+    for sev in ("critical", "high", "medium", "low", "info"):
+        count = _scalar(VIPER_DB, "SELECT COUNT(*) FROM findings WHERE LOWER(severity)=?", (sev,))
+        if count:
+            result["severity_pie"].append({"severity": sev, "count": count})
+
+    # CVSS distribution (buckets)
+    try:
+        rows = _query(VIPER_DB, "SELECT cvss_score FROM findings WHERE cvss_score IS NOT NULL")
+        buckets = {f"{i}-{i+1}": 0 for i in range(0, 10)}
+        for r in rows:
+            score = float(r.get("cvss_score", 0) or 0)
+            bucket_key = f"{int(score)}-{int(score)+1}" if score < 10 else "9-10"
+            if bucket_key in buckets:
+                buckets[bucket_key] += 1
+        result["cvss_distribution"] = [{"range": k, "count": v} for k, v in buckets.items() if v > 0]
+    except Exception:
+        pass
+
+    # Kill chain
+    try:
+        result["kill_chain"] = get_attack_kill_chain()
+    except Exception:
+        pass
+
+    # Tech vulnerability counts
+    try:
+        tech_map = get_evograph_tech_map()
+        if isinstance(tech_map, list):
+            result["tech_vulns"] = tech_map[:20]
+        elif isinstance(tech_map, dict) and "technologies" in tech_map:
+            result["tech_vulns"] = tech_map["technologies"][:20]
+    except Exception:
+        pass
+
+    # Timeline
+    try:
+        result["timeline"] = get_findings_timeline()
+    except Exception:
+        pass
+
+    # Top vuln types
+    try:
+        by_type = get_findings_by_type()
+        if isinstance(by_type, dict) and "types" in by_type:
+            result["top_vuln_types"] = by_type["types"][:15]
+        elif isinstance(by_type, list):
+            result["top_vuln_types"] = by_type[:15]
+    except Exception:
+        pass
+
+    return result
+
+
+# Load chat history on module import
+try:
+    _load_chat_history()
+except Exception:
+    pass
+
+
 # ── MIME types for static files ──
 
 MIME_TYPES = {
@@ -1434,7 +2266,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(content)))
             self._cors_headers()
-            self.send_header("Cache-Control", "public, max-age=3600")
+            # No caching for HTML (ensures fresh dashboard on reload)
+            if ext in ('.html', '.htm'):
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+            else:
+                self.send_header("Cache-Control", "public, max-age=3600")
             self.end_headers()
             self.wfile.write(content)
         except Exception:
@@ -1558,6 +2395,329 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"status": "received"})
             except Exception as e:
                 self._json_response({"error": str(e)}, status=400)
+
+        # ── Chat endpoints ──
+        elif path == "/api/chat/send":
+            try:
+                data = json.loads(body) if body else {}
+                msg = data.get("message", "").strip()
+                conv_id = data.get("conversation_id") or str(uuid.uuid4())[:8]
+                if not msg:
+                    self._json_response({"error": "Empty message"}, status=400)
+                    return
+
+                entry = {
+                    "conversation_id": conv_id,
+                    "role": "user",
+                    "message": msg,
+                    "timestamp": time.time(),
+                }
+                with _chat_lock:
+                    _chat_history.append(entry)
+
+                # Route through model_router for real AI response
+                ai_response = None
+                try:
+                    from ai.model_router import ModelRouter
+                    import asyncio
+                    router = ModelRouter()
+                    if router.is_available:
+                        system = (
+                            "You are VIPER, an autonomous bug bounty hunting AI assistant. "
+                            "You help with security testing, vulnerability analysis, and penetration testing. "
+                            "Be concise and actionable. You can suggest commands, analyze findings, "
+                            "and help plan attack strategies. The user has authorized security testing."
+                        )
+                        loop = asyncio.new_event_loop()
+                        try:
+                            resp = loop.run_until_complete(router.complete(msg, system=system))
+                            if resp and resp.text:
+                                ai_response = resp.text
+                        finally:
+                            loop.close()
+                except Exception as llm_err:
+                    logger.debug("LLM chat failed: %s", llm_err)
+
+                if not ai_response:
+                    ai_response = f"[LLM unavailable] Received: '{msg[:100]}'. Try the terminal for direct command execution."
+                ai_entry = {
+                    "conversation_id": conv_id,
+                    "role": "assistant",
+                    "message": ai_response,
+                    "timestamp": time.time(),
+                }
+                with _chat_lock:
+                    _chat_history.append(ai_entry)
+                    _save_chat_history()
+
+                self._json_response({
+                    "response": ai_response,
+                    "conversation_id": conv_id,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/chat/history":
+            # POST variant for filtered history
+            try:
+                data = json.loads(body) if body else {}
+                conv_id = data.get("conversation_id")
+                with _chat_lock:
+                    if conv_id:
+                        msgs = [m for m in _chat_history if m.get("conversation_id") == conv_id]
+                    else:
+                        msgs = list(_chat_history[-100:])
+                self._json_response({"messages": msgs, "total": len(msgs)})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Terminal endpoints (SANDBOXED — pentest tools only, remote targets only) ──
+        elif path == "/api/terminal/execute":
+            try:
+                data = json.loads(body) if body else {}
+                cmd = data.get("command", "").strip()
+                session_id = data.get("session_id") or str(uuid.uuid4())[:8]
+                if not cmd:
+                    self._json_response({"error": "Empty command"}, status=400)
+                    return
+
+                # Handle !connect and !disconnect shortcuts
+                if cmd.startswith("!connect "):
+                    target_str = cmd[9:].strip()
+                    user = "root"
+                    port = 22
+                    if "@" in target_str:
+                        user, target_str = target_str.rsplit("@", 1)
+                    if ":" in target_str:
+                        target_str, port_str = target_str.rsplit(":", 1)
+                        try: port = int(port_str)
+                        except ValueError: pass
+                    # Security: block localhost/self targeting
+                    _blocked_targets = {"127.0.0.1", "localhost", "0.0.0.0", "::1",
+                                        "host.docker.internal"}
+                    if target_str.lower() in _blocked_targets or target_str.startswith("192.168.") is False and target_str.startswith("10.") is False and target_str.startswith("172.") is False:
+                        pass  # Allow private IPs
+                    if target_str.lower() in _blocked_targets:
+                        self._json_response({
+                            "output": f"[BLOCKED] Cannot connect to {target_str} — localhost/self targeting not allowed.",
+                            "exit_code": -1, "session_id": session_id,
+                        })
+                        return
+                    _TERMINAL_SESSIONS[session_id] = {
+                        "target": target_str, "user": user, "port": port,
+                        "method": "ssh", "key_file": None, "connected_at": time.time(),
+                    }
+                    self._json_response({
+                        "output": f"[CONNECTED] Session proxied to {user}@{target_str}:{port} via SSH.\n"
+                                  "All commands now execute on the remote target.\n"
+                                  "Type '!disconnect' to return to local mode.",
+                        "exit_code": 0, "session_id": session_id, "mode": "ssh",
+                    })
+                    return
+                if cmd.strip() == "!disconnect":
+                    _TERMINAL_SESSIONS.pop(session_id, None)
+                    self._json_response({
+                        "output": "[DISCONNECTED] Back to local pentest tool mode.",
+                        "exit_code": 0, "session_id": session_id, "mode": "local",
+                    })
+                    return
+                if cmd.strip() == "!status":
+                    sess = _TERMINAL_SESSIONS.get(session_id)
+                    if sess:
+                        self._json_response({
+                            "output": f"[TARGET MODE] Connected to {sess['user']}@{sess['target']}:{sess['port']} via {sess['method']}",
+                            "exit_code": 0, "session_id": session_id,
+                        })
+                    else:
+                        self._json_response({
+                            "output": "[LOCAL MODE] Pentest tools only. Type '!connect user@target' to proxy to a remote host.",
+                            "exit_code": 0, "session_id": session_id,
+                        })
+                    return
+
+                result = _sandboxed_execute(cmd, session_id)
+                self._json_response(result)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/terminal/connect":
+            # Connect a terminal session to a remote target
+            try:
+                data = json.loads(body) if body else {}
+                target = data.get("target", "").strip()
+                session_id = data.get("session_id") or str(uuid.uuid4())[:8]
+                if not target:
+                    self._json_response({"error": "Target required"}, status=400)
+                    return
+                # Parse user@host format
+                user = data.get("user", "root")
+                if "@" in target:
+                    user, target = target.rsplit("@", 1)
+                port = int(data.get("port", 22))
+                method = data.get("method", "ssh")
+                key_file = data.get("key_file")
+
+                _TERMINAL_SESSIONS[session_id] = {
+                    "target": target,
+                    "user": user,
+                    "port": port,
+                    "method": method,
+                    "key_file": key_file,
+                    "connected_at": time.time(),
+                }
+                self._json_response({
+                    "status": "connected",
+                    "session_id": session_id,
+                    "target": target,
+                    "user": user,
+                    "method": method,
+                    "message": f"Session {session_id} connected to {user}@{target}:{port} via {method}. "
+                               "All commands will now execute on the remote target.",
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/terminal/disconnect":
+            try:
+                data = json.loads(body) if body else {}
+                session_id = data.get("session_id", "")
+                if session_id in _TERMINAL_SESSIONS:
+                    del _TERMINAL_SESSIONS[session_id]
+                self._json_response({"status": "disconnected", "session_id": session_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/scan/start":
+            # Start a REAL VIPER hunt in a background thread
+            try:
+                data = json.loads(body) if body else {}
+                target = data.get("target", "").strip()
+                if not target:
+                    self._json_response({"error": "Target URL required"}, status=400)
+                    return
+                scan_id = str(uuid.uuid4())[:8]
+                _active_scans[scan_id] = {
+                    "id": scan_id, "target": target, "status": "starting",
+                    "started_at": time.time(), "phase": "init", "progress": 0,
+                    "findings": 0, "log": [],
+                }
+
+                def _run_scan():
+                    import asyncio
+                    scan = _active_scans[scan_id]
+                    try:
+                        scan["status"] = "running"
+                        _ws_broadcast("scan_started", {"scan_id": scan_id, "target": target})
+                        event_bus.publish("scan_started", {"scan_id": scan_id, "target": target})
+
+                        from viper_core import ViperCore
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        v = ViperCore()
+
+                        # Hook into VIPER's log to broadcast events
+                        orig_log = v.log
+                        def hooked_log(msg, level="INFO"):
+                            orig_log(msg, level)
+                            scan["log"].append(msg)
+                            scan["log"] = scan["log"][-200:]
+                            # Detect phase changes
+                            if "Phase" in msg and "===" in msg:
+                                import re as _re
+                                m = _re.search(r"Phase\s+\d+[^:]*:\s*(.+?)(?:\s*===|\s*\()", msg)
+                                if m:
+                                    scan["phase"] = m.group(1).strip()
+                                    _ws_broadcast("phase_update", {"phase": scan["phase"], "scan_id": scan_id})
+                            if "[+]" in msg or "[SUCCESS]" in msg:
+                                scan["findings"] += 1
+                                _ws_broadcast("finding_new", {"text": msg, "scan_id": scan_id})
+                            _ws_broadcast("log_line", {"text": msg, "level": level, "scan_id": scan_id})
+                        v.log = hooked_log
+
+                        result = loop.run_until_complete(v.full_hunt(target, max_minutes=15))
+                        loop.close()
+
+                        scan["status"] = "completed"
+                        scan["result"] = {
+                            "findings": len(result.get("findings", [])),
+                            "requests": result.get("total_requests", 0),
+                        }
+                        _ws_broadcast("scan_completed", {"scan_id": scan_id, "findings": scan["findings"], "target": target})
+                    except Exception as e:
+                        scan["status"] = "error"
+                        scan["error"] = str(e)
+                        _ws_broadcast("scan_error", {"scan_id": scan_id, "error": str(e)})
+
+                t = threading.Thread(target=_run_scan, daemon=True)
+                t.start()
+                self._json_response({"scan_id": scan_id, "status": "started", "target": target})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/scan/status":
+            try:
+                data = json.loads(body) if body else {}
+                scan_id = data.get("scan_id", "")
+                scan = _active_scans.get(scan_id)
+                if scan:
+                    self._json_response(scan)
+                else:
+                    self._json_response({"error": "Scan not found"}, status=404)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/terminal/nlp":
+            try:
+                data = json.loads(body) if body else {}
+                query = data.get("query", "").strip()
+                if not query:
+                    self._json_response({"error": "Empty query"}, status=400)
+                    return
+                result = _nlp_to_command(query)
+                self._json_response(result)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── CodeFix endpoints ──
+        elif path == "/api/codefix/run":
+            try:
+                data = json.loads(body) if body else {}
+                finding_id = data.get("finding_id")
+                repo_path = data.get("repo_path", str(PROJECT_ROOT))
+                if finding_id is None:
+                    self._json_response({"error": "finding_id required"}, status=400)
+                    return
+                job_id = _start_codefix_job(finding_id, repo_path)
+                self._json_response({"status": "started", "job_id": job_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Export endpoints ──
+        elif path == "/api/export/excel":
+            try:
+                # Export findings as CSV
+                findings_data = get_triage_findings()
+                findings = findings_data.get("findings", [])
+
+                output = io.StringIO()
+                if findings:
+                    fieldnames = ["id", "severity", "vuln_type", "url", "description",
+                                  "confidence", "validated", "domain", "priority_score", "found_at"]
+                    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+                    writer.writeheader()
+                    for f in findings:
+                        writer.writerow(f)
+
+                csv_bytes = output.getvalue().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", "attachment; filename=viper_findings.csv")
+                self.send_header("Content-Length", str(len(csv_bytes)))
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(csv_bytes)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
 
         else:
             self.send_error(404)
@@ -1758,10 +2918,95 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self._json_response({"query": q, "results": []})
 
+        elif path == "/api/agents/status":
+            # v5: Multi-agent subsystem status
+            agent_status = {"available": False, "agents": [], "bus_stats": {}}
+            try:
+                from core.agent_bus import AgentBus
+                from core.agent_registry import AgentRegistry
+                agent_status["available"] = True
+                # Show registered agent types
+                agent_status["agent_types"] = [
+                    {"name": "ReconAgent", "topic": "recon", "description": "Subdomain enum, tech fingerprint, asset discovery"},
+                    {"name": "VulnAgent", "topic": "vuln", "description": "Tree-of-Thought hypothesis generation"},
+                    {"name": "ExploitAgent", "topic": "exploit", "description": "Non-destructive PoC development"},
+                    {"name": "ChainAgent", "topic": "chain", "description": "Attack chain discovery + cross-target correlation"},
+                ]
+            except ImportError:
+                pass
+            self._json_response(agent_status)
+
+        elif path == "/api/agents/monitor":
+            # v5: Real-time agent monitor data
+            self._json_response(get_agent_monitor())
+
+        elif path == "/api/scans":
+            # List all active/recent scans
+            scans = sorted(_active_scans.values(), key=lambda s: s.get("started_at", 0), reverse=True)
+            self._json_response({"scans": scans[:20]})
+
+        elif path == "/api/react/current":
+            # v5: Current ReACT step for visualizer
+            self._json_response(get_react_current())
+
+        elif path == "/api/v5/modules":
+            # v5: Module availability status
+            modules = {}
+            mod_checks = {
+                "agent_bus": "core.agent_bus",
+                "agent_registry": "core.agent_registry",
+                "oauth_fuzzer": "core.oauth_fuzzer",
+                "websocket_fuzzer": "core.websocket_fuzzer",
+                "race_engine": "core.race_engine",
+                "logic_modeler": "core.logic_modeler",
+                "failure_analyzer": "core.failure_analyzer",
+                "cross_target_correlator": "core.cross_target_correlator",
+                "genetic_fuzzer": "core.fuzzer",
+                "fingerprint_randomizer": "core.stealth",
+                "human_timing": "core.rate_limiter",
+                "chain_of_custody": "core.chain_of_custody",
+                "cvss_v4": "core.reporter",
+                "finding_stream": "core.finding_stream",
+            }
+            for name, mod_path in mod_checks.items():
+                try:
+                    __import__(mod_path)
+                    modules[name] = True
+                except ImportError:
+                    modules[name] = False
+            self._json_response({"version": "5.0", "modules": modules, "total": sum(modules.values()), "of": len(modules)})
+
+        elif path == "/api/v5/failure-lessons":
+            # v5: Failure analyzer lessons
+            lessons = {"total": 0, "lessons": [], "waf_stats": {}}
+            try:
+                from core.failure_analyzer import FailureAnalyzer
+                fa = FailureAnalyzer()
+                stats = fa.get_stats()
+                lessons["total"] = stats["total_lessons"]
+                lessons["waf_stats"] = stats["waf_detections"]
+                lessons["attack_types"] = stats["attack_types"]
+                lessons["lessons"] = [l.to_dict() for l in fa.lessons[-20:]]
+            except Exception:
+                pass
+            self._json_response(lessons)
+
+        elif path == "/api/v5/evolution":
+            # v5: Attack evolution graph
+            evolution = {"nodes": [], "edges": []}
+            try:
+                from core.evograph import EvoGraph
+                evo = EvoGraph()
+                evolution = evo.export_attack_evolution()
+                evo.close()
+            except Exception:
+                pass
+            self._json_response(evolution)
+
         elif path == "/api/status":
             import shutil
             status = {
-                "version": "4.0",
+                "version": "5.0",
                 "uptime_seconds": 0,
                 "dashboard_started": getattr(self.server, '_start_time', None),
                 "db_connected": VIPER_DB.exists() if VIPER_DB else False,
@@ -1770,15 +3015,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     tool: shutil.which(tool) is not None
                     for tool in ["nuclei", "httpx", "subfinder", "katana", "gau", "curl"]
                 },
+                "v5_modules": {},
             }
-            # Add DB stats if available
+            # Check v5 module availability
+            for mod_name in ["core.agent_bus", "core.oauth_fuzzer", "core.race_engine",
+                             "core.failure_analyzer", "core.chain_of_custody", "core.finding_stream"]:
+                try:
+                    __import__(mod_name)
+                    status["v5_modules"][mod_name.split(".")[-1]] = True
+                except ImportError:
+                    status["v5_modules"][mod_name.split(".")[-1]] = False
+            # Add DB stats
             try:
-                db = _get_db()
-                if db:
-                    s = db.stats()
-                    status["targets"] = s.get("targets", 0)
-                    status["findings"] = s.get("findings", 0)
-                    status["attacks"] = s.get("attacks", 0)
+                rows = _query(VIPER_DB, "SELECT COUNT(*) as c FROM targets")
+                status["targets"] = rows[0]["c"] if rows else 0
+                rows = _query(VIPER_DB, "SELECT COUNT(*) as c FROM findings")
+                status["findings"] = rows[0]["c"] if rows else 0
+                rows = _query(VIPER_DB, "SELECT COUNT(*) as c FROM attacks")
+                status["attacks"] = rows[0]["c"] if rows else 0
+            except Exception:
+                status["targets"] = 0
+                status["findings"] = 0
+                status["attacks"] = 0
+            # Add live state from viper_state.json
+            try:
+                state_data = get_state()
+                if state_data and "metrics" in state_data:
+                    m = state_data["metrics"]
+                    status["live_metrics"] = {
+                        "total_requests": m.get("total_requests", 0),
+                        "total_findings": m.get("total_findings", 0),
+                        "validated_findings": m.get("validated_findings", 0),
+                        "false_positives_caught": m.get("false_positives_caught", 0),
+                        "sessions_run": m.get("sessions_run", 0),
+                    }
             except Exception:
                 pass
             self._json_response(status)
@@ -1826,6 +3096,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self._json_response({"error": "Invalid session ID"}, 400)
 
+        # ── New interactive dashboard API endpoints ──
+        elif path == "/api/chat/history":
+            with _chat_lock:
+                msgs = list(_chat_history[-100:])
+            self._json_response({"messages": msgs, "total": len(msgs)})
+
+        elif path == "/api/insights/charts":
+            self._json_response(get_insights_charts())
+
+        elif path.startswith("/api/codefix/status/"):
+            job_id = path.split("/api/codefix/status/", 1)[1]
+            with _codefix_lock:
+                job = _codefix_jobs.get(job_id)
+            if job:
+                self._json_response(job)
+            else:
+                self._json_response({"error": "Job not found"}, 404)
+
         # ── VIPER 4.0 dashboard pages ──
         elif path == "/graph":
             self._serve_file(DASHBOARD_DIR / "graph_viz.html", "text/html")
@@ -1836,8 +3124,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/chat":
             self._serve_file(DASHBOARD_DIR / "chat.html", "text/html")
 
+        elif path == "/chat-v2":
+            self._serve_file(DASHBOARD_DIR / "chat_v2.html", "text/html")
+
         elif path == "/terminal":
             self._serve_file(DASHBOARD_DIR / "terminal.html", "text/html")
+
+        elif path == "/terminal-v2":
+            self._serve_file(DASHBOARD_DIR / "terminal_v2.html", "text/html")
+
+        elif path == "/insights-v2":
+            self._serve_file(DASHBOARD_DIR / "insights_v2.html", "text/html")
+
+        elif path == "/cypherfix-v2":
+            self._serve_file(DASHBOARD_DIR / "cypherfix_v2.html", "text/html")
 
         elif path == "/settings":
             self._serve_file(DASHBOARD_DIR / "settings_ui.html", "text/html")
@@ -1967,7 +3267,7 @@ def main():
                 break
 
     server = ThreadedHTTPServer(("127.0.0.1", port), DashboardHandler)
-    print(f"VIPER Dashboard running at http://localhost:{port}")
+    print(f"VIPER 5.0 Dashboard running at http://localhost:{port}")
     print(f"  DB: {VIPER_DB} ({'exists' if VIPER_DB.exists() else 'not found'})")
     print(f"  EvoGraph: {EVOGRAPH_DB} ({'exists' if EVOGRAPH_DB.exists() else 'not found'})")
     print(f"  Static: {DASHBOARD_DIR}")
@@ -2001,6 +3301,11 @@ def main():
     print(f"  POST /api/settings          — Save settings (V4)")
     print(f"  GET /api/triage             — Triage remediations (V4)")
     print(f"  GET /api/reports            — Report listing (V4)")
+    print(f"  GET /api/status             — System status (V5)")
+    print(f"  GET /api/agents/status      — Multi-agent status (V5)")
+    print(f"  GET /api/v5/modules         — V5 module availability")
+    print(f"  GET /api/v5/failure-lessons — Failure analysis lessons (V5)")
+    print(f"  GET /api/v5/evolution       — Attack evolution graph (V5)")
     print(f"  GET /api/agent/status       — Agent state (v4)")
     print(f"  GET /api/agent/thinking     — Deep-think results (v4)")
     print(f"  GET /api/triage/findings    — Triaged findings (v4)")
@@ -2010,6 +3315,14 @@ def main():
     print(f"  POST /api/agent/guidance    — Send guidance (v4)")
     print(f"  POST /api/agent/approve     — Approve/reject (v4)")
     print(f"  POST /api/agent/answer      — Answer question (v4)")
+    print(f"  POST /api/chat/send         — Send chat message (v4)")
+    print(f"  GET  /api/chat/history      — Chat history (v4)")
+    print(f"  POST /api/terminal/execute  — Execute command (v4)")
+    print(f"  POST /api/terminal/nlp      — NLP to command (v4)")
+    print(f"  GET  /api/insights/charts   — Aggregated charts (v4)")
+    print(f"  POST /api/codefix/run       — Start codefix job (v4)")
+    print(f"  GET  /api/codefix/status/:id— Codefix job status (v4)")
+    print(f"  POST /api/export/excel      — Export CSV (v4)")
 
     try:
         server.serve_forever()

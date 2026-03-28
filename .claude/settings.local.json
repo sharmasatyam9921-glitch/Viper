@@ -1,0 +1,94 @@
+{
+  "personalSettings": {
+    "hunterHandle": "viper-ashborn",
+    "preferredPlatforms": [
+      "hackerone",
+      "yogosha"
+    ],
+    "timezone": "America/Toronto"
+  },
+  "localPaths": {
+    "nucleiPath": "C:\\tools\\nuclei\\nuclei.exe",
+    "subfinderPath": "C:\\tools\\subfinder\\subfinder.exe",
+    "httpxPath": "C:\\tools\\httpx\\httpx.exe",
+    "nmapPath": "C:\\Program Files (x86)\\Nmap\\nmap.exe",
+    "burpSuite": "C:\\Program Files\\BurpSuitePro\\BurpSuitePro.exe"
+  },
+  "proxySettings": {
+    "enabled": false,
+    "httpProxy": "127.0.0.1:8080",
+    "httpsProxy": "127.0.0.1:8080",
+    "socksProxy": null,
+    "burpIntegration": {
+      "enabled": false,
+      "apiEndpoint": "http://127.0.0.1:1337",
+      "projectFile": null
+    }
+  },
+  "dashboardPreferences": {
+    "theme": "dark",
+    "autoRefresh": 30,
+    "maxRecentFindings": 50,
+    "showVulnerabilityTrends": true,
+    "enableDesktopNotifications": true
+  },
+  "aiModelOverrides": {
+    "signalAnalysis": "anthropic/claude-3-opus-20240229",
+    "complexVulnChains": "anthropic/claude-3-opus-20240229",
+    "quickScans": "google/gemini-flash-1.5-8b"
+  },
+  "customWordlists": {
+    "subdomains": "wordlists/custom_subdomains.txt",
+    "apiEndpoints": "wordlists/api_endpoints.txt",
+    "graphqlQueries": "wordlists/gql_queries.txt",
+    "sensitiveFiles": "wordlists/sensitive_files.txt"
+  },
+  "scanningPreferences": {
+    "aggressiveness": "moderate",
+    "respectRobotsTxt": true,
+    "userAgent": "VIPER Bug Bounty Scanner (Authorized Testing)",
+    "requestDelay": 0.5,
+    "maxRedirects": 5,
+    "timeout": 30
+  },
+  "reportingPreferences": {
+    "includeScreenshots": true,
+    "videoPoCs": false,
+    "detailedTimeline": true,
+    "includeTrafficLogs": false,
+    "preferredCVSSVersion": "3.1"
+  },
+  "integrations": {
+    "discord": {
+      "webhookUrl": "${DISCORD_WEBHOOK_URL}",
+      "enableAlerts": true,
+      "severityFilter": [
+        "high",
+        "critical"
+      ]
+    },
+    "telegram": {
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "chatId": "${TELEGRAM_CHAT_ID}",
+      "enableAlerts": true
+    },
+    "github": {
+      "repoOwner": "viper-ashborn",
+      "repoName": "bug-bounty-reports",
+      "enableAutoCommit": false
+    }
+  },
+  "backupSettings": {
+    "enabled": true,
+    "frequency": "daily",
+    "retention": 30,
+    "location": "backups/",
+    "includeFindings": true,
+    "includeLogs": false
+  },
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}

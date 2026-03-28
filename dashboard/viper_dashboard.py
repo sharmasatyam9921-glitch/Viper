@@ -153,16 +153,26 @@ def get_ml_models():
 def get_agents():
     """Get deployed/available agents"""
     agents = load_json(AGENTS_FILE, {"agents": []}).get("agents", [])
-    
-    # Default agents VIPER can deploy
+
+    # VIPER 5.0 agent roster (v5 multi-agent bus + legacy agents)
     defaults = [
-        {"name": "ReconAgent", "status": "ready", "purpose": "Subdomain & port discovery", "deployed": False},
-        {"name": "WebCrawler", "status": "ready", "purpose": "Spider web applications", "deployed": False},
-        {"name": "VulnScanner", "status": "ready", "purpose": "Automated vuln detection", "deployed": False},
-        {"name": "ExploitAgent", "status": "ready", "purpose": "Validate & exploit vulns", "deployed": False},
-        {"name": "ReportWriter", "status": "ready", "purpose": "Generate reports", "deployed": False}
+        {"name": "ReconAgent", "status": "ready", "purpose": "Subdomain enum, tech fingerprint, asset discovery", "deployed": False, "version": "v5", "topic": "recon"},
+        {"name": "VulnAgent", "status": "ready", "purpose": "Tree-of-Thought vulnerability hypothesis generation", "deployed": False, "version": "v5", "topic": "vuln"},
+        {"name": "ExploitAgent", "status": "ready", "purpose": "Non-destructive PoC development & validation", "deployed": False, "version": "v5", "topic": "exploit"},
+        {"name": "ChainAgent", "status": "ready", "purpose": "Attack chain discovery + cross-target correlation", "deployed": False, "version": "v5", "topic": "chain"},
+        {"name": "WebCrawler", "status": "ready", "purpose": "Spider web applications", "deployed": False, "version": "v4"},
+        {"name": "ReportWriter", "status": "ready", "purpose": "Generate CVSS v4.0 reports", "deployed": False, "version": "v5"}
     ]
-    
+
+    # Check v5 agent bus availability
+    try:
+        from core.agent_bus import AgentBus
+        for agent in defaults:
+            if agent.get("version") == "v5":
+                agent["bus_available"] = True
+    except ImportError:
+        pass
+
     return agents if agents else defaults
 
 
@@ -1026,4 +1036,4 @@ if __name__ == '__main__':
     print("🐍 VIPER Command Center v2")
     print("Starting on http://localhost:8889")
     app = create_app()
-    web.run_app(app, host='0.0.0.0', port=8889, print=None)
+    web.run_app(app, host='127.0.0.1', port=8889, print=None)

@@ -1,437 +1,181 @@
 ---
 name: hackagent
-description: Ethical bug bounty hunting agent. Reads program rules, performs authorized security testing, writes professional reports, and submits vulnerabilities to earn bounties. ALWAYS operates within scope and follows responsible disclosure.
-aliases: bugbounty, pentest, security-research
+description: "VIPER 5.0 — Autonomous bug bounty hunting agent with multi-agent architecture, 7-phase recon pipeline, 85+ core modules, 3D dashboard, and self-learning. $0 cost via Claude CLI OAuth."
+aliases: bugbounty, pentest, security-research, viper, hack
 ---
 
-# VIPER 🐍 - Ethical Bug Bounty Hunter
+# VIPER 5.0 — Autonomous Bug Bounty Hunter
 
-**Codename: Viper | Not a scanner. A hacker's brain.**
+Multi-agent AI-powered bug bounty bot. Pure Python, $0 cost (Claude CLI OAuth + Ollama), zero Docker required.
 
-*Strike fast. Strike silent. Earn bounties.*
+## Quick Start
 
-## 🧠 Core Philosophy
-
-A real hacker doesn't just run tools. They:
-
-1. **OBSERVE** - Notice anomalies others miss
-2. **HYPOTHESIZE** - "What if this endpoint doesn't validate...?"
-3. **TEST** - Craft specific probes based on hypothesis
-4. **ADAPT** - Change approach when blocked
-5. **CHAIN** - Combine small findings into critical exploits
-6. **PERSIST** - Don't give up, try creative bypasses
-
-HackAgent implements this cognitive process.
-
-## 🔥 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        HACKAGENT                                 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    HACKER MIND                           │   │
-│  │  • Phase-based reasoning (Recon→Exploit→Report)         │   │
-│  │  • Hypothesis generation from observations               │   │
-│  │  • Adaptive payload generation                           │   │
-│  │  • WAF detection and bypass strategies                   │   │
-│  │  • Attack chain construction                             │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              │                                   │
-│              ┌───────────────┼───────────────┐                  │
-│              ▼               ▼               ▼                  │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐       │
-│  │   RECON       │  │   SCANNER     │  │   REPORTER    │       │
-│  │   MODULE      │  │   MODULE      │  │   MODULE      │       │
-│  │               │  │               │  │               │       │
-│  │  • Subdomains │  │  • Nuclei     │  │  • Templates  │       │
-│  │  • Tech stack │  │  • SQLMap     │  │  • PoC gen    │       │
-│  │  • Wayback    │  │  • Custom     │  │  • Impact     │       │
-│  │  • Endpoints  │  │  • Fuzzing    │  │  • CVSS       │       │
-│  └───────────────┘  └───────────────┘  └───────────────┘       │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                 ATTACK PATTERNS DB                       │   │
-│  │  • OTP Bypass           • IDOR (UUID, GraphQL)          │   │
-│  │  • Password Reset       • SQL Injection (2nd order)     │   │
-│  │  • SSTI                 • SSRF to Cloud Metadata        │   │
-│  │  • Race Conditions      • Business Logic Flaws          │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │              🤖 AI/LLM ATTACK MODULE (NEW)               │   │
-│  │  • Prompt Injection (147 vectors)                       │   │
-│  │  • Jailbreaks (DAN, Developer Mode, Personas)           │   │
-│  │  • OWASP MCP Top 10 Security Checks                     │   │
-│  │  • ML Infrastructure Exploits (Ray, MLflow, Jupyter)    │   │
-│  │  • CHAOS vs ORDER Dual-Agent Exploitation               │   │
-│  │  • Collective Memory (learns from each scan)            │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+```bash
+python viper.py http://target.com --full                # Full hunt (recon → exploit → report)
+python viper.py http://target.com --full --stealth 2    # Stealth mode (WAF evasion)
+python viper.py http://target.com --full --deep-think   # Deep strategic analysis
+python viper_autonomous.py --continuous --interval=60   # Continuous 24/7 hunting
+python viper_daemon.py                                   # Daemon mode
+python dashboard/server.py                               # Dashboard at localhost:8080
 ```
 
-## ⚖️ Ethics (NON-NEGOTIABLE)
+## Architecture
 
-### ALWAYS:
-- Read program rules COMPLETELY before testing
-- Stay within defined scope
-- Report responsibly
-- Document everything
-- Respect rate limits
-- Stop if asked
-
-### NEVER:
-- Test out-of-scope targets
-- Access/exfiltrate user data
-- Cause denial of service
-- Share vulnerabilities publicly
-- Bypass "no automated testing" rules
-
-See `ETHICS.md` for full legal framework.
-
-## 🤖 AI/LLM Attack Module (NEW - 2026)
-
-**Location:** `core/ai_techniques.py`
-
-### Sources:
-- **PromptXploit** - 147 attack vectors for LLM pentesting
-- **GhostHacker** - CHAOS vs ORDER dual-agent exploitation
-- **ProtectAI ai-exploits** - ML infrastructure CVEs
-- **OWASP MCP Top 10** - AI agent security framework
-
-### Capabilities:
-
-| Module | Description | Attack Count |
-|--------|-------------|--------------|
-| PromptInjectionEngine | Direct, indirect, jailbreak payloads | 147+ |
-| AdversarialDualAgent | CHAOS (creative) vs ORDER (methodical) | Adaptive |
-| CollectiveMemory | Learns from each scan, improves over time | Persistent |
-| MCPSecurityScanner | OWASP MCP Top 10 checks | 10 categories |
-| MLInfrastructureExploits | Ray, MLflow, Jupyter, BentoML | CVE-based |
-
-### AI Attack Categories:
-
+### Hunt Pipeline (8 phases)
 ```
-├── Prompt Injection (Direct)
-│   ├── Instruction override
-│   ├── Context confusion
-│   └── Delimiter exploitation
-├── Jailbreaks
-│   ├── DAN (Do Anything Now)
-│   ├── Developer Mode
-│   └── Persona manipulation
-├── RAG Poisoning
-│   ├── Context injection
-│   └── Source manipulation
-├── Multi-Agent Exploitation
-│   ├── Tool hijacking
-│   └── Agent confusion
-└── ML Infrastructure
-    ├── Ray RCE (no auth)
-    ├── MLflow LFI
-    └── Jupyter token extraction
+viper.py → ViperCore.full_hunt(target)
+  Phase 1: Domain Discovery    — subfinder, crt.sh, DNS resolution
+  Phase 2: Passive Intel       — Shodan, URLScan, WHOIS, NVD+Vulners CVEs
+  Phase 3: Port Scanning       — naabu, Shodan InternetDB
+  Phase 4: HTTP Probing        — httpx, Wappalyzer (3,920 tech fingerprints)
+  Phase 5: Resource Enum       — Katana, GAU, Wayback, Arjun, ParamSpider, FFuf, Kiterunner
+  Phase 6: Vuln Scanning       — Nuclei, 28 security checks, WAF bypass detection
+  Phase 7: MITRE Enrichment    — CVE→CWE→CAPEC (95MB offline DB)
+  Phase 8: Manual Attacks      — ReACT loop + Q-learning + Deep Think + multi-agent
+  Phase 9: Reporting           — CISO 6-section narrative, HTML, PDF, compliance mapping
 ```
 
-### CHAOS vs ORDER Strategy:
-
-For hardened targets, deploy competing agents:
-
-**CHAOS Agent** - Creative rule-breaker
-- Weird payloads first
-- Parser differentials
-- Unicode normalization attacks
-- Prototype pollution
-
-**ORDER Agent** - Methodical professional  
-- OWASP patterns
-- Highest success rate first
-- Systematic escalation
-
-A **JUDGE** evaluates results, stores winning techniques in collective memory.
-
-## 🧠 HackerMind - The Cognitive Engine
-
-**Location:** `core/hacker_mind.py`
-
-### Thinking Process:
-
-```python
-# Phase-based reasoning
-if phase == RECON:
-    # Gather intel, fingerprint, enumerate
-    "What technology is this? What endpoints exist?"
-    
-elif phase == ENUMERATION:
-    # Generate hypotheses from observations
-    "Found /api/users/{id}... IDOR possible?"
-    "SQL error in response... SQLi confirmed?"
-    
-elif phase == VULNERABILITY_ANALYSIS:
-    # Test hypotheses systematically
-    "Testing hypothesis: IDOR at /api/users/
-    Payload: Change ID 1 → 2
-    Result: Got other user's data → CONFIRMED"
-    
-elif phase == EXPLOITATION:
-    # Chain findings for maximum impact
-    "IDOR + Info Disclosure = Account Takeover"
+### Multi-Agent System (v5.0)
+```
+orchestrator.py → agent_bus.py (asyncio pub/sub, priority queuing)
+                       ↓
+        ┌──────────────┼──────────────┬──────────────┐
+   recon_agent     vuln_agent    exploit_agent   chain_agent
+   (discovery)    (hypotheses)    (PoC dev)     (chaining)
+        ↓              ↓              ↓              ↓
+   subfinder      hacker_mind    fuzzer.py     attack_chain
+   wappalyzer     think_engine   scanner.py    cross_correlator
+   shodan         react_engine   race_engine   attack_graph
+        ↓
+   failure_analyzer ←→ evograph.py (self-learning)
+        ↓
+   finding_validator → reporter.py → bounty_hunter.py → finding_stream.py
 ```
 
-### Key Features:
-
-- **Observation Recording**: Every response analyzed for leaks, errors, tech fingerprints
-- **Hypothesis Generation**: Auto-generates attack theories from observations
-- **WAF Detection & Bypass**: Identifies Cloudflare, ModSecurity, etc. and adapts
-- **Smart Payloads**: Context-aware payloads based on discovered tech stack
-- **Attack Chaining**: Combines low-severity findings into critical exploits
-
-## 📚 Attack Patterns Database
-
-**Location:** `core/attack_patterns.py`
-
-### Patterns Included:
-
-| Pattern | Category | Severity | Bounty Range |
-|---------|----------|----------|--------------|
-| OTP Bypass | Auth | Critical | $1K-$20K |
-| Password Reset Poisoning | Auth | High | $500-$5K |
-| IDOR with UUID | Access Control | High | $500-$10K |
-| GraphQL IDOR | Access Control | High | $1K-$15K |
-| Second-Order SQLi | Injection | Critical | $2K-$30K |
-| SSTI | Injection | Critical | $5K-$50K |
-| SSRF to Cloud Metadata | SSRF | Critical | $5K-$100K |
-| Race Condition | Logic | High | $2K-$20K |
-
-Each pattern includes:
-- Detection method
-- Step-by-step attack procedure
-- Payloads
-- WAF bypass techniques
-- Real-world examples
-- Common defender mistakes
-
-## 🔄 Workflow
-
-### Phase 1: Target Selection
+### ReACT Engine
 ```
-1. Browse bug bounty programs
-2. Read rules completely
-3. Understand scope
-4. Check bounty structure
-5. Assess competition level
+ReACTEngine.reason_and_act(target)
+  → RoE enforcement (scope/time/tool/phase)
+  → Phase-aware tool enforcement (50+ tools mapped)
+  → Deep Think trigger (auto on failures, LLM request, step 1)
+  → Todo list (LLM maintains structured work plan)
+  → Tool confirmation gate (dangerous tools need approval)
+  → Execute → Q-table update → exhaustion detection
 ```
 
-### Phase 2: Reconnaissance
+### LLM Routing ($0 cost)
 ```
-1. Subdomain enumeration (passive first)
-2. Technology fingerprinting
-3. Endpoint discovery
-4. Parameter mapping
-5. Historical URL analysis (Wayback)
+Claude CLI OAuth (free) → LiteLLM API (paid fallback) → Ollama local (free fallback)
 ```
 
-### Phase 3: Analysis
+## Module Inventory
+
+### core/ — 85+ modules
+| Category | Key Modules |
+|----------|------------|
+| **Orchestration** | `orchestrator.py`, `react_engine.py`, `think_engine.py`, `wave_runner.py`, `phase_engine.py` |
+| **Multi-Agent** | `agent_bus.py` (pub/sub), `agent_registry.py` (lifecycle), `agent_state.py` (todo/objectives) |
+| **Reasoning** | `hacker_mind.py`, `skill_classifier.py` (attack path + CVE extraction), `learned_capabilities.py` |
+| **Knowledge Graph** | `graph_engine.py` (Neo4j + SQLite dual), `graph_query.py` (NL→graph), `chain_writer.py` (26 typed findings) |
+| **Learning** | `evograph.py` (Q-tables), `failure_analyzer.py` (WAF bypass learning), `cross_target_correlator.py` |
+| **Attack** | `fuzzer.py` (genetic), `graphql_fuzzer.py`, `oauth_fuzzer.py` (7 suites), `websocket_fuzzer.py`, `race_engine.py`, `logic_modeler.py` |
+| **Validation** | `finding_validator.py` (37 vuln types), `approval_gate.py` (tool confirm), `guardrails.py` (LLM + hard blocklist) |
+| **Safety** | `roe_engine.py` (Rules of Engagement), `stealth.py` (4-level WAF evasion), `rate_limiter.py` (token bucket + Gaussian timing) |
+| **Compliance** | `compliance_mapper.py` (PCI-DSS/OWASP/HIPAA/SOC2/NIST), `mitre_mapper.py` (CWE→CAPEC→ATT&CK) |
+| **Reporting** | `report_narrative.py` (CISO 6-section), `html_reporter.py` (PDF export), `poc_generator.py`, `finding_stream.py` (Discord/Telegram) |
+| **Evidence** | `chain_of_custody.py` (SHA-256 + HMAC), `secret_scanner.py` (40+ patterns), `key_rotation.py` |
+| **Codefix** | `codefix_engine.py` (tree-sitter ReACT loop), `codefix_tools.py` (11 AST tools) |
+| **Infra** | `viper_db.py` (SQLite), `settings_manager.py`, `iana_services.py` (11,473 ports), `notifier.py` (Telegram) |
+| **Prompts** | `skill_prompts/sql_injection.py` (7-step SQLMap), `cve_exploit.py`, `brute_force.py`, `phishing.py`, `dos.py` |
+
+### recon/ — 21 modules (7-phase pipeline)
+| Module | Purpose |
+|--------|---------|
+| `pipeline.py` | Orchestrator: domain → passive → ports → http → resources → vuln → mitre |
+| `resource_enum.py` | 7 tools: Katana, GAU, Wayback, Arjun, ParamSpider, FFuf, Kiterunner |
+| `security_checks.py` | 28 checks: DNS (SPF/DMARC/DNSSEC/zone transfer), auth, ports, app, WAF bypass, rate limiting |
+| `wappalyzer.py` | 3,920 technology fingerprints |
+| `shodan_enricher.py` | InternetDB (free) + full Shodan API |
+| `cve_lookup.py` | NVD + Vulners, 154 CPE mappings |
+| `mitre_offline.py` | 95MB offline CVE/CWE/CAPEC database |
+| `github_hunt.py` | Org-wide secret hunting (48 patterns + Shannon entropy) |
+| `arjun_discovery.py` | Hidden HTTP parameter brute force |
+| `anonymity.py` | Tor/SOCKS5 proxy routing |
+
+### agents/ — 6 specialized agents
+| Agent | Purpose |
+|-------|---------|
+| `recon_agent.py` | Autonomous subdomain enum, tech fingerprint, asset discovery |
+| `vuln_agent.py` | Tree-of-Thought hypothesis generation (top-5 branches) |
+| `exploit_agent.py` | Non-destructive PoC development and validation |
+| `chain_agent.py` | Attack chain discovery + cross-target correlation |
+| `codefix_agent.py` | Tree-sitter ReACT fix loop + GitHub PR creation |
+| `post_exploit.py` | Post-exploitation enumeration |
+
+### tools/ — 14 modules
+| Module | Purpose |
+|--------|---------|
+| `http_client.py` | Async aiohttp, rate limiting, proxy, WAF detection |
+| `brute_forcer.py` | 8 protocols: SSH, FTP, HTTP, MySQL, PostgreSQL, Redis, SMB, MSSQL |
+| `google_dork.py` | SerpAPI OSINT (18 dork templates per domain) |
+| `web_search.py` | SerpAPI + Tavily dual-provider CVE/exploit search |
+| `metasploit.py` | MSF subprocess + persistent console |
+| `payload_mutator.py` | WAF bypass encoding mutations |
+
+### scanners/ — 4 modules
+- `nuclei_scanner.py` — Nuclei + custom template auto-discovery
+- `gvm_scanner.py` — GVM/OpenVAS (optional Docker)
+- `trufflehog_scanner.py` — TruffleHog git secret scanning
+
+### dashboard/ — Web UI at localhost:8080
+- **3D force-graph** knowledge visualization
+- **AI chat** with real Claude responses + conversation persistence
+- **NLP terminal** — type English, get shell commands. Sandboxed (allowlist-only pentest tools)
+- **SSH target proxy** — `!connect user@target` for remote command execution
+- **10+ chart types** — CVSS scatter, kill chain funnel, radar, treemap, risk gauge
+- **CypherFix** remediation panel with VS Code-style diff viewer
+- **30+ REST API endpoints** + SSE streaming
+
+## External Tools
+
+All optional — graceful degradation when missing:
 ```
-1. HackerMind generates hypotheses
-2. Prioritize by confidence
-3. Test systematically
-4. Adapt to defenses
-5. Confirm vulnerabilities
-```
-
-### Phase 4: Exploitation
-```
-1. Build PoC
-2. Assess impact
-3. Try attack chains
-4. Document fully
-```
-
-### Phase 5: Reporting
-```
-1. Clear title
-2. Severity + CVSS
-3. Step-by-step reproduction
-4. Impact statement
-5. Remediation suggestion
-```
-
-## 📁 Directory Structure
-
-```
-skills/hackagent/
-├── SKILL.md                 # This file
-├── ETHICS.md                # Legal framework
-├── core/
-│   ├── hacker_mind.py       # Cognitive engine
-│   ├── attack_patterns.py   # Attack playbook
-│   ├── ai_techniques.py     # AI/LLM attacks (NEW!)
-│   └── test_hacker_mind.py  # Demo
-├── tools/
-│   ├── recon.py             # Reconnaissance
-│   ├── tool_knowledge.py    # 13+ tool database (NEW!)
-│   ├── http_client.py       # HTTP utilities
-│   └── payload_mutator.py   # Payload generation
-├── labs/
-│   ├── lab_manager.py       # Practice lab manager (NEW!)
-│   └── __init__.py
-├── knowledge/
-│   ├── owasp-top10.md       # OWASP reference
-│   └── platform-rules.md    # Platform guidelines
-├── programs/
-│   └── [target]/            # Per-target data
-├── redteam/
-│   ├── self_test.py         # Self red-team
-│   └── owasp_self_test.py   # OWASP self-test
-└── logs/
-    └── hunting.log          # Activity log
-```
-
-## 🔧 Tool Knowledge Base (NEW!)
-
-**Location:** `tools/tool_knowledge.py`
-
-HackAgent now has comprehensive knowledge of 13+ penetration testing tools:
-
-### Reconnaissance
-- **nmap** - Network scanning, port detection, service enumeration
-- **gobuster** - Directory/DNS brute forcing
-- **ffuf** - Fast web fuzzer for parameters, directories, VHosts
-
-### Vulnerability Scanning
-- **nikto** - Web server scanner
-- **nuclei** - Template-based vulnerability scanner
-
-### Exploitation
-- **metasploit** - Exploitation framework with 2000+ exploits
-- **sqlmap** - Automatic SQL injection
-- **burpsuite** - Web proxy and testing platform
-
-### Password Attacks
-- **hydra** - Online password cracking (SSH, FTP, HTTP)
-- **john** - Offline password cracker
-- **hashcat** - GPU-accelerated hash cracking
-
-### Network
-- **netcat** - TCP/UDP Swiss army knife
-- **wireshark** - Packet capture and analysis
-
-### Usage:
-```python
-from tools.tool_knowledge import get_tool_knowledge
-
-kb = get_tool_knowledge()
-
-# Get tool info
-nmap = kb.get_tool("nmap")
-print(nmap.cheatsheet)
-
-# Search tools
-sqli_tools = kb.search_tools("sql")
-
-# Get cheatsheet
-print(kb.get_cheatsheet("metasploit"))
+nuclei httpx subfinder katana naabu gau ffuf    # Go (~/go/bin/)
+arjun paramspider sqlmap xsstrike dirsearch     # Python (pip install)
 ```
 
-## 🧪 Practice Labs (NEW!)
+## Data Files
 
-**Location:** `labs/`
+| Path | Size | Content |
+|------|------|---------|
+| `data/wappalyzer_technologies.json` | 1.3MB | 3,920 tech fingerprints |
+| `data/iana_services.csv` | 1.1MB | 11,473 port-service mappings |
+| `data/mitre_db/` | 95MB | Offline CVE/CWE/CAPEC (1999-2026) |
+| `data/nuclei/custom/` | 4KB | Custom nuclei YAML templates |
+| `wordlists/` | 500KB | common.txt, lfi-payloads.txt, burp-parameter-names.txt, etc. |
 
-### Interactive Lab (No Docker Required!)
-Run `python labs/interactive_lab.py` for hands-on practice:
-- SQL Injection simulation
-- XSS payload testing
-- Password cracking exercises
-- JWT security challenges
-- IDOR demonstrations
-- Command injection practice
-- Encoding/decoding tools
-- Cryptography challenges
+## State & Runtime
 
-### Full Labs with Docker/VMs
-
-| Lab | Type | Difficulty | Focus |
-|-----|------|------------|-------|
-| juice-shop | Docker | Easy-Hard | OWASP Top 10, Modern Web |
-| dvwa | Docker | Easy-Medium | Classic Web Vulns |
-| metasploitable2 | VirtualBox | Easy-Medium | Network Exploitation |
-| hackthebox | Online | Easy-Insane | Full Pentesting |
-
-### Walkthroughs Available:
-- `labs/LEARNING_PATH.md` - Complete learning roadmap
-- `labs/juice_shop_walkthrough.md` - 50+ challenges solved
-- `labs/dvwa_walkthrough.md` - All security levels covered
-- `labs/metasploitable2_walkthrough.md` - 14 exploits documented
-
-### Usage:
-```python
-from labs.lab_manager import get_lab_manager
-
-mgr = get_lab_manager()
-
-# List labs
-print(mgr.list_labs())
-
-# Get lab info
-juice = mgr.get_lab("juice-shop")
-print(juice.setup_cmd)
-print(juice.vulns)
+```
+state/           — Current session state (viper_state.json)
+memory/          — Learned patterns across sessions
+knowledge/       — Attack knowledge base
+findings/        — Discovered vulnerabilities (JSON)
+reports/         — Generated HTML/Markdown reports + PoCs
+scopes/          — Platform scope definitions (HackerOne JSON)
+models/          — Q-tables + experience data
+logs/            — Audit logs
+credentials/     — Platform API credentials
+programs/        — Target program definitions
 ```
 
-## 🚀 Usage
+## Ethical Rules (enforced in code)
 
-### Initialize for a target:
-```python
-from core.hacker_mind import HackerMind
-
-mind = HackerMind(
-    target="https://target.com",
-    scope={"in_scope": ["*.target.com"], "out_of_scope": ["admin.target.com"]}
-)
-```
-
-### Run reconnaissance:
-```python
-from tools.recon import ReconModule
-
-recon = ReconModule(output_dir=Path("./programs/target"))
-subs = recon.subdomain_enum_passive("target.com")
-```
-
-### Think and decide:
-```python
-decision = mind.think("Analyzing attack surface")
-# Returns: "TEST_HYPOTHESIS:abc123" or "ADVANCE_TO_EXPLOITATION"
-```
-
-### Generate smart payloads:
-```python
-payloads = mind.generate_payload("sqli", context)
-# Returns MySQL-specific payloads with WAF bypass if Cloudflare detected
-```
-
-## 💰 Revenue Tracking
-
-```markdown
-## Bug Bounty P&L
-
-| Date | Program | Vuln | Severity | Status | Bounty |
-|------|---------|------|----------|--------|--------|
-| TBD  | ...     | ...  | ...      | ...    | $0     |
-
-Total: $0 (just starting)
-```
-
-## ⚠️ Legal Notice
-
-HackAgent operates ONLY on:
-- Authorized bug bounty programs
-- With explicit permission
-- Within defined scope
-- Following responsible disclosure
-
-**Unauthorized access is illegal. Always get permission.**
+1. **Scope enforced** — `roe_engine.py` + `guardrails.py` block out-of-scope targets
+2. **No destructive actions** — read-only PoCs, no data modification
+3. **Findings verified** — `finding_validator.py` (37 vuln-type behavioral confirmation)
+4. **Rate limiting** — `rate_limiter.py` (token bucket + human-like Gaussian timing)
+5. **Tool gates** — `approval_gate.py` requires confirmation for dangerous tools (sqlmap, hydra, msfconsole)
+6. **Phase enforcement** — `phase_engine.py` blocks exploitation tools during recon phase
+7. **Evidence integrity** — `chain_of_custody.py` (SHA-256 hashing + HMAC signing)
+8. **Secret redaction** — findings truncated to 8 chars, no full credentials in reports

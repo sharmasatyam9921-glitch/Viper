@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — AI Assistant</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-javascript.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-yaml.min.js"></script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --bg4: #21262d;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --critical: #ff4444; --high: #ff8c00; --medium: #ffd700;
+  --low: #4da6ff; --info: #888; --success: #00c853; --danger: #ef4444;
+  --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', monospace;
+  --glass: rgba(22,27,34,0.85); --glass-border: rgba(99,102,241,0.15);
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ── Nav ── */
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; flex-shrink: 0; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--text); background: rgba(99,102,241,.12); }
+.nav .brand { color: var(--accent2); font-weight: 700; font-size: 15px; margin-right: 12px; }
+.nav .spacer { flex: 1; }
+.nav .status { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; }
+.ws-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.ws-dot.disconnected { background: var(--danger); }
+
+/* ── Main layout ── */
+.main { flex: 1; display: flex; overflow: hidden; }
+
+/* ── Sidebar ── */
+.sidebar { width: 280px; background: var(--bg2); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-header { padding: 12px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; }
+.sidebar-header h3 { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+.btn-new-chat { background: var(--accent); color: #fff; border: none; padding: 5px 12px;
+  border-radius: 6px; font-size: 12px; cursor: pointer; transition: .2s; font-weight: 600; }
+.btn-new-chat:hover { filter: brightness(1.2); }
+.conversation-list { flex: 1; overflow-y: auto; padding: 8px; }
+.conv-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  color: var(--text2); transition: all .15s; margin-bottom: 2px; display: flex; flex-direction: column; gap: 2px; }
+.conv-item:hover { background: var(--bg3); }
+.conv-item.active { background: rgba(99,102,241,.12); color: var(--text); border: 1px solid var(--glass-border); }
+.conv-item .conv-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conv-item .conv-meta { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+.conv-item .conv-delete { opacity: 0; color: var(--danger); cursor: pointer; font-size: 14px; transition: .2s; }
+.conv-item:hover .conv-delete { opacity: 1; }
+
+/* ── Chat area ── */
+.chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.chat-toolbar { padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.model-select { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  padding: 5px 10px; border-radius: 6px; font-size: 12px; outline: none; font-family: var(--font); }
+.chat-title-display { font-size: 14px; font-weight: 600; color: var(--text); flex: 1; }
+.messages { flex: 1; overflow-y: auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 16px;
+  scroll-behavior: smooth; }
+.messages::-webkit-scrollbar { width: 6px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+/* ── Message bubbles ── */
+.msg { max-width: 82%; padding: 14px 18px; border-radius: 14px; font-size: 14px; line-height: 1.6;
+  animation: msgIn .3s ease; position: relative; }
+@keyframes msgIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.msg.user { align-self: flex-end; background: linear-gradient(135deg, var(--accent), #4f46e5);
+  color: #fff; border-bottom-right-radius: 4px; box-shadow: 0 2px 12px rgba(99,102,241,.25); }
+.msg.assistant { align-self: flex-start; background: var(--glass); border: 1px solid var(--glass-border);
+  border-bottom-left-radius: 4px; backdrop-filter: blur(8px); }
+.msg .timestamp { font-size: 10px; color: rgba(255,255,255,.4); margin-top: 6px; text-align: right; }
+.msg.assistant .timestamp { color: var(--muted); }
+
+/* Markdown content */
+.msg.assistant p { margin-bottom: 8px; }
+.msg.assistant p:last-child { margin-bottom: 0; }
+.msg.assistant ul, .msg.assistant ol { padding-left: 20px; margin-bottom: 8px; }
+.msg.assistant li { margin-bottom: 4px; }
+.msg.assistant h1, .msg.assistant h2, .msg.assistant h3 { color: var(--accent2); margin: 8px 0 4px; }
+.msg.assistant h1 { font-size: 18px; } .msg.assistant h2 { font-size: 16px; } .msg.assistant h3 { font-size: 14px; }
+.msg.assistant a { color: var(--accent2); }
+.msg.assistant blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--text2); margin: 8px 0; }
+.msg.assistant table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: 100%; }
+.msg.assistant th, .msg.assistant td { border: 1px solid var(--border); padding: 4px 8px; }
+.msg.assistant th { background: var(--bg4); }
+
+/* Code blocks */
+.msg pre { background: #0d1117 !important; padding: 12px; border-radius: 8px; margin: 8px 0;
+  font-family: var(--mono); font-size: 12px; overflow-x: auto; position: relative;
+  border: 1px solid var(--border); }
+.msg pre code { background: none !important; padding: 0 !important; }
+.msg code { font-family: var(--mono); font-size: 12px; background: rgba(0,0,0,.4); padding: 2px 6px; border-radius: 4px; }
+.code-copy { position: absolute; top: 6px; right: 6px; background: var(--bg4); border: 1px solid var(--border);
+  color: var(--text2); padding: 2px 8px; border-radius: 4px; font-size: 10px; cursor: pointer; transition: .2s; }
+.code-copy:hover { color: var(--text); border-color: var(--accent); }
+
+/* ── Thinking indicator ── */
+.thinking { align-self: flex-start; display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+  background: var(--glass); border: 1px solid var(--glass-border); border-radius: 12px; font-size: 13px;
+  color: var(--text2); animation: msgIn .3s ease; backdrop-filter: blur(8px); }
+.thinking .dots span { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent2); margin: 0 2px; animation: dot-bounce 1.4s infinite ease-in-out; }
+.thinking .dots span:nth-child(2) { animation-delay: 0.16s; }
+.thinking .dots span:nth-child(3) { animation-delay: 0.32s; }
+@keyframes dot-bounce { 0%,80%,100% { transform: scale(0.6); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
+
+/* ── Tool execution card ── */
+.tool-card { align-self: flex-start; background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: 10px; overflow: hidden; max-width: 85%; animation: msgIn .3s ease; backdrop-filter: blur(8px); }
+.tool-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  background: rgba(99,102,241,.06); cursor: pointer; font-size: 13px; transition: .15s; }
+.tool-header:hover { background: rgba(99,102,241,.1); }
+.tool-header .tool-icon { font-size: 14px; color: var(--accent2); }
+.tool-header .tool-name { font-family: var(--mono); font-weight: 600; color: var(--accent2); font-size: 12px; }
+.tool-header .tool-status { margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.tool-header .tool-status.success { color: var(--success); background: rgba(0,200,83,.1); }
+.tool-header .tool-status.running { color: var(--medium); background: rgba(255,215,0,.1); }
+.tool-header .tool-status.failed { color: var(--danger); background: rgba(239,68,68,.1); }
+.tool-body { padding: 12px 14px; font-size: 12px; max-height: 0; overflow: hidden;
+  transition: max-height .3s ease, padding .3s ease; border-top: 0 solid transparent; }
+.tool-body.open { max-height: 300px; overflow-y: auto; padding: 12px 14px;
+  border-top: 1px solid var(--border); }
+.tool-body pre { background: var(--bg); padding: 8px; border-radius: 6px;
+  font-family: var(--mono); white-space: pre-wrap; max-height: 200px; overflow-y: auto; font-size: 11px; }
+.tool-args { color: var(--text2); font-size: 11px; margin-bottom: 6px; }
+.tool-args span { color: var(--accent2); }
+.tool-output-label { font-size: 10px; color: var(--muted); text-transform: uppercase; margin: 8px 0 4px; letter-spacing: 0.5px; }
+
+/* ── Deep Think ── */
+.deep-think { align-self: flex-start; background: var(--glass); border: 1px solid rgba(99,102,241,.25);
+  border-radius: 10px; max-width: 88%; overflow: hidden; animation: msgIn .3s ease; backdrop-filter: blur(8px); }
+.deep-think-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  background: linear-gradient(135deg, rgba(99,102,241,.1), rgba(139,92,246,.08));
+  cursor: pointer; font-size: 13px; color: var(--accent2); font-weight: 600; }
+.deep-think-header .chevron { margin-left: auto; transition: transform .3s; }
+.deep-think-header.open .chevron { transform: rotate(180deg); }
+.deep-think-body { max-height: 0; overflow: hidden; transition: max-height .4s ease; }
+.deep-think-body.open { max-height: 500px; overflow-y: auto; }
+.deep-think-content { padding: 14px; color: var(--text2); line-height: 1.7; font-size: 13px;
+  border-top: 1px solid var(--border); }
+.deep-think-content .analysis-section { margin-bottom: 12px; }
+.deep-think-content .analysis-label { font-size: 11px; text-transform: uppercase; color: var(--accent2);
+  font-weight: 600; letter-spacing: 0.5px; margin-bottom: 4px; }
+
+/* ── Plan card ── */
+.plan-card { align-self: flex-start; background: var(--glass); border: 1px solid rgba(0,200,83,.2);
+  border-radius: 10px; padding: 14px; max-width: 85%; animation: msgIn .3s ease; }
+.plan-card h4 { color: var(--success); font-size: 13px; margin-bottom: 8px; }
+.plan-card .plan-step { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; color: var(--text2); }
+.plan-card .plan-step .step-num { width: 20px; height: 20px; border-radius: 50%;
+  background: var(--bg4); display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; color: var(--text); flex-shrink: 0; }
+.plan-card .plan-step.done .step-num { background: var(--success); }
+.plan-card .plan-step.active .step-num { background: var(--accent); animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* ── File download card ── */
+.file-card { align-self: flex-start; background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: 10px; padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+  max-width: 400px; cursor: pointer; transition: .2s; animation: msgIn .3s ease; }
+.file-card:hover { border-color: var(--accent); background: rgba(99,102,241,.06); }
+.file-icon { font-size: 24px; }
+.file-info .file-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.file-info .file-meta { font-size: 11px; color: var(--muted); }
+.file-dl { margin-left: auto; color: var(--accent2); font-size: 18px; }
+
+/* ── Input area ── */
+.input-area { padding: 12px 20px; background: var(--bg2); border-top: 1px solid var(--border);
+  display: flex; gap: 8px; flex-shrink: 0; align-items: flex-end; }
+.input-wrapper { flex: 1; position: relative; }
+.input-wrapper textarea { width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 12px 14px; border-radius: 12px; font-size: 14px;
+  font-family: var(--font); outline: none; resize: none; min-height: 44px; max-height: 150px;
+  line-height: 1.5; transition: border-color .2s; }
+.input-wrapper textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,.15); }
+.input-wrapper textarea::placeholder { color: var(--muted); }
+.btn-send { background: linear-gradient(135deg, var(--accent), #4f46e5); color: #fff; border: none;
+  width: 44px; height: 44px; border-radius: 12px; font-size: 18px; cursor: pointer; transition: .2s;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.btn-send:hover { filter: brightness(1.15); transform: scale(1.05); }
+.btn-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+/* ── Streaming cursor ── */
+.streaming-cursor::after { content: ''; display: inline-block; width: 2px; height: 14px;
+  background: var(--accent2); margin-left: 2px; animation: blink 1s infinite; vertical-align: text-bottom; }
+@keyframes blink { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+
+/* ── Scrollbar ── */
+.sidebar ::-webkit-scrollbar { width: 4px; }
+.sidebar ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 2px; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .sidebar { width: 0; overflow: hidden; transition: width .3s; }
+  .sidebar.open { width: 280px; position: absolute; z-index: 100; height: calc(100% - 48px); }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand">VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="insights_v2.html">Analytics</a>
+  <a href="chat_v2.html" class="active">Chat</a>
+  <a href="terminal_v2.html">Terminal</a>
+  <a href="cypherfix_v2.html">Remediation</a>
+  <a href="settings_ui.html">Settings</a>
+  <div class="spacer"></div>
+  <div class="status">
+    <span class="ws-dot disconnected" id="ws-dot"></span>
+    <span id="ws-status">Disconnected</span>
+  </div>
+</nav>
+
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h3>Conversations</h3>
+      <button class="btn-new-chat" onclick="newConversation()">+ New</button>
+    </div>
+    <div class="conversation-list" id="conv-list"></div>
+  </div>
+
+  <!-- Chat -->
+  <div class="chat-area">
+    <div class="chat-toolbar">
+      <button style="background:transparent;border:1px solid var(--border);color:var(--text2);padding:4px 8px;border-radius:6px;cursor:pointer;font-size:14px;display:none" id="sidebar-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')">&#9776;</button>
+      <span class="chat-title-display" id="chat-title">New Conversation</span>
+      <select class="model-select" id="model-select">
+        <option value="claude-opus">Claude Opus</option>
+        <option value="claude-sonnet">Claude Sonnet</option>
+        <option value="deepseek-r1">DeepSeek R1</option>
+        <option value="gpt-5">GPT-5</option>
+        <option value="auto" selected>Auto (Best)</option>
+      </select>
+    </div>
+
+    <div class="messages" id="messages">
+      <div class="msg assistant">
+        <p>Welcome to <strong>VIPER 4.0 AI Assistant</strong>. I can help you run security scans, analyze findings, build attack chains, and generate remediation plans.</p>
+        <p>Type a target URL, describe what you want to test, or ask me anything about your scan results.</p>
+        <div class="timestamp">System</div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-wrapper">
+        <textarea id="msg-input" placeholder="Describe what you want to scan, or ask a question..." rows="1" autofocus></textarea>
+      </div>
+      <button class="btn-send" id="btn-send" title="Send">&#9654;</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──
+const STORAGE_KEY = 'viper4_conversations';
+let conversations = [];
+let activeConvId = null;
+let ws = null;
+let reconnectTimer = null;
+let streamingEl = null;
+let streamBuffer = '';
+const WS_URL = `ws://${location.hostname || 'localhost'}:8081`;
+
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('msg-input');
+const sendBtn = document.getElementById('btn-send');
+const wsDot = document.getElementById('ws-dot');
+const wsStatusEl = document.getElementById('ws-status');
+const convListEl = document.getElementById('conv-list');
+const chatTitleEl = document.getElementById('chat-title');
+const modelSelect = document.getElementById('model-select');
+
+// ── marked config ──
+marked.setOptions({
+  highlight: function(code, lang) {
+    if (Prism.languages[lang]) return Prism.highlight(code, Prism.languages[lang], lang);
+    return code;
+  },
+  breaks: true, gfm: true
+});
+
+// ── Persistence ──
+function saveConversations() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations)); } catch(e) {}
+}
+function loadConversations() {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY);
+    if (data) conversations = JSON.parse(data);
+  } catch(e) { conversations = []; }
+}
+
+function getActiveConv() { return conversations.find(c => c.id === activeConvId); }
+
+function newConversation() {
+  const conv = {
+    id: 'conv_' + Date.now(),
+    title: 'New Conversation',
+    model: modelSelect.value,
+    created: Date.now(),
+    messages: []
+  };
+  conversations.unshift(conv);
+  activeConvId = conv.id;
+  saveConversations();
+  renderConvList();
+  renderMessages();
+}
+
+function switchConversation(id) {
+  activeConvId = id;
+  const conv = getActiveConv();
+  if (conv) chatTitleEl.textContent = conv.title;
+  renderConvList();
+  renderMessages();
+}
+
+function deleteConversation(id, e) {
+  e.stopPropagation();
+  conversations = conversations.filter(c => c.id !== id);
+  if (activeConvId === id) {
+    activeConvId = conversations.length ? conversations[0].id : null;
+    if (!activeConvId) newConversation();
+  }
+  saveConversations();
+  renderConvList();
+  renderMessages();
+}
+
+function renderConvList() {
+  convListEl.innerHTML = conversations.map(c => `
+    <div class="conv-item ${c.id === activeConvId ? 'active' : ''}" onclick="switchConversation('${c.id}')">
+      <div class="conv-title">${escapeHtml(c.title)}</div>
+      <div class="conv-meta">
+        <span>${timeAgo(c.created)}</span>
+        <span>${c.messages.length} msgs</span>
+        <span class="conv-delete" onclick="deleteConversation('${c.id}', event)">&times;</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderMessages() {
+  const conv = getActiveConv();
+  messagesEl.innerHTML = '';
+  if (!conv) return;
+  chatTitleEl.textContent = conv.title;
+  conv.messages.forEach(m => {
+    if (m.type === 'tool') renderToolCardFromData(m);
+    else if (m.type === 'deep_think') renderDeepThinkFromData(m);
+    else if (m.type === 'plan') renderPlanFromData(m);
+    else if (m.type === 'file') renderFileCardFromData(m);
+    else addMessageBubble(m.role, m.content, m.timestamp, false);
+  });
+  scrollBottom();
+}
+
+// ── Helpers ──
+function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+function escapeHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function timeAgo(ts) {
+  const d = Date.now() - ts;
+  if (d < 60000) return 'just now';
+  if (d < 3600000) return Math.floor(d/60000) + 'm ago';
+  if (d < 86400000) return Math.floor(d/3600000) + 'h ago';
+  return Math.floor(d/86400000) + 'd ago';
+}
+function now() { return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+
+function renderMarkdown(text) {
+  let html = marked.parse(text || '');
+  // Add copy buttons to code blocks
+  html = html.replace(/<pre><code(.*?)>/g, '<pre><button class="code-copy" onclick="copyCode(this)">Copy</button><code$1>');
+  return html;
+}
+
+function copyCode(btn) {
+  const code = btn.nextElementSibling;
+  navigator.clipboard.writeText(code.textContent).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+// ── Message rendering ──
+function addMessageBubble(role, content, timestamp, save=true) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  if (role === 'assistant') {
+    div.innerHTML = renderMarkdown(content) + `<div class="timestamp">${timestamp || now()}</div>`;
+  } else {
+    div.innerHTML = escapeHtml(content) + `<div class="timestamp">${timestamp || now()}</div>`;
+  }
+  messagesEl.appendChild(div);
+  scrollBottom();
+  if (save) {
+    const conv = getActiveConv();
+    if (conv) {
+      conv.messages.push({ role, content, timestamp: timestamp || now(), type: 'message' });
+      if (conv.messages.length === 2 && role === 'user') {
+        conv.title = content.substring(0, 50) + (content.length > 50 ? '...' : '');
+        renderConvList();
+      }
+      saveConversations();
+    }
+  }
+  // Re-highlight code blocks
+  setTimeout(() => div.querySelectorAll('pre code').forEach(el => Prism.highlightElement(el)), 50);
+  return div;
+}
+
+function addThinking(text) {
+  removeThinking();
+  const div = document.createElement('div');
+  div.className = 'thinking';
+  div.id = 'thinking-indicator';
+  div.innerHTML = `<div class="dots"><span></span><span></span><span></span></div> ${escapeHtml(text || 'Thinking...')}`;
+  messagesEl.appendChild(div);
+  scrollBottom();
+}
+
+function removeThinking() {
+  const el = document.getElementById('thinking-indicator');
+  if (el) el.remove();
+}
+
+function startStreaming() {
+  removeThinking();
+  streamBuffer = '';
+  streamingEl = document.createElement('div');
+  streamingEl.className = 'msg assistant streaming-cursor';
+  streamingEl.innerHTML = '<div class="timestamp">' + now() + '</div>';
+  messagesEl.appendChild(streamingEl);
+  scrollBottom();
+}
+
+function appendStream(text) {
+  if (!streamingEl) startStreaming();
+  streamBuffer += text;
+  const ts = streamingEl.querySelector('.timestamp');
+  streamingEl.innerHTML = renderMarkdown(streamBuffer);
+  streamingEl.appendChild(ts);
+  streamingEl.classList.add('streaming-cursor');
+  scrollBottom();
+}
+
+function endStreaming() {
+  if (!streamingEl) return;
+  streamingEl.classList.remove('streaming-cursor');
+  const conv = getActiveConv();
+  if (conv && streamBuffer) {
+    conv.messages.push({ role: 'assistant', content: streamBuffer, timestamp: now(), type: 'message' });
+    saveConversations();
+  }
+  setTimeout(() => streamingEl.querySelectorAll('pre code').forEach(el => Prism.highlightElement(el)), 50);
+  streamingEl = null;
+  streamBuffer = '';
+}
+
+// ── Tool card ──
+let toolCardMap = {};
+function addToolCard(toolName, args, status='running') {
+  const id = 'tool-' + Date.now() + Math.random().toString(36).substr(2,4);
+  const div = document.createElement('div');
+  div.className = 'tool-card';
+  div.id = id;
+  const argsStr = typeof args === 'object' ? JSON.stringify(args, null, 2) : String(args || '');
+  div.innerHTML = `
+    <div class="tool-header" onclick="this.nextElementSibling.classList.toggle('open')">
+      <span class="tool-icon">&#9881;</span>
+      <span class="tool-name">${escapeHtml(toolName)}</span>
+      <span class="tool-status ${status}">${status}</span>
+    </div>
+    <div class="tool-body">
+      <div class="tool-args"><span>Args:</span> ${escapeHtml(argsStr.substring(0, 500))}</div>
+    </div>`;
+  messagesEl.appendChild(div);
+  scrollBottom();
+  toolCardMap[toolName] = id;
+  return id;
+}
+
+function updateToolCard(id, output, success) {
+  const card = document.getElementById(id);
+  if (!card) return;
+  const statusEl = card.querySelector('.tool-status');
+  statusEl.textContent = success ? 'done' : 'failed';
+  statusEl.className = `tool-status ${success ? 'success' : 'failed'}`;
+  const body = card.querySelector('.tool-body');
+  body.innerHTML += `<div class="tool-output-label">${success ? 'Output' : 'Error'}</div><pre>${escapeHtml(String(output || '').substring(0, 2000))}</pre>`;
+}
+
+function renderToolCardFromData(m) {
+  const id = addToolCard(m.toolName || 'tool', m.args, m.success !== undefined ? (m.success ? 'success' : 'failed') : 'done');
+  if (m.output) updateToolCard(id, m.output, m.success !== false);
+}
+
+// ── Deep Think ──
+function addDeepThink(content, sections) {
+  const div = document.createElement('div');
+  div.className = 'deep-think';
+  let bodyHtml = '';
+  if (sections && sections.length) {
+    bodyHtml = sections.map(s => `<div class="analysis-section"><div class="analysis-label">${escapeHtml(s.label)}</div><div>${renderMarkdown(s.content)}</div></div>`).join('');
+  } else {
+    bodyHtml = renderMarkdown(content || '');
+  }
+  div.innerHTML = `
+    <div class="deep-think-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+      &#9733; Deep Think Analysis <span class="chevron">&#9660;</span>
+    </div>
+    <div class="deep-think-body"><div class="deep-think-content">${bodyHtml}</div></div>`;
+  messagesEl.appendChild(div);
+  scrollBottom();
+  const conv = getActiveConv();
+  if (conv) { conv.messages.push({ type: 'deep_think', content, sections, timestamp: now() }); saveConversations(); }
+}
+function renderDeepThinkFromData(m) {
+  const div = document.createElement('div');
+  div.className = 'deep-think';
+  let bodyHtml = m.sections ? m.sections.map(s => `<div class="analysis-section"><div class="analysis-label">${escapeHtml(s.label)}</div><div>${renderMarkdown(s.content)}</div></div>`).join('') : renderMarkdown(m.content || '');
+  div.innerHTML = `
+    <div class="deep-think-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+      &#9733; Deep Think Analysis <span class="chevron">&#9660;</span>
+    </div>
+    <div class="deep-think-body"><div class="deep-think-content">${bodyHtml}</div></div>`;
+  messagesEl.appendChild(div);
+}
+
+// ── Plan card ──
+function addPlanCard(steps) {
+  const div = document.createElement('div');
+  div.className = 'plan-card';
+  div.innerHTML = `<h4>&#9888; Execution Plan</h4>` + steps.map((s,i) => `
+    <div class="plan-step ${s.status || ''}">
+      <span class="step-num">${i+1}</span>
+      <span>${escapeHtml(s.text)}</span>
+    </div>`).join('');
+  messagesEl.appendChild(div);
+  scrollBottom();
+}
+function renderPlanFromData(m) { addPlanCard(m.steps || []); }
+
+// ── File card ──
+function addFileCard(name, size, url) {
+  const ext = (name || '').split('.').pop().toLowerCase();
+  const icons = { pdf: '&#128196;', html: '&#127760;', json: '&#128230;', py: '&#128013;', txt: '&#128196;' };
+  const div = document.createElement('div');
+  div.className = 'file-card';
+  div.onclick = () => { if (url) window.open(url, '_blank'); };
+  div.innerHTML = `
+    <span class="file-icon">${icons[ext] || '&#128196;'}</span>
+    <div class="file-info"><div class="file-name">${escapeHtml(name)}</div><div class="file-meta">${size || ''}</div></div>
+    <span class="file-dl">&#8595;</span>`;
+  messagesEl.appendChild(div);
+  scrollBottom();
+  const conv = getActiveConv();
+  if (conv) { conv.messages.push({ type: 'file', name, size, url, timestamp: now() }); saveConversations(); }
+}
+function renderFileCardFromData(m) {
+  const ext = (m.name || '').split('.').pop().toLowerCase();
+  const icons = { pdf: '&#128196;', html: '&#127760;', json: '&#128230;', py: '&#128013;', txt: '&#128196;' };
+  const div = document.createElement('div');
+  div.className = 'file-card';
+  div.onclick = () => { if (m.url) window.open(m.url, '_blank'); };
+  div.innerHTML = `
+    <span class="file-icon">${icons[ext] || '&#128196;'}</span>
+    <div class="file-info"><div class="file-name">${escapeHtml(m.name)}</div><div class="file-meta">${m.size || ''}</div></div>
+    <span class="file-dl">&#8595;</span>`;
+  messagesEl.appendChild(div);
+}
+
+// ── WebSocket ──
+function connectWS() {
+  try { ws = new WebSocket(WS_URL); } catch(e) { return; }
+  ws.onopen = () => {
+    wsDot.className = 'ws-dot connected';
+    wsStatusEl.textContent = 'Connected';
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+  ws.onclose = () => {
+    wsDot.className = 'ws-dot disconnected';
+    wsStatusEl.textContent = 'Disconnected';
+    reconnectTimer = setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => { ws.close(); };
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleEvent(msg.type || msg.event, msg.payload || msg.data || msg);
+    } catch(e) {}
+  };
+}
+
+function sendWS(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+}
+
+function handleEvent(type, data) {
+  switch(type) {
+    case 'thinking':
+      addThinking(data.thought || 'Thinking...');
+      break;
+    case 'stream_start':
+      startStreaming();
+      break;
+    case 'stream_chunk':
+      appendStream(data.text || data.content || '');
+      break;
+    case 'stream_end':
+      endStreaming();
+      break;
+    case 'tool_start':
+      removeThinking();
+      addToolCard(data.tool_name, data.tool_args, 'running');
+      break;
+    case 'tool_complete': {
+      const cid = toolCardMap[data.tool_name];
+      if (cid) updateToolCard(cid, data.output, data.success);
+      const conv = getActiveConv();
+      if (conv) {
+        conv.messages.push({ type: 'tool', toolName: data.tool_name, args: data.tool_args, output: data.output, success: data.success, timestamp: now() });
+        saveConversations();
+      }
+      break;
+    }
+    case 'deep_think':
+      removeThinking();
+      addDeepThink(data.content || data.thought || '', data.sections);
+      break;
+    case 'plan':
+      addPlanCard(data.steps || []);
+      break;
+    case 'finding':
+      removeThinking();
+      addMessageBubble('assistant', `**${(data.severity||'').toUpperCase()} Finding:** ${data.title || data.type}\n\n${data.url || ''}\n\n${data.details || ''}`);
+      break;
+    case 'file':
+      addFileCard(data.name, data.size, data.url);
+      break;
+    case 'message': case 'response':
+      removeThinking();
+      endStreaming();
+      addMessageBubble('assistant', data.content || data.text || data.message || JSON.stringify(data));
+      break;
+    case 'heartbeat': case 'pong': break;
+  }
+}
+
+// ── Send ──
+function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+  if (!activeConvId) newConversation();
+  addMessageBubble('user', text);
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  sendWS({ action: 'message', content: text, model: modelSelect.value, conversation_id: activeConvId });
+  fetch('/api/chat/send', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text, model: modelSelect.value, conversation_id: activeConvId })
+  }).then(r => r.json()).then(data => {
+    if (data.response || data.message) {
+      removeThinking(); endStreaming();
+      addMessageBubble('assistant', data.response || data.message);
+    }
+  }).catch(() => {});
+  addThinking();
+}
+
+sendBtn.addEventListener('click', sendMessage);
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 150) + 'px';
+});
+
+// ── Init ──
+loadConversations();
+if (!conversations.length) newConversation();
+else { activeConvId = conversations[0].id; }
+renderConvList();
+renderMessages();
+connectWS();
+
+// Responsive sidebar toggle
+if (window.innerWidth <= 768) document.getElementById('sidebar-toggle').style.display = 'block';
+</script>
+</body>
+</html>

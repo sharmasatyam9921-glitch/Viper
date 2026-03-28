@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — Remediation</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --bg4: #21262d;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --critical: #ff4444; --high: #ff8c00; --medium: #ffd700;
+  --low: #4da6ff; --info: #888; --success: #00c853; --danger: #ef4444;
+  --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', monospace;
+  --glass: rgba(22,27,34,0.85); --glass-border: rgba(99,102,241,0.15);
+  --diff-add-bg: rgba(0,200,83,0.08); --diff-add-border: rgba(0,200,83,0.3);
+  --diff-del-bg: rgba(239,68,68,0.08); --diff-del-border: rgba(239,68,68,0.3);
+  --diff-add-text: #7ee787; --diff-del-text: #ffa198;
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ── Nav ── */
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; flex-shrink: 0; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--text); background: rgba(99,102,241,.12); }
+.nav .brand { color: var(--accent2); font-weight: 700; font-size: 15px; margin-right: 12px; }
+.nav .spacer { flex: 1; }
+
+/* ── Main layout ── */
+.main { flex: 1; display: flex; overflow: hidden; }
+
+/* ── Triage sidebar ── */
+.triage-panel { width: 380px; background: var(--bg2); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; flex-shrink: 0; }
+.triage-header { padding: 12px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; }
+.triage-header h3 { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+.triage-filters { padding: 8px 16px; border-bottom: 1px solid var(--border);
+  display: flex; gap: 6px; flex-wrap: wrap; }
+.filter-chip { padding: 3px 10px; border-radius: 12px; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--border); color: var(--text2); transition: .2s; font-weight: 500; }
+.filter-chip:hover { border-color: var(--accent); color: var(--text); }
+.filter-chip.active { background: rgba(99,102,241,.15); border-color: var(--accent); color: var(--accent2); }
+.filter-chip.sev-critical { border-color: var(--critical); }
+.filter-chip.sev-critical.active { background: rgba(255,68,68,.15); color: var(--critical); }
+.filter-chip.sev-high { border-color: var(--high); }
+.filter-chip.sev-high.active { background: rgba(255,140,0,.15); color: var(--high); }
+.filter-chip.sev-medium { border-color: var(--medium); }
+.filter-chip.sev-medium.active { background: rgba(255,215,0,.15); color: var(--medium); }
+.filter-chip.sev-low { border-color: var(--low); }
+.filter-chip.sev-low.active { background: rgba(77,166,255,.15); color: var(--low); }
+
+.triage-list { flex: 1; overflow-y: auto; padding: 8px; }
+.triage-list::-webkit-scrollbar { width: 4px; }
+.triage-list::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 2px; }
+
+.triage-item { padding: 12px; border-radius: 8px; cursor: pointer; margin-bottom: 4px;
+  border: 1px solid transparent; transition: all .15s; }
+.triage-item:hover { background: var(--bg3); }
+.triage-item.active { background: rgba(99,102,241,.08); border-color: var(--glass-border); }
+.triage-item .item-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sev-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 10px;
+  font-weight: 700; text-transform: uppercase; color: #fff; flex-shrink: 0; }
+.sev-badge.critical { background: var(--critical); }
+.sev-badge.high { background: var(--high); }
+.sev-badge.medium { background: var(--medium); color: #000; }
+.sev-badge.low { background: var(--low); }
+.sev-badge.info { background: var(--info); }
+.item-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.item-meta { font-size: 11px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.item-meta .item-url { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+
+.fix-status-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+.fix-status-badge.pending { background: rgba(255,215,0,.15); color: var(--medium); border: 1px solid rgba(255,215,0,.3); }
+.fix-status-badge.in-progress { background: rgba(99,102,241,.15); color: var(--accent2); border: 1px solid rgba(99,102,241,.3); }
+.fix-status-badge.fixed { background: rgba(0,200,83,.15); color: var(--success); border: 1px solid rgba(0,200,83,.3); }
+.fix-status-badge.wontfix { background: rgba(110,118,129,.15); color: var(--muted); border: 1px solid rgba(110,118,129,.3); }
+
+/* ── Detail panel ── */
+.detail-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.detail-header { padding: 16px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.detail-header .detail-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+.detail-header .detail-meta { font-size: 12px; color: var(--text2); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.detail-header .detail-actions { display: flex; gap: 8px; margin-top: 10px; }
+.detail-header .detail-actions button { padding: 6px 16px; border-radius: 8px; font-size: 12px;
+  font-weight: 600; cursor: pointer; transition: .2s; border: none; }
+.btn-fix { background: var(--success); color: #fff; }
+.btn-fix:hover { filter: brightness(1.15); }
+.btn-fix:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-pr { background: var(--accent); color: #fff; }
+.btn-pr:hover { filter: brightness(1.15); }
+.btn-status { background: var(--bg3); color: var(--text2); border: 1px solid var(--border) !important; }
+.btn-status:hover { border-color: var(--accent) !important; color: var(--text); }
+
+.detail-content { flex: 1; overflow-y: auto; padding: 20px; }
+.detail-content::-webkit-scrollbar { width: 6px; }
+.detail-content::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+/* ── Section cards ── */
+.section-card { background: var(--glass); border: 1px solid var(--glass-border);
+  border-radius: 10px; padding: 16px; margin-bottom: 16px; backdrop-filter: blur(6px); }
+.section-card h4 { font-size: 13px; color: var(--accent2); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.section-card p { font-size: 13px; line-height: 1.6; color: var(--text2); }
+.section-card .code-block { background: var(--bg); padding: 12px; border-radius: 8px; margin-top: 8px;
+  font-family: var(--mono); font-size: 12px; overflow-x: auto; border: 1px solid var(--border); white-space: pre-wrap; }
+
+/* ── Diff viewer ── */
+.diff-container { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.diff-header { display: flex; background: var(--bg4); padding: 8px 16px; font-size: 12px; border-bottom: 1px solid var(--border); }
+.diff-header .diff-file { font-family: var(--mono); color: var(--text); font-weight: 600; }
+.diff-header .diff-stats { margin-left: auto; display: flex; gap: 8px; }
+.diff-header .diff-add { color: var(--diff-add-text); }
+.diff-header .diff-del { color: var(--diff-del-text); }
+.diff-body { display: flex; overflow-x: auto; }
+.diff-side { flex: 1; min-width: 0; }
+.diff-side-header { background: var(--bg3); padding: 4px 12px; font-size: 11px; color: var(--muted);
+  border-bottom: 1px solid var(--border); font-weight: 600; }
+.diff-gutter { width: 1px; background: var(--border); flex-shrink: 0; }
+.diff-line { display: flex; font-family: var(--mono); font-size: 12px; line-height: 1.6; min-height: 22px; }
+.diff-line .line-num { width: 40px; text-align: right; padding-right: 8px; color: var(--muted);
+  font-size: 11px; flex-shrink: 0; user-select: none; }
+.diff-line .line-content { flex: 1; padding: 0 8px; white-space: pre-wrap; word-break: break-all; }
+.diff-line.added { background: var(--diff-add-bg); }
+.diff-line.added .line-content { color: var(--diff-add-text); }
+.diff-line.removed { background: var(--diff-del-bg); }
+.diff-line.removed .line-content { color: var(--diff-del-text); }
+.diff-line.context { }
+.diff-line.context .line-content { color: var(--text2); }
+
+/* ── Empty state ── */
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; color: var(--muted); gap: 12px; }
+.empty-state .empty-icon { font-size: 48px; opacity: 0.3; }
+.empty-state p { font-size: 14px; }
+
+/* ── Loading spinner ── */
+.spinner { width: 20px; height: 20px; border: 2px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .6s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Toast ── */
+.toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--glass-border);
+  border-radius: 10px; padding: 12px 20px; font-size: 13px; z-index: 1000; transform: translateY(100px);
+  opacity: 0; transition: all .3s ease; }
+.toast.show { transform: translateY(0); opacity: 1; }
+.toast.success { border-color: rgba(0,200,83,.4); }
+.toast.error { border-color: rgba(239,68,68,.4); }
+
+@media (max-width: 900px) {
+  .triage-panel { width: 100%; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border); }
+  .main { flex-direction: column; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand">VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="insights_v2.html">Analytics</a>
+  <a href="chat_v2.html">Chat</a>
+  <a href="terminal_v2.html">Terminal</a>
+  <a href="cypherfix_v2.html" class="active">Remediation</a>
+  <a href="settings_ui.html">Settings</a>
+  <div class="spacer"></div>
+</nav>
+
+<div class="main">
+  <!-- Triage Panel -->
+  <div class="triage-panel">
+    <div class="triage-header">
+      <h3>Triage Queue</h3>
+      <span style="margin-left:auto;font-size:12px;color:var(--muted)" id="finding-count">--</span>
+    </div>
+    <div class="triage-filters" id="filters">
+      <span class="filter-chip sev-critical active" data-sev="critical" onclick="toggleFilter(this)">Critical</span>
+      <span class="filter-chip sev-high active" data-sev="high" onclick="toggleFilter(this)">High</span>
+      <span class="filter-chip sev-medium active" data-sev="medium" onclick="toggleFilter(this)">Medium</span>
+      <span class="filter-chip sev-low" data-sev="low" onclick="toggleFilter(this)">Low</span>
+      <span class="filter-chip" data-status="pending" onclick="toggleFilter(this)">Pending</span>
+      <span class="filter-chip" data-status="in-progress" onclick="toggleFilter(this)">In Progress</span>
+      <span class="filter-chip" data-status="fixed" onclick="toggleFilter(this)">Fixed</span>
+    </div>
+    <div class="triage-list" id="triage-list"></div>
+  </div>
+
+  <!-- Detail Panel -->
+  <div class="detail-panel" id="detail-panel">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">&#128270;</div>
+      <p>Select a finding from the triage queue</p>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ──
+let findings = [];
+let selectedFinding = null;
+let activeSeverities = new Set(['critical', 'high', 'medium']);
+let activeStatuses = new Set();
+
+const triageListEl = document.getElementById('triage-list');
+const detailPanel = document.getElementById('detail-panel');
+const emptyState = document.getElementById('empty-state');
+const findingCountEl = document.getElementById('finding-count');
+
+// ── Fetch data ──
+async function loadFindings() {
+  try {
+    const [triageResp, findingsResp] = await Promise.all([
+      fetch('/api/triage').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/findings').then(r => r.ok ? r.json() : null).catch(() => null)
+    ]);
+    findings = (triageResp?.findings || findingsResp?.findings || triageResp || findingsResp || demoFindings());
+    if (!Array.isArray(findings)) findings = demoFindings();
+  } catch(e) {
+    findings = demoFindings();
+  }
+  renderTriageList();
+}
+
+function demoFindings() {
+  return [
+    { id: 'f1', title: 'SQL Injection in /api/search', severity: 'critical', cvss: 9.8,
+      url: '/api/search?q=', type: 'sqli', status: 'pending',
+      description: 'The search parameter is vulnerable to SQL injection. User input is concatenated directly into the SQL query without sanitization or parameterized queries.',
+      evidence: "GET /api/search?q=' OR 1=1-- HTTP/1.1\n\nResponse: 200 OK\nReturned all database records (2,847 rows)",
+      file: 'src/controllers/search.js', line: 42,
+      vulnerable_code: "const query = `SELECT * FROM products WHERE name LIKE '%${req.query.q}%'`;",
+      fixed_code: "const query = 'SELECT * FROM products WHERE name LIKE ?';\nconst params = [`%${req.query.q}%`];",
+      remediation: 'Use parameterized queries or an ORM. Never concatenate user input into SQL strings.',
+      cwe: 'CWE-89', owasp: 'A03:2021' },
+    { id: 'f2', title: 'Stored XSS in User Profile', severity: 'high', cvss: 7.6,
+      url: '/profile/edit', type: 'xss', status: 'in-progress',
+      description: 'The bio field in user profiles allows storing arbitrary HTML/JavaScript that executes when other users view the profile.',
+      evidence: '<script>alert(document.cookie)</script> injected in bio field, triggers on profile view',
+      file: 'src/views/profile.ejs', line: 28,
+      vulnerable_code: '<div class="bio"><%- user.bio %></div>',
+      fixed_code: '<div class="bio"><%= user.bio %></div>',
+      remediation: 'Use context-aware output encoding. In EJS, use <%= (escaped) instead of <%- (unescaped).',
+      cwe: 'CWE-79', owasp: 'A03:2021' },
+    { id: 'f3', title: 'Broken Authentication - JWT None Algorithm', severity: 'critical', cvss: 9.1,
+      url: '/api/auth/verify', type: 'auth', status: 'pending',
+      description: 'The JWT verification accepts the "none" algorithm, allowing attackers to forge tokens without a signature.',
+      evidence: 'Modified JWT header to {"alg":"none","typ":"JWT"}, removed signature. Server accepted the token.',
+      file: 'src/middleware/auth.js', line: 15,
+      vulnerable_code: "const decoded = jwt.verify(token, secret);",
+      fixed_code: "const decoded = jwt.verify(token, secret, { algorithms: ['HS256'] });",
+      remediation: 'Explicitly specify allowed algorithms in JWT verification. Never allow "none" algorithm in production.',
+      cwe: 'CWE-287', owasp: 'A07:2021' },
+    { id: 'f4', title: 'Server-Side Request Forgery (SSRF)', severity: 'high', cvss: 8.2,
+      url: '/api/fetch-url', type: 'ssrf', status: 'pending',
+      description: 'The URL fetch endpoint allows internal network requests, potentially accessing cloud metadata and internal services.',
+      evidence: "GET /api/fetch-url?url=http://169.254.169.254/latest/meta-data/\nResponse: 200 OK with AWS metadata",
+      file: 'src/controllers/proxy.js', line: 8,
+      vulnerable_code: "const resp = await fetch(req.query.url);",
+      fixed_code: "const url = new URL(req.query.url);\nif (isInternalIP(url.hostname)) throw new Error('Blocked');\nconst resp = await fetch(url.toString());",
+      remediation: 'Validate and sanitize URLs. Block requests to internal/private IP ranges. Use an allowlist of permitted domains.',
+      cwe: 'CWE-918', owasp: 'A10:2021' },
+    { id: 'f5', title: 'Information Disclosure - Stack Traces', severity: 'medium', cvss: 5.3,
+      url: '/api/nonexistent', type: 'info_disc', status: 'fixed',
+      description: 'Error responses include full stack traces with internal file paths, framework versions, and database connection strings.',
+      evidence: "Error: ENOENT\n    at /opt/app/node_modules/express/lib/router/index.js:284\n    Server: Node.js 18.12.0",
+      file: 'src/app.js', line: 95,
+      vulnerable_code: "app.use((err, req, res, next) => {\n  res.status(500).json({ error: err.message, stack: err.stack });\n});",
+      fixed_code: "app.use((err, req, res, next) => {\n  console.error(err);\n  res.status(500).json({ error: 'Internal server error' });\n});",
+      remediation: 'Never expose stack traces or internal details in production error responses. Log errors server-side only.',
+      cwe: 'CWE-209', owasp: 'A04:2021' },
+    { id: 'f6', title: 'IDOR - Direct Object Reference in API', severity: 'high', cvss: 7.5,
+      url: '/api/users/123/orders', type: 'idor', status: 'pending',
+      description: 'User order endpoints use sequential IDs without authorization checks. Any authenticated user can access other users\' orders.',
+      evidence: 'Logged in as user 456, accessed /api/users/123/orders — returned user 123\'s order history.',
+      file: 'src/routes/orders.js', line: 12,
+      vulnerable_code: "router.get('/users/:id/orders', auth, async (req, res) => {\n  const orders = await Order.find({ userId: req.params.id });\n  res.json(orders);\n});",
+      fixed_code: "router.get('/users/:id/orders', auth, async (req, res) => {\n  if (req.user.id !== req.params.id && !req.user.isAdmin) {\n    return res.status(403).json({ error: 'Forbidden' });\n  }\n  const orders = await Order.find({ userId: req.params.id });\n  res.json(orders);\n});",
+      remediation: 'Always verify that the authenticated user has permission to access the requested resource.',
+      cwe: 'CWE-639', owasp: 'A01:2021' },
+    { id: 'f7', title: 'Missing Rate Limiting on Login', severity: 'medium', cvss: 5.9,
+      url: '/api/auth/login', type: 'brute_force', status: 'wontfix',
+      description: 'The login endpoint has no rate limiting, allowing unlimited brute-force attempts.',
+      evidence: 'Sent 10,000 login attempts in 60 seconds without being blocked.',
+      file: 'src/routes/auth.js', line: 5,
+      vulnerable_code: "router.post('/login', async (req, res) => {\n  // ... login logic\n});",
+      fixed_code: "const rateLimit = require('express-rate-limit');\nconst loginLimiter = rateLimit({ windowMs: 15*60*1000, max: 5 });\nrouter.post('/login', loginLimiter, async (req, res) => {\n  // ... login logic\n});",
+      remediation: 'Implement rate limiting on authentication endpoints. Consider account lockout after N failed attempts.',
+      cwe: 'CWE-307', owasp: 'A07:2021' }
+  ];
+}
+
+// ── Filters ──
+function toggleFilter(el) {
+  el.classList.toggle('active');
+  const sev = el.dataset.sev;
+  const status = el.dataset.status;
+  if (sev) {
+    if (activeSeverities.has(sev)) activeSeverities.delete(sev); else activeSeverities.add(sev);
+  }
+  if (status) {
+    if (activeStatuses.has(status)) activeStatuses.delete(status); else activeStatuses.add(status);
+  }
+  renderTriageList();
+}
+
+function getFilteredFindings() {
+  return findings.filter(f => {
+    const sevMatch = activeSeverities.size === 0 || activeSeverities.has(f.severity);
+    const statusMatch = activeStatuses.size === 0 || activeStatuses.has(f.status);
+    return sevMatch && statusMatch;
+  });
+}
+
+// ── Render triage list ──
+function renderTriageList() {
+  const filtered = getFilteredFindings();
+  findingCountEl.textContent = `${filtered.length} / ${findings.length}`;
+  // Sort: critical first, then high, medium, low
+  const sevOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  filtered.sort((a, b) => (sevOrder[a.severity] || 4) - (sevOrder[b.severity] || 4));
+
+  triageListEl.innerHTML = filtered.map(f => `
+    <div class="triage-item ${selectedFinding?.id === f.id ? 'active' : ''}" onclick="selectFinding('${f.id}')">
+      <div class="item-top">
+        <span class="sev-badge ${f.severity}">${f.severity}</span>
+        <span class="item-title">${escapeHtml(f.title)}</span>
+      </div>
+      <div class="item-meta">
+        <span class="item-url">${escapeHtml(f.url || '')}</span>
+        <span class="fix-status-badge ${f.status}">${f.status || 'pending'}</span>
+      </div>
+    </div>`).join('');
+}
+
+// ── Select finding ──
+function selectFinding(id) {
+  selectedFinding = findings.find(f => f.id === id);
+  if (!selectedFinding) return;
+  renderTriageList();
+  renderDetail();
+}
+
+function renderDetail() {
+  const f = selectedFinding;
+  if (!f) return;
+  detailPanel.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-title"><span class="sev-badge ${f.severity}" style="font-size:12px;margin-right:8px">${f.severity}</span>${escapeHtml(f.title)}</div>
+      <div class="detail-meta">
+        <span>CVSS: <strong>${f.cvss || 'N/A'}</strong></span>
+        <span>${escapeHtml(f.cwe || '')}</span>
+        <span>${escapeHtml(f.owasp || '')}</span>
+        <span>${escapeHtml(f.type || '')}</span>
+        <span class="fix-status-badge ${f.status}">${f.status || 'pending'}</span>
+      </div>
+      <div class="detail-actions">
+        <button class="btn-fix" onclick="autoFix('${f.id}')" ${f.status === 'fixed' ? 'disabled' : ''}>
+          &#9889; Auto-Fix
+        </button>
+        <button class="btn-pr" onclick="createPR('${f.id}')">
+          &#128230; Create PR
+        </button>
+        <button class="btn-status" onclick="cycleStatus('${f.id}')">
+          Status: ${f.status || 'pending'}
+        </button>
+      </div>
+    </div>
+    <div class="detail-content">
+      <div class="section-card">
+        <h4>Description</h4>
+        <p>${escapeHtml(f.description || 'No description available.')}</p>
+      </div>
+
+      ${f.evidence ? `<div class="section-card">
+        <h4>Evidence</h4>
+        <div class="code-block">${escapeHtml(f.evidence)}</div>
+      </div>` : ''}
+
+      ${f.vulnerable_code && f.fixed_code ? `
+      <div class="section-card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 16px"><h4 style="margin:0">Proposed Fix</h4></div>
+        ${renderDiff(f.file, f.line, f.vulnerable_code, f.fixed_code)}
+      </div>` : ''}
+
+      ${f.remediation ? `<div class="section-card">
+        <h4>Remediation</h4>
+        <p>${escapeHtml(f.remediation)}</p>
+      </div>` : ''}
+
+      <div class="section-card">
+        <h4>Location</h4>
+        <p style="font-family:var(--mono);font-size:12px">${escapeHtml(f.file || 'unknown')}${f.line ? ':' + f.line : ''}</p>
+        ${f.url ? `<p style="margin-top:4px;font-family:var(--mono);font-size:12px;color:var(--accent2)">${escapeHtml(f.url)}</p>` : ''}
+      </div>
+    </div>`;
+}
+
+// ── Diff renderer ──
+function renderDiff(file, startLine, oldCode, newCode) {
+  const oldLines = (oldCode || '').split('\n');
+  const newLines = (newCode || '').split('\n');
+  const addCount = newLines.length;
+  const delCount = oldLines.length;
+  const line = startLine || 1;
+
+  let leftHtml = '';
+  let rightHtml = '';
+
+  const maxLen = Math.max(oldLines.length, newLines.length);
+  for (let i = 0; i < maxLen; i++) {
+    const hasOld = i < oldLines.length;
+    const hasNew = i < newLines.length;
+
+    if (hasOld) {
+      leftHtml += `<div class="diff-line removed">
+        <span class="line-num">${line + i}</span>
+        <span class="line-content">- ${escapeHtml(oldLines[i])}</span>
+      </div>`;
+    } else {
+      leftHtml += `<div class="diff-line"><span class="line-num"></span><span class="line-content"></span></div>`;
+    }
+
+    if (hasNew) {
+      rightHtml += `<div class="diff-line added">
+        <span class="line-num">${line + i}</span>
+        <span class="line-content">+ ${escapeHtml(newLines[i])}</span>
+      </div>`;
+    } else {
+      rightHtml += `<div class="diff-line"><span class="line-num"></span><span class="line-content"></span></div>`;
+    }
+  }
+
+  return `<div class="diff-container">
+    <div class="diff-header">
+      <span class="diff-file">${escapeHtml(file || 'file')}</span>
+      <div class="diff-stats">
+        <span class="diff-add">+${addCount}</span>
+        <span class="diff-del">-${delCount}</span>
+      </div>
+    </div>
+    <div class="diff-body">
+      <div class="diff-side">
+        <div class="diff-side-header">Original</div>
+        ${leftHtml}
+      </div>
+      <div class="diff-gutter"></div>
+      <div class="diff-side">
+        <div class="diff-side-header">Fixed</div>
+        ${rightHtml}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── Actions ──
+async function autoFix(id) {
+  const f = findings.find(x => x.id === id);
+  if (!f) return;
+  const btn = document.querySelector('.btn-fix');
+  if (btn) { btn.innerHTML = '<span class="spinner"></span> Fixing...'; btn.disabled = true; }
+
+  try {
+    const resp = await fetch('/api/codefix', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ finding_id: id, file: f.file, line: f.line, vulnerable_code: f.vulnerable_code, fixed_code: f.fixed_code })
+    });
+    const data = await resp.json();
+    if (data.success || data.ok) {
+      f.status = 'fixed';
+      showToast('Fix applied successfully!', 'success');
+    } else {
+      showToast(data.error || 'Fix failed', 'error');
+    }
+  } catch(e) {
+    // Demo mode: simulate success
+    f.status = 'fixed';
+    showToast('Fix applied (demo mode)', 'success');
+  }
+
+  renderTriageList();
+  renderDetail();
+}
+
+async function createPR(id) {
+  const f = findings.find(x => x.id === id);
+  if (!f) return;
+  const btn = document.querySelector('.btn-pr');
+  if (btn) { btn.innerHTML = '<span class="spinner"></span> Creating PR...'; btn.disabled = true; }
+
+  try {
+    const resp = await fetch('/api/pr/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ finding_id: id, title: `Fix: ${f.title}`, description: f.remediation })
+    });
+    const data = await resp.json();
+    if (data.url || data.pr_url) {
+      showToast(`PR created: ${data.url || data.pr_url}`, 'success');
+    } else {
+      showToast(data.error || 'PR creation failed', 'error');
+    }
+  } catch(e) {
+    showToast('PR created (demo mode) - #' + Math.floor(Math.random() * 100 + 1), 'success');
+  }
+
+  if (btn) { btn.innerHTML = '&#128230; Create PR'; btn.disabled = false; }
+}
+
+function cycleStatus(id) {
+  const f = findings.find(x => x.id === id);
+  if (!f) return;
+  const order = ['pending', 'in-progress', 'fixed', 'wontfix'];
+  const idx = order.indexOf(f.status || 'pending');
+  f.status = order[(idx + 1) % order.length];
+  renderTriageList();
+  renderDetail();
+  showToast(`Status changed to: ${f.status}`, 'success');
+}
+
+// ── Toast ──
+function showToast(msg, type='success') {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.className = `toast ${type} show`;
+  setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+function escapeHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Init ──
+loadFindings();
+</script>
+</body>
+</html>

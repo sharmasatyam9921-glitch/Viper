@@ -28,9 +28,10 @@ class EvoGraph:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
-        self.conn = sqlite3.connect(str(db_path))
+        self.conn = sqlite3.connect(str(db_path), timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_tables()
 
@@ -316,8 +317,12 @@ class EvoGraph:
 
         q_table: Dict[Tuple, Dict[str, float]] = {}
         for row in rows:
+            def _deep_tuple(obj):
+                if isinstance(obj, list):
+                    return tuple(_deep_tuple(x) for x in obj)
+                return obj
             try:
-                key = tuple(json.loads(row["state_key"]))
+                key = _deep_tuple(json.loads(row["state_key"]))
             except (json.JSONDecodeError, TypeError):
                 key = tuple(row["state_key"].split(","))
             if key not in q_table:
@@ -380,6 +385,171 @@ class EvoGraph:
             "sessions": [dict(r) for r in sessions],
             "stats": self.get_evolution_stats(),
         }
+
+    # ── Failure Learning (Phase 3 upgrade) ──
+
+    def ingest_failure_lesson(self, lesson: Any) -> None:
+        """Ingest a LessonLearned from FailureAnalyzer into the evolution graph.
+
+        Creates or updates the tech_attack_map with failure data and stores
+        bypass suggestions for future reference.
+
+        Args:
+            lesson: A LessonLearned dataclass instance (or dict with same keys).
+        """
+        if hasattr(lesson, "to_dict"):
+            data = lesson.to_dict()
+        elif isinstance(lesson, dict):
+            data = lesson
+        else:
+            return
+
+        attack_type = data.get("attack_type", "unknown")
+        waf = data.get("waf_signature_detected", "")
+        bypass = data.get("suggested_bypass", "")
+        mutation = data.get("payload_mutation", "")
+        confidence = data.get("confidence", 0.0)
+
+        # Store lesson in a new table
+        try:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS failure_lessons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attack_type TEXT NOT NULL,
+                    target TEXT DEFAULT '',
+                    failure_reason TEXT DEFAULT '',
+                    waf_detected TEXT DEFAULT '',
+                    suggested_bypass TEXT DEFAULT '',
+                    payload_mutation TEXT DEFAULT '',
+                    confidence REAL DEFAULT 0.0,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_failure_lessons_attack
+                    ON failure_lessons(attack_type)
+            """)
+            self.conn.execute(
+                "INSERT INTO failure_lessons "
+                "(attack_type, target, failure_reason, waf_detected, suggested_bypass, "
+                "payload_mutation, confidence, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (attack_type, data.get("target", ""), data.get("failure_reason", ""),
+                 waf or "", bypass, mutation, confidence,
+                 data.get("timestamp", datetime.now().isoformat())),
+            )
+            self.conn.commit()
+            logger.debug("Ingested failure lesson for %s", attack_type)
+        except Exception as exc:
+            logger.debug("Failed to ingest lesson: %s", exc)
+
+    def get_top_bypasses(self, attack_type: str, n: int = 5) -> List[Dict[str, Any]]:
+        """Get top bypass suggestions for an attack type from historical failures.
+
+        Returns the most frequent and highest-confidence bypass suggestions.
+        """
+        try:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS failure_lessons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attack_type TEXT NOT NULL,
+                    target TEXT DEFAULT '',
+                    failure_reason TEXT DEFAULT '',
+                    waf_detected TEXT DEFAULT '',
+                    suggested_bypass TEXT DEFAULT '',
+                    payload_mutation TEXT DEFAULT '',
+                    confidence REAL DEFAULT 0.0,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            rows = self.conn.execute(
+                "SELECT suggested_bypass, payload_mutation, waf_detected, "
+                "AVG(confidence) as avg_conf, COUNT(*) as cnt "
+                "FROM failure_lessons WHERE attack_type=? AND suggested_bypass != '' "
+                "GROUP BY suggested_bypass ORDER BY cnt DESC, avg_conf DESC LIMIT ?",
+                (attack_type, n),
+            ).fetchall()
+
+            return [
+                {
+                    "bypass": row["suggested_bypass"],
+                    "mutation": row["payload_mutation"],
+                    "waf": row["waf_detected"],
+                    "avg_confidence": row["avg_conf"],
+                    "count": row["cnt"],
+                }
+                for row in rows
+            ]
+        except Exception:
+            return []
+
+    def get_payload_fitness_history(self, payload_hash: str) -> List[Dict[str, Any]]:
+        """Get historical fitness data for a payload (identified by hash).
+
+        Tracks how a specific payload has performed across sessions.
+        """
+        try:
+            rows = self.conn.execute(
+                "SELECT session_id, attack_type, success, confidence, reward, timestamp "
+                "FROM attack_history WHERE reasoning LIKE ? "
+                "ORDER BY timestamp DESC LIMIT 50",
+                (f"%{payload_hash}%",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def export_attack_evolution(self) -> Dict[str, Any]:
+        """Export attack evolution as a graph with nodes and edges.
+
+        Nodes represent attack types; edges represent which attacks
+        led to discovering other vulnerabilities.
+        """
+        nodes = []
+        edges = []
+
+        try:
+            # Get attack types and their success rates
+            attack_stats = self.conn.execute(
+                "SELECT attack_type, SUM(attempts) as att, SUM(successes) as suc, "
+                "AVG(avg_reward) as rew FROM tech_attack_map "
+                "GROUP BY attack_type ORDER BY att DESC"
+            ).fetchall()
+
+            for stat in attack_stats:
+                nodes.append({
+                    "id": stat["attack_type"],
+                    "label": stat["attack_type"],
+                    "size": stat["att"],
+                    "success_rate": stat["suc"] / max(stat["att"], 1),
+                    "avg_reward": stat["rew"] or 0.0,
+                })
+
+            # Build edges from session co-occurrence
+            sessions = self.conn.execute(
+                "SELECT session_id, attack_type, success FROM attack_history "
+                "ORDER BY session_id, id"
+            ).fetchall()
+
+            session_attacks: Dict[int, List[str]] = {}
+            for row in sessions:
+                sid = row["session_id"]
+                session_attacks.setdefault(sid, []).append(row["attack_type"])
+
+            # Count co-occurrence as edges
+            edge_counts: Dict[tuple, int] = {}
+            for attacks in session_attacks.values():
+                unique = list(dict.fromkeys(attacks))  # preserve order, remove dupes
+                for i in range(len(unique) - 1):
+                    key = (unique[i], unique[i + 1])
+                    edge_counts[key] = edge_counts.get(key, 0) + 1
+
+            for (src, dst), weight in edge_counts.items():
+                edges.append({"source": src, "target": dst, "weight": weight})
+
+        except Exception as exc:
+            logger.debug("export_attack_evolution error: %s", exc)
+
+        return {"nodes": nodes, "edges": edges}
 
     # ── Helpers ──
 

@@ -426,3 +426,154 @@ class StealthEngine:
                 "max_delay": self.profile.max_delay,
             },
         }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# FINGERPRINT RANDOMIZER (Phase 4 upgrade)
+# ═══════════════════════════════════════════════════════════════════════
+
+class FingerprintRandomizer:
+    """Randomize TLS/HTTP fingerprints to avoid correlation.
+
+    Methods:
+    - randomize_ja3(): Vary TLS cipher suite order
+    - randomize_http2_settings(): Vary HTTP/2 frame parameters
+    - randomize_header_order(): Shuffle non-essential headers
+    - get_stealth_headers(): Return randomized but realistic headers
+    """
+
+    # Common TLS cipher suites (names for documentation; actual randomization
+    # requires ssl context manipulation at socket level)
+    CIPHER_SUITES = [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+        "ECDHE-ECDSA-CHACHA20-POLY1305",
+        "ECDHE-RSA-CHACHA20-POLY1305",
+    ]
+
+    # HTTP/2 settings frame parameters
+    H2_SETTINGS = {
+        "HEADER_TABLE_SIZE": (4096, 65536),
+        "ENABLE_PUSH": (0, 1),
+        "MAX_CONCURRENT_STREAMS": (100, 1000),
+        "INITIAL_WINDOW_SIZE": (65535, 6291456),
+        "MAX_FRAME_SIZE": (16384, 16777215),
+        "MAX_HEADER_LIST_SIZE": (8192, 131072),
+    }
+
+    def __init__(self):
+        self._current_profile: Dict = {}
+
+    def randomize_ja3(self) -> Dict[str, any]:
+        """Vary TLS cipher suite order for JA3 fingerprint randomization.
+
+        Returns a dict with cipher string suitable for ssl.SSLContext.set_ciphers().
+
+        Note: Full JA3 randomization requires low-level TLS control.
+        This randomizes the cipher preference order, which is the primary
+        differentiator in JA3 fingerprints.
+        """
+        # Shuffle cipher suites
+        suites = list(self.CIPHER_SUITES)
+        random.shuffle(suites)
+
+        # Random TLS extensions order
+        extensions = ["server_name", "ec_point_formats", "supported_groups",
+                      "session_ticket", "status_request", "signed_certificate_timestamp"]
+        random.shuffle(extensions)
+
+        self._current_profile["ja3_ciphers"] = suites
+        self._current_profile["ja3_extensions"] = extensions
+
+        return {
+            "cipher_string": ":".join(suites[:6]),
+            "extensions": extensions,
+        }
+
+    def randomize_http2_settings(self) -> Dict[str, int]:
+        """Vary HTTP/2 SETTINGS frame parameters.
+
+        Each value is randomized within realistic bounds to avoid
+        fingerprinting based on initial SETTINGS frame.
+        """
+        settings = {}
+        for name, (lo, hi) in self.H2_SETTINGS.items():
+            settings[name] = random.randint(lo, hi)
+
+        self._current_profile["h2_settings"] = settings
+        return settings
+
+    def randomize_header_order(self, headers: Dict[str, str]) -> Dict[str, str]:
+        """Shuffle non-essential header order.
+
+        Preserves Host at the top (required by HTTP/1.1) but shuffles
+        other headers to vary the fingerprint.
+        """
+        essential = {}
+        shuffleable = {}
+
+        for k, v in headers.items():
+            if k.lower() in ("host", "content-length", "content-type"):
+                essential[k] = v
+            else:
+                shuffleable[k] = v
+
+        # Shuffle non-essential headers
+        items = list(shuffleable.items())
+        random.shuffle(items)
+
+        # Reconstruct: essential first, then shuffled
+        result = dict(essential)
+        result.update(dict(items))
+        return result
+
+    def get_stealth_headers(self, url: str = "") -> Dict[str, str]:
+        """Return a complete set of randomized but realistic headers.
+
+        Combines UA rotation, accept header variation, and header order
+        randomization into a single realistic request header set.
+        """
+        ua = random.choice(USER_AGENTS)
+
+        # Determine browser family
+        family = "chrome"
+        if "Firefox" in ua:
+            family = "firefox"
+        elif "Safari" in ua and "Chrome" not in ua:
+            family = "safari"
+
+        headers = dict(ACCEPT_PROFILES.get(family, ACCEPT_PROFILES["chrome"]))
+        headers["User-Agent"] = ua
+        headers["Connection"] = "keep-alive"
+        headers["Upgrade-Insecure-Requests"] = "1"
+
+        # Randomly add optional headers
+        if random.random() < 0.4:
+            headers["DNT"] = random.choice(["1", "0"])
+        if random.random() < 0.3:
+            headers["Cache-Control"] = random.choice(["no-cache", "max-age=0"])
+        if random.random() < 0.5:
+            domain = urllib.parse.urlparse(url).netloc if url else ""
+            ref = random.choice(REFERRERS)
+            if "search" in ref or "?q=" in ref:
+                ref += domain
+            headers["Referer"] = ref
+
+        # Randomize header order
+        return self.randomize_header_order(headers)
+
+    def get_ssl_context(self) -> "ssl.SSLContext":
+        """Create an SSL context with randomized cipher preference."""
+        import ssl
+        ctx = ssl.create_default_context()
+        ja3 = self.randomize_ja3()
+        try:
+            ctx.set_ciphers(ja3["cipher_string"])
+        except ssl.SSLError:
+            pass  # Fall back to default ciphers
+        return ctx

@@ -1,0 +1,42 @@
+##
+## GVM/OpenVAS for VIPER — Network Vulnerability Scanner
+##
+## Usage:
+##   docker compose -f docker/docker-compose.gvm.yml up -d
+##   # Wait ~5-10 minutes for feed sync on first run
+##   # Default credentials: admin / admin
+##
+## VIPER auto-detects this container and connects via REST API on port 9392.
+##
+
+services:
+  gvm:
+    image: greenbone/community-edition:stable
+    container_name: viper-gvm
+    restart: unless-stopped
+    ports:
+      - "9392:9392"   # GSA web UI + REST API
+      - "9390:9390"   # GMP protocol
+    volumes:
+      - gvm-data:/var/lib/gvm
+      - gvm-scap:/var/lib/openvas/plugins
+    environment:
+      - GVM_ADMIN_PASSWORD=admin
+      - COMMUNITY_EDITION=1
+    healthcheck:
+      test: ["CMD", "curl", "-kf", "https://localhost:9392/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+
+volumes:
+  gvm-data:
+    driver: local
+  gvm-scap:
+    driver: local

@@ -512,7 +512,7 @@ class NetworkxBackend(GraphBackend):
 class Neo4jBackend(GraphBackend):
     """Neo4j graph database backend."""
 
-    def __init__(self, uri: str, user: str = "neo4j", password: str = "changeme123"):
+    def __init__(self, uri: str, user: str = "neo4j", password: str = os.environ.get("NEO4J_PASSWORD", "changeme")):
         if GraphDatabase is None:
             raise ImportError("neo4j driver required: pip install neo4j")
         self._driver = GraphDatabase.driver(uri, auth=(user, password))
@@ -750,7 +750,7 @@ class GraphEngine:
         if neo4j_uri and GraphDatabase is not None:
             try:
                 neo_user = os.environ.get("NEO4J_USER", "neo4j")
-                neo_pass = os.environ.get("NEO4J_PASSWORD", "changeme123")
+                neo_pass = os.environ.get("NEO4J_PASSWORD", "changeme")
                 backend = Neo4jBackend(neo4j_uri, neo_user, neo_pass)
                 logger.info(f"Using Neo4j backend: {neo4j_uri}")
                 return backend

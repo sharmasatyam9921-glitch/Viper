@@ -1072,3 +1072,37 @@ def save_report(html_content: str, filename: Optional[str] = None) -> Path:
     path = REPORTS_DIR / filename
     path.write_text(html_content, encoding="utf-8")
     return path
+
+
+def export_pdf(html_path: str, pdf_path: str = None) -> str:
+    """Export HTML report to PDF using wkhtmltopdf if available.
+
+    Args:
+        html_path: Path to the HTML report file.
+        pdf_path: Output PDF path. Defaults to same name with .pdf extension.
+
+    Returns:
+        Path to the generated PDF.
+
+    Raises:
+        RuntimeError: If wkhtmltopdf is not installed.
+    """
+    import shutil
+    import subprocess
+
+    html_path = str(html_path)
+    if pdf_path is None:
+        pdf_path = html_path.replace(".html", ".pdf")
+
+    wk = shutil.which("wkhtmltopdf")
+    if wk:
+        subprocess.run(
+            [wk, "--quiet", "--enable-local-file-access", html_path, pdf_path],
+            timeout=60, check=True,
+        )
+        return pdf_path
+    else:
+        raise RuntimeError(
+            "wkhtmltopdf not installed. Install it for PDF export: "
+            "https://wkhtmltopdf.org/downloads.html"
+        )

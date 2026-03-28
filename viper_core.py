@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VIPER Core v4 - Autonomous Bug Bounty Hunter
+VIPER Core v5.0 - Autonomous Bug Bounty Hunter
 
 Integrated bug bounty hunting system with:
 - Full reconnaissance (subdomains, ports, tech fingerprinting)
@@ -10,12 +10,17 @@ Integrated bug bounty hunting system with:
 - LLM-assisted analysis
 - Bug bounty scope management
 - Knowledge graph (Neo4j / SQLite dual-backend)
-- LangGraph-style orchestrator with Deep Think
+- Pure-Python orchestrator with multi-agent parallelization
 - Advanced guardrails + attack skill classification
 - Wappalyzer fingerprinting (6K technologies)
 - MITRE CWE/CAPEC enrichment
 - CypherFix auto-remediation
-- CISO-quality narrative reports
+- CISO-quality narrative reports with CVSS v4.0
+- OAuth/WebSocket/Race condition/Business logic testing
+- Self-learning from failures + cross-target correlation
+- TLS fingerprint randomization + human-like timing
+- Evidence chain of custody with HMAC signing
+- Real-time finding notifications (Discord/Telegram/Email)
 
 Run it and walk away. Come back to findings.
 """
@@ -92,6 +97,12 @@ try:
     EVOGRAPH_AVAILABLE = True
 except ImportError:
     EVOGRAPH_AVAILABLE = False
+
+try:
+    from core.notifier import Notifier
+    NOTIFIER_AVAILABLE = True
+except ImportError:
+    NOTIFIER_AVAILABLE = False
 
 try:
     from core.secret_scanner import SecretScanner
@@ -260,6 +271,13 @@ try:
 except ImportError:
     SETTINGS_AVAILABLE = False
 
+# Recon Pipeline
+try:
+    from recon.pipeline import ReconPipeline
+    PIPELINE_AVAILABLE = True
+except ImportError:
+    PIPELINE_AVAILABLE = False
+
 # Dashboard live events
 try:
     from dashboard.server import publish_event as _publish_event
@@ -269,6 +287,94 @@ except ImportError:
 
     def _publish_event(event_type, data):
         pass
+
+# ══════════════════════════════════════════════════════════════════════
+# VIPER 5.0: Multi-agent + new attack modules
+# ══════════════════════════════════════════════════════════════════════
+
+# Multi-agent bus
+try:
+    from core.agent_bus import AgentBus, Priority as BusPriority
+    from core.agent_registry import AgentRegistry
+    AGENT_BUS_AVAILABLE = True
+except ImportError:
+    AGENT_BUS_AVAILABLE = False
+
+# New attack modules
+try:
+    from core.oauth_fuzzer import OAuthFuzzer
+    OAUTH_FUZZER_AVAILABLE = True
+except ImportError:
+    OAUTH_FUZZER_AVAILABLE = False
+
+try:
+    from core.websocket_fuzzer import WebSocketFuzzer
+    WS_FUZZER_AVAILABLE = True
+except ImportError:
+    WS_FUZZER_AVAILABLE = False
+
+try:
+    from core.race_engine import RaceEngine
+    RACE_ENGINE_AVAILABLE = True
+except ImportError:
+    RACE_ENGINE_AVAILABLE = False
+
+try:
+    from core.logic_modeler import LogicModeler
+    LOGIC_MODELER_AVAILABLE = True
+except ImportError:
+    LOGIC_MODELER_AVAILABLE = False
+
+# Self-learning upgrades
+try:
+    from core.failure_analyzer import FailureAnalyzer
+    FAILURE_ANALYZER_AVAILABLE = True
+except ImportError:
+    FAILURE_ANALYZER_AVAILABLE = False
+
+try:
+    from core.cross_target_correlator import CrossTargetCorrelator
+    CROSS_CORRELATOR_AVAILABLE = True
+except ImportError:
+    CROSS_CORRELATOR_AVAILABLE = False
+
+try:
+    from core.fuzzer import GeneticFuzzer
+    GENETIC_FUZZER_AVAILABLE = True
+except ImportError:
+    GENETIC_FUZZER_AVAILABLE = False
+
+# Stealth & OPSEC upgrades
+try:
+    from core.stealth import FingerprintRandomizer
+    FINGERPRINT_RANDOMIZER_AVAILABLE = True
+except ImportError:
+    FINGERPRINT_RANDOMIZER_AVAILABLE = False
+
+try:
+    from core.rate_limiter import HumanTimingProfile
+    HUMAN_TIMING_AVAILABLE = True
+except ImportError:
+    HUMAN_TIMING_AVAILABLE = False
+
+try:
+    from core.chain_of_custody import ChainOfCustody
+    CHAIN_OF_CUSTODY_AVAILABLE = True
+except ImportError:
+    CHAIN_OF_CUSTODY_AVAILABLE = False
+
+# Reporting upgrades
+try:
+    from core.reporter import CvssV4Score, calculate_cvss4
+    CVSS4_AVAILABLE = True
+except ImportError:
+    CVSS4_AVAILABLE = False
+
+try:
+    from core.finding_stream import FindingStream, NotificationConfig
+    FINDING_STREAM_AVAILABLE = True
+except ImportError:
+    FINDING_STREAM_AVAILABLE = False
 
 
 def _emit(event_type, **data):
@@ -1115,7 +1221,25 @@ class ViperKnowledge:
 
         for attack in attacks_data:
             self.attacks[attack.name] = attack
-        
+
+        # Extend payloads from wordlist files if available
+        wordlist_map = {
+            "lfi_basic": "lfi-payloads.txt",
+        }
+        wordlists_dir = Path(__file__).parent / "wordlists"
+        for attack_name, wl_file in wordlist_map.items():
+            wl_path = wordlists_dir / wl_file
+            if wl_path.exists() and attack_name in self.attacks:
+                extra = [
+                    line.strip()
+                    for line in wl_path.read_text(errors="ignore").splitlines()
+                    if line.strip() and not line.startswith("#")
+                ]
+                existing = set(self.attacks[attack_name].payloads)
+                self.attacks[attack_name].payloads.extend(
+                    p for p in extra if p not in existing
+                )
+
         # Tech signatures
         self.tech_signatures = {
             "php": ["php", "<?php", ".php", "PHPSESSID"],
@@ -1237,7 +1361,11 @@ class ViperCore:
             self.http_client = HackerHTTPClient(
                 requests_per_second=5.0, verify_ssl=False,
             )
-            self.db = ViperDB()
+            try:
+                self.db = ViperDB()
+            except Exception as e:
+                self.log(f"[ERROR] ViperDB init failed: {e} — findings will NOT be saved!", "ERROR")
+                self.db = None
             self.validator = FindingValidator(self.http_client)
             self.poc_gen = PoCGenerator()
         else:
@@ -1258,6 +1386,12 @@ class ViperCore:
             self.secret_scanner = SecretScanner(verbose=True)
         else:
             self.secret_scanner = None
+
+        # Notifier (Telegram alerts via Clawdbot)
+        self.notifier = None
+        if NOTIFIER_AVAILABLE:
+            self.notifier = Notifier(gateway_url="http://localhost:1999", enabled=True)
+            self.log("[Notifier] Telegram alerts enabled via Clawdbot gateway")
 
         # Initialize modules
         if MODULES_AVAILABLE:
@@ -1467,12 +1601,73 @@ class ViperCore:
                     graph_engine=self.graph_engine,
                     model_router=getattr(self._react_engine, 'router', None) if self._react_engine else None,
                     chain_writer=self.chain_writer,
+                    guardrail=self.guardrail if GUARDRAILS_AVAILABLE else None,
+                    enable_agents=AGENT_BUS_AVAILABLE,
                 )
-                self.log("[Orchestrator] VIPER 4.0 state machine loaded", "INFO")
+                self.log("[Orchestrator] VIPER 5.0 state machine loaded (agents=%s)" % AGENT_BUS_AVAILABLE, "INFO")
             except Exception as e:
                 self.log(f"[Orchestrator] Init failed: {e}", "WARN")
 
-        self.log("VIPER 4.0 initialization complete", "INFO")
+        # ── VIPER 5.0: New subsystems ──
+
+        # Failure Analyzer (self-learning from failed attacks)
+        self.failure_analyzer = None
+        if FAILURE_ANALYZER_AVAILABLE:
+            try:
+                self.failure_analyzer = FailureAnalyzer()
+                self.log("[FailureAnalyzer] Loaded (%d historical lessons)" % len(self.failure_analyzer.lessons), "INFO")
+            except Exception as e:
+                self.log(f"[FailureAnalyzer] Init failed: {e}", "WARN")
+
+        # Cross-Target Correlator
+        self.cross_correlator = None
+        if CROSS_CORRELATOR_AVAILABLE:
+            try:
+                self.cross_correlator = CrossTargetCorrelator(
+                    viper_db=self.db if UPGRADE_AVAILABLE else None,
+                    evograph=self.evograph if EVOGRAPH_AVAILABLE else None,
+                )
+                self.log("[CrossCorrelator] Loaded", "INFO")
+            except Exception as e:
+                self.log(f"[CrossCorrelator] Init failed: {e}", "WARN")
+
+        # Chain of Custody (evidence integrity)
+        self.chain_of_custody = None
+        if CHAIN_OF_CUSTODY_AVAILABLE:
+            try:
+                self.chain_of_custody = ChainOfCustody()
+                self.log("[ChainOfCustody] Evidence tracking enabled", "INFO")
+            except Exception as e:
+                self.log(f"[ChainOfCustody] Init failed: {e}", "WARN")
+
+        # Finding Stream (real-time notifications)
+        self.finding_stream = None
+        if FINDING_STREAM_AVAILABLE:
+            try:
+                self.finding_stream = FindingStream()
+                self.log("[FindingStream] Notification stream ready (%d channels)" % self.finding_stream.get_stats()["channels_configured"], "INFO")
+            except Exception as e:
+                self.log(f"[FindingStream] Init failed: {e}", "WARN")
+
+        # Fingerprint Randomizer
+        self.fingerprint_randomizer = None
+        if FINGERPRINT_RANDOMIZER_AVAILABLE:
+            try:
+                self.fingerprint_randomizer = FingerprintRandomizer()
+                self.log("[FingerprintRandomizer] TLS/HTTP fingerprint randomization enabled", "INFO")
+            except Exception as e:
+                self.log(f"[FingerprintRandomizer] Init failed: {e}", "WARN")
+
+        # Human Timing Profile
+        self.human_timing = None
+        if HUMAN_TIMING_AVAILABLE:
+            try:
+                self.human_timing = HumanTimingProfile(profile="normal")
+                self.log("[HumanTiming] Gaussian timing profile (NORMAL)", "INFO")
+            except Exception as e:
+                self.log(f"[HumanTiming] Init failed: {e}", "WARN")
+
+        self.log("VIPER 5.0 initialization complete", "INFO")
 
         # Metrics
         self.metrics = {
@@ -1638,6 +1833,35 @@ class ViperCore:
                     results["error"] = f"Out of scope: {reason}"
                     return results
             
+            # Phase 1.5: Recon Pipeline (runs full chain before individual phases)
+            if PIPELINE_AVAILABLE and self.settings.get("use_recon_pipeline", True):
+                self.log("\n=== Phase 1.5: Recon Pipeline ===")
+                try:
+                    pipeline = ReconPipeline(
+                        graph_engine=self.graph_engine,
+                        session=self.session,
+                        settings=self.settings,
+                    )
+                    pipeline_budget = min(recon_budget * 60 * 0.5, 300)  # max 5 min
+                    recon_results = await asyncio.wait_for(
+                        pipeline.run(target, timeout_minutes=pipeline_budget / 60),
+                        timeout=pipeline_budget,
+                    )
+                    if recon_results.endpoints:
+                        self.log(f"[Pipeline] Discovered {len(recon_results.endpoints)} endpoints")
+                        # Merge pipeline endpoints into target
+                        for ep in recon_results.endpoints:
+                            target.technologies.add(ep) if hasattr(target, 'technologies') else None
+                    if recon_results.technologies:
+                        self.log(f"[Pipeline] Fingerprinted {len(recon_results.technologies)} technologies")
+                    if recon_results.subdomains:
+                        target.subdomains = target.subdomains | recon_results.subdomains if hasattr(target, 'subdomains') and target.subdomains else recon_results.subdomains
+                    results["phases"]["pipeline"] = recon_results.to_dict()
+                except asyncio.TimeoutError:
+                    self.log("[Pipeline] Timed out, falling back to standard recon", "WARN")
+                except Exception as e:
+                    self.log(f"[Pipeline] Error: {e}", "WARN")
+
             # Phase 2: Reconnaissance (with timeout)
             if self.recon_engine and datetime.now() < end_time:
                 self.log("\n=== Phase 2: Reconnaissance ===")
@@ -1843,11 +2067,9 @@ class ViperCore:
             # VIPER 4.0: Orchestrator strategic guidance before manual attacks
             if self.orchestrator:
                 try:
-                    guidance = await self.orchestrator.invoke({
-                        'target': target_url,
-                        'technologies': list(target.technologies) if target.technologies else [],
-                        'phase': 'exploit',
-                    })
+                    tech_list = list(target.technologies) if target.technologies else []
+                    objective = f"Security test {target_url} (tech: {', '.join(tech_list[:5])})"
+                    guidance = await self.orchestrator.invoke(target_url, objective)
                     if guidance:
                         self.log(f"  [Orchestrator] Strategic guidance: {str(guidance)[:200]}")
                 except Exception as e:
@@ -2229,6 +2451,9 @@ class ViperCore:
                             continue
                         candidate["validation"] = reason
                         self.metrics["validated_findings"] = self.metrics.get("validated_findings", 0) + 1
+                        # Telegram alert for validated findings
+                        if self.notifier:
+                            self.notifier.alert_finding(candidate)
                     except Exception as e:
                         candidate["confidence"] = 0.5
                         candidate["validation"] = f"Validation error: {e}"
@@ -2386,11 +2611,9 @@ class ViperCore:
         # VIPER 4.0: Orchestrator strategic guidance before attack loop
         if self.orchestrator:
             try:
-                guidance = await self.orchestrator.invoke({
-                    'target': target_url,
-                    'technologies': list(target.technologies) if target.technologies else [],
-                    'phase': 'exploit',
-                })
+                tech_list = list(target.technologies) if target.technologies else []
+                objective = f"Security test {target_url} (tech: {', '.join(tech_list[:5])})"
+                guidance = await self.orchestrator.invoke(target_url, objective)
                 if guidance:
                     self.log(f"  [Orchestrator] Strategic guidance: {str(guidance)[:200]}")
             except Exception as e:
@@ -2946,15 +3169,16 @@ async def main():
     viper = ViperCore()
     
     if len(sys.argv) < 2:
-        print("VIPER Core v2 - Autonomous Bug Bounty Hunter")
+        print("VIPER Core v5.0 - Autonomous Bug Bounty Hunter")
         print()
         print("Usage:")
-        print("  python viper_core.py <url>              # Quick hunt (5 min manual)")
-        print("  python viper_core.py <url> --full       # Full hunt (recon + nuclei + attacks)")
-        print("  python viper_core.py <url> --full 30    # Full hunt with 30 min limit")
-        print("  python viper_core.py --continuous       # Continuous on lab targets")
-        print("  python viper_core.py --stats            # Show statistics")
-        print("  python viper_core.py --modules          # Check available modules")
+        print("  python viper_core.py <url>                # Quick hunt (5 min manual)")
+        print("  python viper_core.py <url> --full         # Full hunt (recon + nuclei + attacks)")
+        print("  python viper_core.py <url> --full 30      # Full hunt with 30 min limit")
+        print("  python viper_core.py <url> --agents       # Multi-agent parallel hunt")
+        print("  python viper_core.py --continuous <url>    # Continuous hunting")
+        print("  python viper_core.py --stats              # Show statistics")
+        print("  python viper_core.py --modules            # Check available modules")
         return
     
     if sys.argv[1] == "--stats":
@@ -2967,21 +3191,54 @@ async def main():
         return
     
     if sys.argv[1] == "--modules":
-        print("VIPER Module Status:")
-        print(f"  Recon Engine: {'[OK]' if viper.recon_engine else '[MISSING]'}")
-        print(f"  Surface Mapper: {'[OK]' if viper.surface_mapper else '[MISSING]'}")
-        print(f"  Nuclei Scanner: {'[OK]' if viper.nuclei_scanner else '[MISSING]'}")
-        if viper.nuclei_scanner:
-            print(f"    Nuclei binary: {'[OK]' if viper.nuclei_scanner.nuclei_path else '[MISSING - install required]'}")
-        print(f"  LLM Analyzer: {'[OK]' if viper.llm_analyzer else '[MISSING]'}")
-        print(f"  Scope Manager: {'[OK]' if viper.scope_manager else '[MISSING]'}")
+        print("VIPER 5.0 Module Status:")
+        print()
+        print("  Core (v3-v4):")
+        print(f"    Recon Engine:     {'[OK]' if viper.recon_engine else '[MISSING]'}")
+        print(f"    Surface Mapper:   {'[OK]' if viper.surface_mapper else '[MISSING]'}")
+        print(f"    Nuclei Scanner:   {'[OK]' if viper.nuclei_scanner else '[MISSING]'}")
+        print(f"    LLM Analyzer:     {'[OK]' if viper.llm_analyzer else '[MISSING]'}")
+        print(f"    Scope Manager:    {'[OK]' if viper.scope_manager else '[MISSING]'}")
+        print(f"    EvoGraph:         {'[OK]' if EVOGRAPH_AVAILABLE else '[MISSING]'}")
+        print(f"    Stealth Engine:   {'[OK]' if STEALTH_AVAILABLE else '[MISSING]'}")
+        print(f"    Guardrails:       {'[OK]' if GUARDRAILS_AVAILABLE else '[MISSING]'}")
+        print(f"    Orchestrator:     {'[OK]' if viper.orchestrator else '[MISSING]'}")
+        print()
+        print("  v5 Multi-Agent:")
+        print(f"    Agent Bus:        {'[OK]' if AGENT_BUS_AVAILABLE else '[MISSING]'}")
+        print(f"    Agent Registry:   {'[OK]' if AGENT_BUS_AVAILABLE else '[MISSING]'}")
+        print(f"    Agents Enabled:   {'[OK]' if viper.orchestrator and viper.orchestrator._enable_agents else '[OFF]'}")
+        print()
+        print("  v5 Attack Modules:")
+        print(f"    OAuth Fuzzer:     {'[OK]' if OAUTH_FUZZER_AVAILABLE else '[MISSING]'}")
+        print(f"    WebSocket Fuzzer: {'[OK]' if WS_FUZZER_AVAILABLE else '[MISSING]'}")
+        print(f"    Race Engine:      {'[OK]' if RACE_ENGINE_AVAILABLE else '[MISSING]'}")
+        print(f"    Logic Modeler:    {'[OK]' if LOGIC_MODELER_AVAILABLE else '[MISSING]'}")
+        print(f"    Genetic Fuzzer:   {'[OK]' if GENETIC_FUZZER_AVAILABLE else '[MISSING]'}")
+        print()
+        print("  v5 Self-Learning:")
+        print(f"    Failure Analyzer: {'[OK]' if viper.failure_analyzer else '[MISSING]'}")
+        print(f"    Cross Correlator: {'[OK]' if viper.cross_correlator else '[MISSING]'}")
+        print()
+        print("  v5 Stealth & OPSEC:")
+        print(f"    FP Randomizer:    {'[OK]' if viper.fingerprint_randomizer else '[MISSING]'}")
+        print(f"    Human Timing:     {'[OK]' if viper.human_timing else '[MISSING]'}")
+        print(f"    Chain of Custody: {'[OK]' if viper.chain_of_custody else '[MISSING]'}")
+        print()
+        print("  v5 Reporting:")
+        print(f"    CVSS v4.0:        {'[OK]' if CVSS4_AVAILABLE else '[MISSING]'}")
+        print(f"    Finding Stream:   {'[OK]' if viper.finding_stream else '[MISSING]'}")
         return
     
     if sys.argv[1] == "--continuous":
-        targets = [
-            "http://192.168.56.1:8080",
-        ]
-        hours = float(sys.argv[2]) if len(sys.argv) > 2 else 24
+        # FIXED 2026-03-24: Removed local VirtualBox IP (192.168.56.1:8080)
+        # --continuous now requires an explicit target arg: python viper_core.py --continuous <url> [hours]
+        if len(sys.argv) < 3:
+            print("ERROR: --continuous requires a target URL. Usage: python viper_core.py --continuous <url> [hours]")
+            print("Do NOT use local IPs. Use real HackerOne/Intigriti in-scope targets only.")
+            return
+        targets = [sys.argv[2]]
+        hours = float(sys.argv[3]) if len(sys.argv) > 3 else 24
         await viper.continuous_hunt(targets, hours=hours)
         return
     

@@ -504,11 +504,234 @@ class WordlistGenerator:
             yield ''.join(random.choice(chars) for _ in range(length))
 
 
+class GeneticFuzzer:
+    """Genetic algorithm fuzzer with weighted fitness scoring.
+
+    Integrates with FailureAnalyzer lessons and EvoGraph bypass patterns
+    to seed the initial population with historically successful payloads.
+
+    Fitness scoring (weighted sum):
+    - base_score from response status (0.3 weight)
+    - response_diff_size delta vs baseline (0.2 weight)
+    - error_keyword_match in response body (0.2 weight)
+    - timing_anomaly: response_time vs baseline (0.15 weight)
+    - waf_bypass_score: no WAF trigger = +1.0 (0.15 weight)
+    """
+
+    # Fitness weights
+    WEIGHTS = {
+        "base_score": 0.3,
+        "response_diff": 0.2,
+        "error_keywords": 0.2,
+        "timing_anomaly": 0.15,
+        "waf_bypass": 0.15,
+    }
+
+    # Error keywords indicating potential vulnerability
+    ERROR_KEYWORDS = [
+        "error", "exception", "warning", "syntax", "sql", "mysql",
+        "postgresql", "oracle", "traceback", "stack trace", "debug",
+        "undefined", "null reference", "type error", "fatal",
+    ]
+
+    def __init__(
+        self,
+        population_size: int = 50,
+        generations: int = 20,
+        mutation_rate: float = 0.3,
+        crossover_rate: float = 0.5,
+        evograph: "Any" = None,
+    ):
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.crossover_rate = crossover_rate
+        self.evograph = evograph
+        self.mutator = PayloadMutator()
+        self._baseline_size: int = 0
+        self._baseline_time: float = 0.0
+
+    def fitness(self, payload: str, response: dict) -> float:
+        """Calculate weighted fitness score for a payload/response pair.
+
+        Args:
+            payload: The payload that was sent.
+            response: Dict with keys: status, body, time, size, waf_triggered.
+
+        Returns:
+            Fitness score between 0.0 and 1.0.
+        """
+        status = response.get("status", 200)
+        body = response.get("body", "").lower()
+        resp_time = response.get("time", 0.0)
+        resp_size = response.get("size", 0)
+        waf_triggered = response.get("waf_triggered", False)
+
+        # 1. Base score from status code
+        status_scores = {
+            500: 1.0,  # Server error = high signal
+            403: 0.6,  # Forbidden = possible WAF
+            401: 0.5,  # Auth challenge
+            302: 0.4,  # Redirect
+            200: 0.3,  # Normal (but check body)
+            400: 0.2,  # Bad request
+            404: 0.1,  # Not found
+        }
+        base_score = status_scores.get(status, 0.2)
+
+        # 2. Response size diff vs baseline
+        if self._baseline_size > 0:
+            size_diff = abs(resp_size - self._baseline_size) / max(self._baseline_size, 1)
+            response_diff = min(1.0, size_diff)
+        else:
+            response_diff = 0.0
+
+        # 3. Error keyword matches
+        keyword_hits = sum(1 for kw in self.ERROR_KEYWORDS if kw in body)
+        error_keywords = min(1.0, keyword_hits / 3.0)
+
+        # 4. Timing anomaly
+        if self._baseline_time > 0:
+            time_diff = abs(resp_time - self._baseline_time) / max(self._baseline_time, 0.1)
+            timing_anomaly = min(1.0, time_diff)
+        else:
+            timing_anomaly = 0.0
+
+        # 5. WAF bypass score
+        waf_bypass = 0.0 if waf_triggered else 1.0
+
+        # Weighted sum
+        score = (
+            self.WEIGHTS["base_score"] * base_score
+            + self.WEIGHTS["response_diff"] * response_diff
+            + self.WEIGHTS["error_keywords"] * error_keywords
+            + self.WEIGHTS["timing_anomaly"] * timing_anomaly
+            + self.WEIGHTS["waf_bypass"] * waf_bypass
+        )
+
+        return round(min(1.0, score), 4)
+
+    def set_baseline(self, size: int, time_s: float) -> None:
+        """Set baseline response metrics for diff scoring."""
+        self._baseline_size = size
+        self._baseline_time = time_s
+
+    def seed_population(self, base_payloads: List[str], attack_type: str = "") -> List[str]:
+        """Create initial population by combining base payloads with learned bypasses.
+
+        Loads top bypass patterns from evograph if available.
+        """
+        population = list(base_payloads[:self.population_size])
+
+        # Load learned bypasses from evograph
+        if self.evograph and attack_type:
+            try:
+                bypasses = self.evograph.get_top_bypasses(attack_type, n=5)
+                for bp in bypasses:
+                    mutation = bp.get("mutation", "")
+                    if mutation and mutation not in population:
+                        population.append(mutation)
+            except Exception:
+                pass
+
+        # Fill remaining slots with mutations
+        while len(population) < self.population_size and base_payloads:
+            parent = random.choice(base_payloads)
+            mutated = self.mutator.mutate(parent, mutations=1)
+            population.extend(mutated)
+
+        return population[:self.population_size]
+
+    def select_parents(self, population: List[tuple]) -> List[str]:
+        """Tournament selection — pick best from random subsets."""
+        parents = []
+        for _ in range(2):
+            tournament = random.sample(population, min(5, len(population)))
+            winner = max(tournament, key=lambda x: x[1])  # (payload, fitness)
+            parents.append(winner[0])
+        return parents
+
+    def crossover(self, parent1: str, parent2: str) -> str:
+        """Single-point crossover between two payloads."""
+        if random.random() > self.crossover_rate:
+            return parent1
+
+        if len(parent1) < 2 or len(parent2) < 2:
+            return parent1
+
+        point = random.randint(1, min(len(parent1), len(parent2)) - 1)
+        return parent1[:point] + parent2[point:]
+
+    def mutate(self, payload: str) -> str:
+        """Apply random mutation to a payload."""
+        if random.random() > self.mutation_rate:
+            return payload
+
+        mutations = self.mutator.mutate(payload, mutations=1)
+        return mutations[0] if mutations else payload
+
+    async def evolve(
+        self,
+        send_func,
+        base_payloads: List[str],
+        attack_type: str = "",
+    ) -> List[FuzzResult]:
+        """Run genetic algorithm evolution.
+
+        Args:
+            send_func: Async callable that sends payload and returns response dict.
+            base_payloads: Seed payloads.
+            attack_type: Attack type for loading learned patterns.
+
+        Returns:
+            List of interesting FuzzResult objects.
+        """
+        interesting: List[FuzzResult] = []
+        population = self.seed_population(base_payloads, attack_type)
+
+        for gen in range(self.generations):
+            # Evaluate fitness
+            scored: List[tuple] = []
+            for payload in population:
+                try:
+                    response = await send_func(payload)
+                    score = self.fitness(payload, response)
+                    scored.append((payload, score))
+
+                    if score > 0.6:
+                        interesting.append(FuzzResult(
+                            payload=payload,
+                            mutation_type="genetic",
+                            interesting=True,
+                            reason=f"Fitness={score:.3f} (gen {gen})",
+                        ))
+                except Exception:
+                    scored.append((payload, 0.0))
+
+            if not scored:
+                break
+
+            # Create next generation
+            scored.sort(key=lambda x: x[1], reverse=True)
+            next_gen = [s[0] for s in scored[:5]]  # elitism: keep top 5
+
+            while len(next_gen) < self.population_size:
+                parents = self.select_parents(scored)
+                child = self.crossover(parents[0], parents[1])
+                child = self.mutate(child)
+                next_gen.append(child)
+
+            population = next_gen
+
+        return interesting
+
+
 # Export
 __all__ = [
     "PayloadMutator",
     "GrammarFuzzer",
     "SmartFuzzer",
+    "GeneticFuzzer",
     "WordlistGenerator",
-    "FuzzResult"
+    "FuzzResult",
 ]

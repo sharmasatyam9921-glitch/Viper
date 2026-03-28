@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  viper:
+    build: .
+    container_name: viper-agent
+    volumes:
+      - ./findings:/app/findings
+      - ./reports:/app/reports
+      - ./scopes:/app/scopes
+      - ./memory:/app/memory
+      - ./state:/app/state
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    ports:
+      - "8080:8080"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONUTF8=1
+    env_file:
+      - .env
+    networks:
+      - viper-net
+    restart: unless-stopped
+    # Override CMD for specific modes:
+    # docker compose run viper --full https://target.com
+    # docker compose run viper --dashboard
+
+  # Optional: Neo4j graph database (replaces SQLite graph)
+  neo4j:
+    image: neo4j:5-community
+    container_name: viper-neo4j
+    ports:
+      - "7474:7474"  # Browser
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-changeme}
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - viper-net
+    profiles: ["graph"]
+
+  # Optional: GVM/OpenVAS network scanner
+  gvm:
+    image: greenbone/community-edition:stable
+    container_name: viper-gvm
+    ports:
+      - "9392:9392"
+    volumes:
+      - gvm_data:/data
+    networks:
+      - viper-net
+    profiles: ["gvm"]
+    restart: unless-stopped
+
+  # Optional: Ollama for local LLM (free, no API key)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: viper-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - viper-net
+    profiles: ["ollama"]
+    # Pull model on first run:
+    # docker exec viper-ollama ollama pull deepseek-coder-v2:16b
+
+networks:
+  viper-net:
+    driver: bridge
+
+volumes:
+  neo4j_data:
+  gvm_data:
+  ollama_data:

@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER 4.0 — NLP Terminal</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0a0e14; --bg2: #0d1117; --bg3: #161b22; --bg4: #21262d;
+  --text: #c9d1d9; --text2: #8b949e; --muted: #6e7681;
+  --border: rgba(48,54,61,0.6); --accent: #6366f1; --accent2: #818cf8;
+  --green: #00ff41; --green-dim: #00cc33; --green-glow: rgba(0,255,65,0.15);
+  --success: #00c853; --danger: #ef4444; --warning: #ffd700;
+  --font: 'Inter', system-ui, sans-serif; --mono: 'JetBrains Mono', monospace;
+}
+body { background: var(--bg); color: var(--text); font-family: var(--font);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ── Scanline effect ── */
+body::after { content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 1px,
+    rgba(0,255,65,0.015) 1px, rgba(0,255,65,0.015) 2px);
+  pointer-events: none; z-index: 9999; }
+
+/* ── Nav ── */
+.nav { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); height: 48px; flex-shrink: 0; z-index: 10; }
+.nav a { color: var(--text2); text-decoration: none; font-size: 13px; padding: 4px 10px;
+  border-radius: 6px; transition: all .2s; }
+.nav a:hover, .nav a.active { color: var(--green); background: var(--green-glow); }
+.nav .brand { color: var(--green); font-weight: 700; font-size: 15px; margin-right: 12px;
+  text-shadow: 0 0 10px var(--green-glow); }
+.nav .spacer { flex: 1; }
+.nav .status { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; }
+.ws-dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.ws-dot.disconnected { background: var(--danger); }
+.ws-dot.connecting { background: var(--warning); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ── NLP Command Bar ── */
+.nlp-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.nlp-bar .nlp-icon { color: var(--green); font-size: 14px; font-weight: 700; font-family: var(--mono); }
+.nlp-input { flex: 1; background: var(--bg); border: 1px solid rgba(0,255,65,0.2);
+  color: var(--green); padding: 8px 14px; border-radius: 8px; font-size: 13px;
+  font-family: var(--mono); outline: none; transition: .2s; }
+.nlp-input:focus { border-color: var(--green); box-shadow: 0 0 12px var(--green-glow); }
+.nlp-input::placeholder { color: rgba(0,255,65,0.3); }
+.nlp-btn { background: transparent; border: 1px solid rgba(0,255,65,0.3); color: var(--green);
+  padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer; font-family: var(--mono);
+  transition: .2s; font-weight: 600; }
+.nlp-btn:hover { background: var(--green-glow); border-color: var(--green); }
+
+/* ── Command preview ── */
+.cmd-preview { display: none; padding: 8px 16px; background: rgba(0,255,65,0.03);
+  border-bottom: 1px solid var(--border); flex-shrink: 0; align-items: center; gap: 12px; }
+.cmd-preview.show { display: flex; }
+.cmd-preview .cmd-text { flex: 1; font-family: var(--mono); font-size: 13px; color: var(--green);
+  background: var(--bg); padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(0,255,65,0.15); }
+.cmd-preview .cmd-edit { background: transparent; border: none; color: var(--green); cursor: pointer;
+  font-family: var(--mono); font-size: 13px; flex: 1; outline: none; }
+.cmd-preview button { padding: 4px 12px; border-radius: 6px; font-size: 11px; cursor: pointer;
+  font-weight: 600; font-family: var(--mono); border: none; transition: .2s; }
+.btn-exec { background: var(--green); color: #000; }
+.btn-exec:hover { filter: brightness(1.2); }
+.btn-discard { background: transparent; border: 1px solid var(--danger) !important; color: var(--danger); }
+.btn-discard:hover { background: rgba(239,68,68,.1); }
+
+/* ── Tab bar ── */
+.tab-bar { display: flex; align-items: center; gap: 0; padding: 0 8px;
+  background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; height: 32px; }
+.tab { padding: 4px 16px; font-size: 12px; color: var(--text2); cursor: pointer;
+  font-family: var(--mono); border-bottom: 2px solid transparent; transition: .2s;
+  display: flex; align-items: center; gap: 6px; height: 100%; }
+.tab:hover { color: var(--text); background: rgba(0,255,65,.03); }
+.tab.active { color: var(--green); border-bottom-color: var(--green); }
+.tab .tab-close { font-size: 14px; opacity: 0; transition: .2s; }
+.tab:hover .tab-close { opacity: 1; }
+.tab-add { color: var(--green); cursor: pointer; padding: 4px 8px; font-size: 16px;
+  transition: .2s; font-weight: 700; }
+.tab-add:hover { background: var(--green-glow); border-radius: 4px; }
+.tab-spacer { flex: 1; }
+
+/* ── Terminal container ── */
+#terminal-container { flex: 1; padding: 4px; background: var(--bg); position: relative; }
+#terminal-container .xterm { height: 100%; }
+
+/* ── Autocomplete dropdown ── */
+.autocomplete { position: absolute; bottom: 100%; left: 0; right: 0;
+  background: var(--bg3); border: 1px solid rgba(0,255,65,0.2); border-radius: 8px;
+  max-height: 200px; overflow-y: auto; display: none; z-index: 50;
+  box-shadow: 0 -4px 20px rgba(0,0,0,.5); margin-bottom: 4px; }
+.autocomplete.show { display: block; }
+.autocomplete-item { padding: 6px 14px; font-family: var(--mono); font-size: 12px;
+  color: var(--text2); cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.autocomplete-item:hover, .autocomplete-item.selected { background: var(--green-glow); color: var(--green); }
+.autocomplete-item .cmd { color: var(--green); }
+.autocomplete-item .desc { color: var(--muted); font-size: 11px; margin-left: auto; }
+
+/* ── Command history overlay ── */
+.history-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(10,14,20,0.95); z-index: 60; display: none; flex-direction: column;
+  padding: 20px; backdrop-filter: blur(4px); }
+.history-overlay.show { display: flex; }
+.history-search { background: var(--bg); border: 1px solid rgba(0,255,65,0.3);
+  color: var(--green); padding: 10px 14px; border-radius: 8px; font-size: 14px;
+  font-family: var(--mono); outline: none; margin-bottom: 12px; }
+.history-search::placeholder { color: rgba(0,255,65,0.3); }
+.history-list { flex: 1; overflow-y: auto; }
+.history-item { padding: 8px 14px; font-family: var(--mono); font-size: 12px;
+  color: var(--green-dim); cursor: pointer; border-radius: 4px; transition: .15s; }
+.history-item:hover { background: var(--green-glow); color: var(--green); }
+.history-item .hist-time { color: var(--muted); font-size: 10px; margin-right: 12px; }
+
+/* ── Reconnect overlay ── */
+.reconnect-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: rgba(10,14,20,.95); border: 1px solid rgba(0,255,65,0.2); border-radius: 12px;
+  padding: 24px 32px; text-align: center; display: none; z-index: 100; }
+.reconnect-overlay.show { display: block; }
+.reconnect-overlay h3 { color: var(--green); margin-bottom: 8px; font-size: 16px; }
+.reconnect-overlay p { color: var(--text2); font-size: 13px; margin-bottom: 12px; }
+.reconnect-overlay button { background: var(--green); color: #000; border: none;
+  padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+
+/* ── Matrix rain canvas ── */
+#matrix-bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  z-index: -1; opacity: 0.04; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<canvas id="matrix-bg"></canvas>
+
+<nav class="nav">
+  <span class="brand">&gt;_ VIPER 4.0</span>
+  <a href="index.html">Dashboard</a>
+  <a href="graph_viz.html">Graph</a>
+  <a href="insights_v2.html">Analytics</a>
+  <a href="chat_v2.html">Chat</a>
+  <a href="terminal_v2.html" class="active">Terminal</a>
+  <a href="cypherfix_v2.html">Remediation</a>
+  <a href="settings_ui.html">Settings</a>
+  <div class="spacer"></div>
+  <div class="status">
+    <span class="ws-dot disconnected" id="ws-dot"></span>
+    <span id="ws-status">Disconnected</span>
+  </div>
+</nav>
+
+<!-- NLP Command Bar -->
+<div class="nlp-bar">
+  <span class="nlp-icon">AI&gt;</span>
+  <input type="text" class="nlp-input" id="nlp-input"
+    placeholder="Type in English... e.g. 'scan ports on 192.168.1.1'" autocomplete="off">
+  <button class="nlp-btn" id="nlp-translate" onclick="translateNLP()">Translate</button>
+</div>
+
+<!-- Command preview -->
+<div class="cmd-preview" id="cmd-preview">
+  <span style="font-size:11px;color:var(--muted);font-family:var(--mono)">$</span>
+  <input type="text" class="cmd-edit" id="cmd-edit" spellcheck="false">
+  <button class="btn-exec" onclick="executePreview()">Execute</button>
+  <button class="btn-discard" onclick="discardPreview()">Discard</button>
+</div>
+
+<!-- Session tabs -->
+<div class="tab-bar" id="tab-bar">
+  <div class="tab active" data-session="0" onclick="switchSession(0)">
+    Session 1
+  </div>
+  <div class="tab-add" onclick="addSession()" title="New session">+</div>
+  <div class="tab-spacer"></div>
+</div>
+
+<div id="terminal-container">
+  <div class="reconnect-overlay" id="reconnect-overlay">
+    <h3>&gt;_ Connection Lost</h3>
+    <p>Terminal WebSocket disconnected.</p>
+    <button onclick="connectTerminal()">Reconnect</button>
+  </div>
+  <div class="history-overlay" id="history-overlay">
+    <input type="text" class="history-search" id="history-search" placeholder="Search command history (Ctrl+R)..." autofocus>
+    <div class="history-list" id="history-list"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──
+const TERM_WS_URL = `ws://${location.hostname || 'localhost'}:8082`;
+const NLP_URL = '/api/terminal/nlp';
+const wsDot = document.getElementById('ws-dot');
+const wsStatusEl = document.getElementById('ws-status');
+const overlay = document.getElementById('reconnect-overlay');
+const historyOverlay = document.getElementById('history-overlay');
+const historySearch = document.getElementById('history-search');
+const historyListEl = document.getElementById('history-list');
+const nlpInput = document.getElementById('nlp-input');
+const cmdPreview = document.getElementById('cmd-preview');
+const cmdEdit = document.getElementById('cmd-edit');
+const tabBar = document.getElementById('tab-bar');
+
+let sessions = [];
+let activeSession = 0;
+let commandHistory = JSON.parse(localStorage.getItem('viper4_term_history') || '[]');
+
+// ── Pentest autocomplete DB ──
+const PENTEST_COMMANDS = [
+  { cmd: 'nmap', desc: 'Network scanner', flags: ['-sV','-sS','-sC','-p-','-A','--script','--top-ports','-oN','-oX'] },
+  { cmd: 'subfinder', desc: 'Subdomain discovery', flags: ['-d','-o','-silent','-all'] },
+  { cmd: 'nuclei', desc: 'Vulnerability scanner', flags: ['-u','-l','-t','-severity','-o','-json','-rate-limit'] },
+  { cmd: 'httpx', desc: 'HTTP toolkit', flags: ['-u','-l','-sc','-title','-tech-detect','-json'] },
+  { cmd: 'ffuf', desc: 'Fuzzer', flags: ['-u','-w','-mc','-fc','-H','-X','-d','-o','-of'] },
+  { cmd: 'sqlmap', desc: 'SQL injection', flags: ['-u','--dbs','--tables','--dump','--batch','--risk','--level'] },
+  { cmd: 'gobuster', desc: 'Directory brute', flags: ['dir','-u','-w','-x','-o','-t'] },
+  { cmd: 'nikto', desc: 'Web scanner', flags: ['-h','-p','-o','-Format'] },
+  { cmd: 'wpscan', desc: 'WordPress scanner', flags: ['--url','--enumerate','--api-token'] },
+  { cmd: 'amass', desc: 'Attack surface map', flags: ['enum','-d','-passive','-o'] },
+  { cmd: 'dirsearch', desc: 'Directory scanner', flags: ['-u','-e','-w','-t','--json-report'] },
+  { cmd: 'whatweb', desc: 'Web fingerprint', flags: ['-a','-v','--color=never'] },
+  { cmd: 'masscan', desc: 'Port scanner', flags: ['-p','--rate','--banners','-oJ'] },
+  { cmd: 'feroxbuster', desc: 'Content discovery', flags: ['-u','-w','-x','-o','--json'] },
+  { cmd: 'curl', desc: 'HTTP client', flags: ['-X','-H','-d','-o','-k','-v','-L','--proxy'] },
+  { cmd: 'python', desc: 'Python interpreter', flags: ['-c','-m'] },
+  { cmd: 'john', desc: 'Password cracker', flags: ['--wordlist','--format','--show'] },
+  { cmd: 'hashcat', desc: 'Hash cracker', flags: ['-m','-a','-o','--force'] },
+  { cmd: 'hydra', desc: 'Login brute-force', flags: ['-l','-L','-p','-P','-s','-f','-t'] },
+  { cmd: 'burpsuite', desc: 'Proxy suite' },
+  { cmd: 'msfconsole', desc: 'Metasploit' },
+  { cmd: 'searchsploit', desc: 'Exploit DB search', flags: ['-e','-j','--nmap'] },
+];
+
+// ── Session management ──
+function createSession(index) {
+  const container = document.createElement('div');
+  container.id = `term-${index}`;
+  container.style.cssText = 'width:100%;height:100%;display:none;';
+  document.getElementById('terminal-container').appendChild(container);
+
+  const term = new Terminal({
+    theme: {
+      background: '#0a0e14', foreground: '#00ff41', cursor: '#00ff41',
+      cursorAccent: '#0a0e14', selectionBackground: 'rgba(0,255,65,0.2)',
+      black: '#0a0e14', red: '#ef4444', green: '#00ff41', yellow: '#ffd700',
+      blue: '#6366f1', magenta: '#818cf8', cyan: '#00d4ff', white: '#c9d1d9',
+      brightBlack: '#6e7681', brightRed: '#ff6b6b', brightGreen: '#66ff66',
+      brightYellow: '#ffe066', brightBlue: '#818cf8', brightMagenta: '#a78bfa',
+      brightCyan: '#66ffff', brightWhite: '#ffffff'
+    },
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: 14, cursorBlink: true, cursorStyle: 'block',
+    scrollback: 5000, allowProposedApi: true
+  });
+
+  const fitAddon = new FitAddon.FitAddon();
+  const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+  term.loadAddon(fitAddon);
+  term.loadAddon(webLinksAddon);
+  term.open(container);
+  fitAddon.fit();
+
+  sessions.push({ term, fitAddon, container, ws: null, index });
+  return sessions.length - 1;
+}
+
+function switchSession(index) {
+  sessions.forEach((s, i) => {
+    s.container.style.display = i === index ? 'block' : 'none';
+    tabBar.querySelectorAll('.tab').forEach(t => {
+      t.classList.toggle('active', parseInt(t.dataset.session) === index);
+    });
+  });
+  activeSession = index;
+  if (sessions[index]) sessions[index].fitAddon.fit();
+}
+
+function addSession() {
+  const idx = sessions.length;
+  const tabEl = document.createElement('div');
+  tabEl.className = 'tab';
+  tabEl.dataset.session = idx;
+  tabEl.onclick = () => switchSession(idx);
+  tabEl.innerHTML = `Session ${idx + 1} <span class="tab-close" onclick="event.stopPropagation();closeSession(${idx})">&times;</span>`;
+  tabBar.querySelector('.tab-add').before(tabEl);
+  createSession(idx);
+  connectSession(idx);
+  switchSession(idx);
+}
+
+function closeSession(index) {
+  if (sessions.length <= 1) return;
+  const s = sessions[index];
+  if (s.ws) s.ws.close();
+  s.term.dispose();
+  s.container.remove();
+  tabBar.querySelector(`.tab[data-session="${index}"]`).remove();
+  sessions.splice(index, 1);
+  // Re-index
+  sessions.forEach((s, i) => {
+    s.index = i;
+    s.container.id = `term-${i}`;
+  });
+  tabBar.querySelectorAll('.tab').forEach((t, i) => {
+    if (i < sessions.length) { t.dataset.session = i; t.onclick = () => switchSession(i); }
+  });
+  if (activeSession >= sessions.length) activeSession = sessions.length - 1;
+  switchSession(activeSession);
+}
+
+// ── Terminal WebSocket ──
+function connectSession(index) {
+  const s = sessions[index];
+  if (!s) return;
+  try { s.ws = new WebSocket(TERM_WS_URL); } catch(e) { return; }
+
+  s.ws.onopen = () => {
+    wsDot.className = 'ws-dot connected';
+    wsStatusEl.textContent = 'Connected';
+    overlay.classList.remove('show');
+    s.term.write('\r\n\x1b[32m[VIPER Terminal Connected]\x1b[0m\r\n\r\n');
+  };
+  s.ws.onclose = () => {
+    wsDot.className = 'ws-dot disconnected';
+    wsStatusEl.textContent = 'Disconnected';
+    s.term.write('\r\n\x1b[31m[Disconnected]\x1b[0m\r\n');
+    if (index === activeSession) overlay.classList.add('show');
+  };
+  s.ws.onerror = () => s.ws.close();
+  s.ws.onmessage = (evt) => s.term.write(evt.data);
+  // Buffer input and execute on Enter (HTTP-based, no PTY needed)
+  s._inputBuffer = '';
+  s.term.onData(data => {
+    if (data === '\r' || data === '\n') {
+      // Execute command
+      const cmd = s._inputBuffer.trim();
+      s.term.write('\r\n');
+      if (cmd) {
+        commandHistory.unshift({ cmd, time: Date.now() });
+        if (commandHistory.length > 500) commandHistory.pop();
+        try { localStorage.setItem('viper4_term_history', JSON.stringify(commandHistory)); } catch(e) {}
+        // Execute via API
+        fetch('/api/terminal/execute', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd, session_id: activeSession })
+        }).then(r => r.json()).then(data => {
+          const output = data.output || '';
+          output.split('\n').forEach(line => s.term.writeln(line));
+          if (data.exit_code !== 0) s.term.writeln('\x1b[31m[exit: ' + data.exit_code + ']\x1b[0m');
+          s.term.write('\x1b[32m$ \x1b[0m');
+        }).catch(e => {
+          s.term.writeln('\x1b[31mError: ' + e.message + '\x1b[0m');
+          s.term.write('\x1b[32m$ \x1b[0m');
+        });
+      } else {
+        s.term.write('\x1b[32m$ \x1b[0m');
+      }
+      s._inputBuffer = '';
+    } else if (data === '\x7f') {
+      // Backspace
+      if (s._inputBuffer.length > 0) {
+        s._inputBuffer = s._inputBuffer.slice(0, -1);
+        s.term.write('\b \b');
+      }
+    } else if (data >= ' ') {
+      // Printable character
+      s._inputBuffer += data;
+      s.term.write(data);
+    }
+  });
+  s.term.write('\x1b[32m$ \x1b[0m');
+}
+
+function connectTerminal() {
+  overlay.classList.remove('show');
+  connectSession(activeSession);
+}
+
+function getCurrentLine(term) {
+  const buf = term.buffer.active;
+  const y = buf.cursorY + buf.baseY;
+  const line = buf.getLine(y);
+  return line ? line.translateToString(true) : '';
+}
+
+// ── NLP Translation ──
+async function translateNLP() {
+  const text = nlpInput.value.trim();
+  if (!text) return;
+  nlpInput.disabled = true;
+  try {
+    const resp = await fetch(NLP_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: text })
+    });
+    const data = await resp.json();
+    const cmd = data.command || data.cmd || '';
+    if (cmd) {
+      cmdEdit.value = cmd;
+      cmdPreview.classList.add('show');
+    } else {
+      // Fallback: simple pattern matching
+      const fallback = localTranslate(text);
+      cmdEdit.value = fallback;
+      cmdPreview.classList.add('show');
+    }
+  } catch(e) {
+    // Offline fallback
+    const fallback = localTranslate(text);
+    cmdEdit.value = fallback;
+    cmdPreview.classList.add('show');
+  }
+  nlpInput.disabled = false;
+}
+
+function localTranslate(text) {
+  const t = text.toLowerCase();
+  if (t.match(/scan\s+ports?\s+(on\s+)?(.+)/)) {
+    const target = t.match(/scan\s+ports?\s+(?:on\s+)?(.+)/)[1].trim();
+    return `nmap -sV ${target}`;
+  }
+  if (t.match(/find\s+(all\s+)?subdomains?\s+(of\s+)?(.+)/)) {
+    const target = t.match(/subdomains?\s+(?:of\s+)?(.+)/)[1].trim();
+    return `subfinder -d ${target} -silent`;
+  }
+  if (t.match(/fuzz\s+(.+)/)) {
+    const target = t.match(/fuzz\s+(.+)/)[1].trim();
+    return `ffuf -u ${target}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302`;
+  }
+  if (t.match(/sql\s*inject(ion)?\s+(.+)/)) {
+    const target = t.match(/sql\s*inject(?:ion)?\s+(.+)/)[1].trim();
+    return `sqlmap -u "${target}" --batch --risk 2 --level 3`;
+  }
+  if (t.match(/brute\s*force\s+dir(ectories?)?\s+(on\s+)?(.+)/)) {
+    const target = t.match(/(?:on\s+)?(\S+)$/)[1];
+    return `gobuster dir -u ${target} -w /usr/share/wordlists/dirb/common.txt -t 50`;
+  }
+  if (t.match(/scan\s+(vulns?|vulnerabilities)\s+(on\s+)?(.+)/)) {
+    const target = t.match(/(?:on\s+)?(\S+)$/)[1];
+    return `nuclei -u ${target} -severity critical,high,medium`;
+  }
+  if (t.match(/wordpress\s+scan\s+(.+)/)) {
+    const target = t.match(/wordpress\s+scan\s+(.+)/)[1].trim();
+    return `wpscan --url ${target} --enumerate vp,vt,u`;
+  }
+  if (t.match(/what\s+tech(nolog(y|ies))?\s+(.+)/)) {
+    const target = t.match(/(\S+)$/)[1];
+    return `whatweb -a 3 ${target}`;
+  }
+  return `# Could not translate: ${text}`;
+}
+
+async function executePreview() {
+  const cmd = cmdEdit.value.trim();
+  if (!cmd) return;
+  cmdPreview.classList.remove('show');
+  nlpInput.value = '';
+
+  // Save to history
+  commandHistory.unshift({ cmd, time: Date.now() });
+  try { localStorage.setItem('viper4_term_history', JSON.stringify(commandHistory)); } catch(e) {}
+
+  // Write command to terminal display
+  const s = sessions[activeSession];
+  if (s && s.term) {
+    s.term.writeln('\r\n\x1b[32m$ ' + cmd + '\x1b[0m');
+  }
+
+  // Execute via HTTP POST (works without PTY backend)
+  try {
+    const resp = await fetch('/api/terminal/execute', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd, session_id: activeSession })
+    });
+    const data = await resp.json();
+    if (s && s.term) {
+      const output = data.output || '';
+      output.split('\n').forEach(line => s.term.writeln(line));
+      if (data.exit_code !== 0) {
+        s.term.writeln('\x1b[31m[exit code: ' + data.exit_code + ']\x1b[0m');
+      }
+      s.term.write('\r\n\x1b[32m$ \x1b[0m');
+    }
+  } catch(e) {
+    if (s && s.term) {
+      s.term.writeln('\x1b[31mExecution error: ' + e.message + '\x1b[0m');
+      s.term.write('\r\n\x1b[32m$ \x1b[0m');
+    }
+  }
+}
+
+function discardPreview() {
+  cmdPreview.classList.remove('show');
+}
+
+// ── NLP input: Enter to translate ──
+nlpInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); translateNLP(); }
+});
+
+// ── Command history (Ctrl+R) ──
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'r') {
+    e.preventDefault();
+    showHistory();
+  }
+  if (e.key === 'Escape') {
+    historyOverlay.classList.remove('show');
+    cmdPreview.classList.remove('show');
+  }
+});
+
+function showHistory() {
+  historyOverlay.classList.add('show');
+  historySearch.value = '';
+  historySearch.focus();
+  renderHistory('');
+}
+
+function renderHistory(filter) {
+  const f = filter.toLowerCase();
+  const items = commandHistory.filter(h => !f || h.cmd.toLowerCase().includes(f)).slice(0, 100);
+  historyListEl.innerHTML = items.map(h => `
+    <div class="history-item" onclick="selectHistory('${escapeAttr(h.cmd)}')">
+      <span class="hist-time">${new Date(h.time).toLocaleTimeString()}</span>
+      ${escapeHtml(h.cmd)}
+    </div>`).join('') || '<div style="color:var(--muted);padding:20px;text-align:center">No matches</div>';
+}
+
+historySearch.addEventListener('input', () => renderHistory(historySearch.value));
+historySearch.addEventListener('keydown', e => {
+  if (e.key === 'Escape') historyOverlay.classList.remove('show');
+  if (e.key === 'Enter') {
+    const first = historyListEl.querySelector('.history-item');
+    if (first) first.click();
+  }
+});
+
+function selectHistory(cmd) {
+  historyOverlay.classList.remove('show');
+  const s = sessions[activeSession];
+  if (s && s.ws && s.ws.readyState === WebSocket.OPEN) {
+    s.ws.send(cmd + '\r');
+  }
+}
+
+function escapeHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeAttr(s) { return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+
+// ── Matrix rain background ──
+function initMatrix() {
+  const canvas = document.getElementById('matrix-bg');
+  const ctx = canvas.getContext('2d');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  const cols = Math.floor(canvas.width / 14);
+  const drops = Array(cols).fill(1);
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%^&*()ViPeR';
+
+  function draw() {
+    ctx.fillStyle = 'rgba(10,14,20,0.05)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#00ff41';
+    ctx.font = '12px JetBrains Mono';
+    for (let i = 0; i < drops.length; i++) {
+      const text = chars[Math.floor(Math.random() * chars.length)];
+      ctx.fillText(text, i * 14, drops[i] * 14);
+      if (drops[i] * 14 > canvas.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i]++;
+    }
+  }
+  setInterval(draw, 50);
+  window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
+}
+
+// ── Resize handler ──
+window.addEventListener('resize', () => {
+  sessions.forEach(s => { try { s.fitAddon.fit(); } catch(e) {} });
+});
+
+// ── Init ──
+createSession(0);
+switchSession(0);
+connectSession(0);
+initMatrix();
+</script>
+</body>
+</html>

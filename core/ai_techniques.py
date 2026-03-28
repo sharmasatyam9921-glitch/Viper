@@ -9,7 +9,7 @@ Full implementation with:
 - Real parallel dual-agent
 - RAG poisoning, multi-agent exploitation
 
-Author: Satyam Sharma
+Author: VIPER Contributors
 Updated: 2026-02-16
 """
 

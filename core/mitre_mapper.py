@@ -533,3 +533,131 @@ def get_tactic_coverage(findings: List[Dict]) -> Dict[str, int]:
             tactic = mitre["tactic"]
             coverage[tactic] = coverage.get(tactic, 0) + 1
     return coverage
+
+
+# ---------------------------------------------------------------------------
+# Offline DB enrichment (tries offline DB first, falls back to hardcoded)
+# ---------------------------------------------------------------------------
+
+_offline_available: Optional[bool] = None
+
+
+def _check_offline_db() -> bool:
+    """Check if the offline MITRE database is available (cached)."""
+    global _offline_available
+    if _offline_available is None:
+        try:
+            from recon.mitre_offline import database_available
+            _offline_available = database_available()
+        except ImportError:
+            _offline_available = False
+    return _offline_available
+
+
+def get_mitre_mapping_enriched(cwe_id: str) -> Optional[Dict]:
+    """
+    Enhanced MITRE mapping: tries offline DB first for richer data,
+    then falls back to the hardcoded CWE_TO_ATTACK table.
+
+    Returns a dict with capec, technique, tactic, name, description keys,
+    plus additional fields (mitigations, severity, etc.) when offline DB
+    is available.
+    """
+    if not cwe_id:
+        return None
+
+    normalized = cwe_id if cwe_id.startswith("CWE-") else f"CWE-{cwe_id}"
+    cwe_num = normalized.replace("CWE-", "")
+
+    # Try offline DB first
+    if _check_offline_db():
+        try:
+            from recon.mitre_offline import get_capec_for_cwe, _get_cwe_details
+
+            cwe_info = _get_cwe_details(cwe_num)
+            capecs = get_capec_for_cwe(normalized)
+
+            if cwe_info or capecs:
+                result = {
+                    "name": cwe_info.get("name", "Unknown") if cwe_info else "Unknown",
+                    "description": cwe_info.get("description", "") if cwe_info else "",
+                    "capec": [c["capec_id"] for c in capecs] if capecs else [],
+                }
+
+                # Pull technique/tactic from first CAPEC's ATT&CK mapping
+                for capec in capecs:
+                    techniques = capec.get("attack_techniques", [])
+                    if techniques:
+                        result["technique"] = techniques[0]
+                        break
+
+                # Add enriched details
+                if cwe_info:
+                    if cwe_info.get("likelihood_of_exploit"):
+                        result["likelihood"] = cwe_info["likelihood_of_exploit"]
+                    if cwe_info.get("mitigations"):
+                        result["mitigations"] = cwe_info["mitigations"]
+                    if cwe_info.get("consequences"):
+                        result["consequences"] = cwe_info["consequences"]
+
+                # Merge with hardcoded data for tactic if available
+                hardcoded = CWE_TO_ATTACK.get(normalized, {})
+                if hardcoded:
+                    result.setdefault("technique", hardcoded.get("technique", ""))
+                    result.setdefault("tactic", hardcoded.get("tactic", ""))
+                    if not result.get("capec"):
+                        result["capec"] = hardcoded.get("capec", [])
+
+                if result.get("capec") or result.get("technique"):
+                    return result
+        except Exception:
+            pass  # Fall through to hardcoded
+
+    # Fallback to hardcoded table
+    return CWE_TO_ATTACK.get(normalized)
+
+
+def enrich_finding_full(finding: Dict) -> Dict:
+    """
+    Enhanced finding enrichment using offline DB when available.
+
+    Like enrich_finding_mitre() but adds richer data from the offline
+    MITRE database (mitigations, consequences, severity, CAPEC details).
+    Falls back to hardcoded mappings if offline DB unavailable.
+    """
+    cwe_id = None
+    compliance = finding.get("compliance", {})
+    if compliance:
+        cwe_id = compliance.get("cwe_id")
+    if not cwe_id:
+        cwe_id = finding.get("cwe", "")
+
+    mapping = get_mitre_mapping_enriched(cwe_id)
+    if mapping:
+        finding["mitre_attack"] = {
+            "technique_id": mapping.get("technique", ""),
+            "technique_name": mapping.get("name", ""),
+            "tactic": mapping.get("tactic", ""),
+            "capec_ids": mapping.get("capec", []),
+            "description": mapping.get("description", ""),
+        }
+        # Extra offline DB fields
+        if mapping.get("mitigations"):
+            finding["mitre_attack"]["mitigations"] = mapping["mitigations"]
+        if mapping.get("consequences"):
+            finding["mitre_attack"]["consequences"] = mapping["consequences"]
+        if mapping.get("likelihood"):
+            finding["mitre_attack"]["likelihood"] = mapping["likelihood"]
+
+    # Kill chain phase
+    vuln_type = (
+        finding.get("vuln_type")
+        or finding.get("attack")
+        or finding.get("type")
+        or ""
+    ).lower()
+    phase = get_kill_chain_phase(vuln_type)
+    if phase:
+        finding.setdefault("mitre_attack", {})["kill_chain_phase"] = phase
+
+    return finding

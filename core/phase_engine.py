@@ -304,3 +304,140 @@ class PhaseEngine:
         idx = _PHASE_ORDER[self.current_phase]
         return (f"PhaseEngine(phase={self.current_phase}, "
                 f"progress={idx}/{len(self.PHASES) - 1})")
+
+
+# =============================================================================
+# Tool-to-Phase Mapping (CLI / OS-level tools)
+# =============================================================================
+# Maps external tool binary names to the minimum phase required to run them.
+# Tools not listed here fall through to PhaseEngine.PHASE_TOOLS or are allowed
+# by default (unknown tools are not blocked).
+
+TOOL_PHASE_MAP: Dict[str, str] = {
+    # ── Informational / Recon tools (always allowed from RECON onward) ──
+    "curl": "RECON",
+    "wget": "RECON",
+    "httpx": "RECON",
+    "subfinder": "RECON",
+    "amass": "RECON",
+    "naabu": "RECON",
+    "katana": "RECON",
+    "gau": "RECON",
+    "whois": "RECON",
+    "dig": "RECON",
+    "nslookup": "RECON",
+    "host": "RECON",
+    "nmap": "RECON",
+    "masscan": "RECON",
+    "dnsx": "RECON",
+    "waybackurls": "RECON",
+    "assetfinder": "RECON",
+    "massdns": "RECON",
+    "shodan": "RECON",
+    "censys": "RECON",
+    "theHarvester": "RECON",
+    # ── Surface / Enumeration tools ──
+    "wappalyzer": "SURFACE",
+    "arjun": "SURFACE",
+    "dirsearch": "SURFACE",
+    "gobuster": "SURFACE",
+    "feroxbuster": "SURFACE",
+    "ffuf": "SURFACE",
+    "wfuzz": "SURFACE",
+    # ── Scanning tools (require SCAN phase) ──
+    "nuclei": "SCAN",
+    "nikto": "SCAN",
+    "wpscan": "SCAN",
+    "testssl": "SCAN",
+    "sslyze": "SCAN",
+    "trivy": "SCAN",
+    "trufflehog": "SCAN",
+    "gitleaks": "SCAN",
+    "semgrep": "SCAN",
+    "openvas": "SCAN",
+    "gvm": "SCAN",
+    # ── Exploitation tools (require EXPLOIT phase) ──
+    "sqlmap": "EXPLOIT",
+    "hydra": "EXPLOIT",
+    "msfconsole": "EXPLOIT",
+    "msfvenom": "EXPLOIT",
+    "metasploit": "EXPLOIT",
+    "commix": "EXPLOIT",
+    "xsstrike": "EXPLOIT",
+    "tplmap": "EXPLOIT",
+    "ysoserial": "EXPLOIT",
+    "john": "EXPLOIT",
+    "hashcat": "EXPLOIT",
+    "medusa": "EXPLOIT",
+    "patator": "EXPLOIT",
+    "burpsuite": "EXPLOIT",
+    # ── Post-exploitation (require POST_EXPLOIT phase) ──
+    "mimikatz": "POST_EXPLOIT",
+    "bloodhound": "POST_EXPLOIT",
+    "impacket": "POST_EXPLOIT",
+    "crackmapexec": "POST_EXPLOIT",
+    "evil-winrm": "POST_EXPLOIT",
+    "chisel": "POST_EXPLOIT",
+    "ligolo": "POST_EXPLOIT",
+    "linpeas": "POST_EXPLOIT",
+    "winpeas": "POST_EXPLOIT",
+    "pspy": "POST_EXPLOIT",
+}
+
+# Canonical phase names in order for comparison
+_TOOL_PHASE_ORDER: Dict[str, int] = {p.value: i for i, p in enumerate(Phase)}
+
+
+def get_phase_for_tool(tool_name: str) -> str:
+    """Return the minimum phase required for a tool.
+
+    Checks TOOL_PHASE_MAP first (CLI tools), then PhaseEngine.PHASE_TOOLS
+    (VIPER internal actions). Returns "RECON" for unknown tools (not restricted).
+
+    Args:
+        tool_name: Tool or action name (case-insensitive).
+
+    Returns:
+        Phase name string (e.g. "RECON", "EXPLOIT").
+    """
+    name = tool_name.strip().lower()
+
+    # Check CLI tool map (keys are already mixed-case, normalize)
+    for mapped_name, phase in TOOL_PHASE_MAP.items():
+        if mapped_name.lower() == name:
+            return phase
+
+    # Check PhaseEngine.PHASE_TOOLS (internal VIPER actions)
+    for phase_name, tools in PhaseEngine.PHASE_TOOLS.items():
+        if name in tools:
+            return phase_name
+
+    # Unknown tool — not restricted
+    return "RECON"
+
+
+def is_tool_allowed_in_phase(tool_name: str, current_phase: str) -> Tuple[bool, str]:
+    """Check if a tool is allowed in the current phase.
+
+    A tool is allowed if the current phase is at or beyond the tool's
+    minimum required phase.
+
+    Args:
+        tool_name: Tool or action name.
+        current_phase: Current phase (e.g. "RECON", "SCAN").
+
+    Returns:
+        Tuple of (allowed: bool, reason: str).
+    """
+    required_phase = get_phase_for_tool(tool_name)
+    required_idx = _TOOL_PHASE_ORDER.get(required_phase, 0)
+    current_idx = _TOOL_PHASE_ORDER.get(current_phase.upper(), 0)
+
+    if current_idx >= required_idx:
+        return True, f"Tool '{tool_name}' allowed (requires {required_phase}, current {current_phase})"
+
+    return False, (
+        f"Tool '{tool_name}' requires phase {required_phase}, "
+        f"but current phase is {current_phase}. "
+        f"Advance to {required_phase} before using this tool."
+    )

@@ -105,19 +105,36 @@ Phase: {current_phase}
 Iteration: {iteration}/{max_iterations}
 Objective: {objective}
 
-Execution summary:
+═══ ATTACK SURFACE MAP ═══
+{attack_surface}
+
+═══ AVAILABLE TOOLS & THEIR OUTPUTS ═══
+{tool_status}
+
+═══ EXECUTION HISTORY ═══
 {execution_summary}
 
-Failures so far:
+═══ FAILURES ═══
 {failure_summary}
 
-Provide your analysis as JSON:
+═══ HYPOTHESES IN PLAY ═══
+{active_hypotheses}
+
+Produce a COMPREHENSIVE strategic analysis as JSON:
 {{
-  "situation_assessment": "Current state summary",
+  "situation_assessment": "What we know, what we've tried, where we stand",
+  "key_observations": ["observation1", "observation2"],
+  "hypotheses": [
+    {{"hypothesis": "What might be vulnerable and why", "test_method": "How to test it", "priority": 1}}
+  ],
+  "recommended_plan": [
+    {{"step": 1, "action": "specific action", "tool": "tool_name", "reasoning": "why this step"}}
+  ],
+  "alternative_approaches": ["fallback1", "fallback2"],
+  "risk_assessment": "What could go wrong and mitigations",
   "attack_vectors_identified": ["vector1", "vector2"],
-  "recommended_approach": "Chosen approach and rationale",
-  "priority_order": ["step1", "step2", "step3"],
-  "risks_and_mitigations": "Potential risks and how to handle them"
+  "recommended_approach": "Chosen strategy and rationale",
+  "priority_order": ["step1", "step2", "step3"]
 }}\
 """
 
@@ -170,6 +187,7 @@ class ThinkEngine:
         self.tool_descriptions = tool_descriptions or {}
         self._consecutive_failures = 0
         self._last_deep_think: Optional[str] = None
+        self._last_deep_think_structured: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -237,15 +255,29 @@ class ThinkEngine:
     # Deep Think
     # ------------------------------------------------------------------
 
-    async def deep_think(self, state: dict, trigger_reason: str) -> str:
+    async def deep_think(self, state: dict, trigger_reason: str = "manual") -> dict:
         """
-        Structured strategic analysis. Returns formatted DeepThinkResult string.
+        Structured strategic analysis. Returns parsed DeepThinkResult dict.
+
+        Pauses normal ReACT flow and builds a comprehensive analysis prompt with:
+          - Current state summary (what we know, what we've tried)
+          - Available tools and their outputs so far
+          - Attack surface map
+          - Hypotheses to test
+
+        Returns structured dict with:
+          situation_assessment, key_observations, hypotheses,
+          recommended_plan, alternative_approaches, risk_assessment,
+          attack_vectors_identified, recommended_approach, priority_order
+
+        Also stores result as self._last_deep_think_structured for wave planning.
 
         Triggers:
           - First iteration
           - Phase transition
           - 3+ consecutive failures
           - LLM self-request (need_deep_think=True)
+          - ReACT engine reward < -3 after 3 steps
         """
         logger.info(f"Deep Think triggered: {trigger_reason}")
 
@@ -265,6 +297,44 @@ class ThinkEngine:
         failure_lines = [f"  - {f.get('tool_name')}: {f.get('error_message', 'unknown')}" for f in failures[-5:]]
         failure_summary = "\n".join(failure_lines) or "  (none)"
 
+        # Attack surface map from target_info
+        ti = state.get("target_info", {})
+        surface_lines = []
+        for key in ("primary_target", "ports", "services", "technologies",
+                     "vulnerabilities", "credentials", "endpoints", "subdomains"):
+            val = ti.get(key)
+            if val:
+                surface_lines.append(f"  {key}: {val}")
+        attack_surface = "\n".join(surface_lines) or "  (not yet mapped)"
+
+        # Tool status — which tools have been used and what they returned
+        tool_usage: Dict[str, List[str]] = {}
+        for step in trace:
+            tn = step.get("tool_name", "unknown")
+            status = "OK" if step.get("success") else "FAIL"
+            summary = (step.get("tool_output") or "")[:100]
+            tool_usage.setdefault(tn, []).append(f"[{status}] {summary}")
+        tool_lines = []
+        for tn, usages in tool_usage.items():
+            tool_lines.append(f"  {tn}: used {len(usages)}x")
+            for u in usages[-2:]:  # last 2 usages
+                tool_lines.append(f"    {u}")
+        # Also list available but unused tools
+        if self.tool_descriptions:
+            used_names = set(tool_usage.keys())
+            for tn, desc in self.tool_descriptions.items():
+                if tn not in used_names:
+                    tool_lines.append(f"  {tn}: (unused) — {desc}")
+        tool_status = "\n".join(tool_lines) or "  (no tools used yet)"
+
+        # Active hypotheses from previous deep think or todo list
+        todos = state.get("todo_list", [])
+        hyp_lines = []
+        for t in todos:
+            if isinstance(t, dict):
+                hyp_lines.append(f"  [{t.get('status', 'pending')}] {t.get('description', '')}")
+        active_hypotheses = "\n".join(hyp_lines) or "  (none)"
+
         prompt = DEEP_THINK_PROMPT.format(
             trigger_reason=trigger_reason,
             target=state.get("target", ""),
@@ -274,30 +344,59 @@ class ThinkEngine:
             objective=state.get("original_objective", ""),
             execution_summary=execution_summary,
             failure_summary=failure_summary,
+            attack_surface=attack_surface,
+            tool_status=tool_status,
+            active_hypotheses=active_hypotheses,
         )
 
+        result = None
         if self.router:
             try:
                 response = await self.router.complete(
                     prompt=prompt,
                     system="You are a strategic penetration testing advisor. Output JSON only.",
-                    max_tokens=1500,
+                    max_tokens=2000,
                     temperature=0.4,
                     json_mode=True,
                 )
                 if response:
-                    return response.text
+                    result = _parse_deep_think_result(response.text)
             except Exception as exc:
                 logger.warning(f"Deep Think LLM call failed: {exc}")
 
-        # Fallback: simple text summary
-        return json.dumps({
-            "situation_assessment": f"At iteration {state.get('current_iteration', 0)}, {len(trace)} steps completed.",
-            "attack_vectors_identified": ["Continue with available tools"],
-            "recommended_approach": "Proceed methodically through available attack surface",
-            "priority_order": ["Enumerate endpoints", "Test for common vulns", "Escalate if findings exist"],
-            "risks_and_mitigations": "Rate limiting and detection are primary risks. Throttle requests.",
-        })
+        # Fallback: simple structured result
+        if result is None:
+            result = {
+                "situation_assessment": f"At iteration {state.get('current_iteration', 0)}, {len(trace)} steps completed.",
+                "key_observations": [
+                    f"{len(trace)} steps executed",
+                    f"{len(failures)} failures encountered",
+                ],
+                "hypotheses": [
+                    {"hypothesis": "Continue with available tools", "test_method": "Systematic enumeration", "priority": 1}
+                ],
+                "recommended_plan": [
+                    {"step": 1, "action": "Enumerate endpoints", "tool": "auto", "reasoning": "Build attack surface"},
+                    {"step": 2, "action": "Test for common vulns", "tool": "auto", "reasoning": "Low-hanging fruit"},
+                    {"step": 3, "action": "Escalate if findings exist", "tool": "auto", "reasoning": "Deepen access"},
+                ],
+                "alternative_approaches": ["Try different attack vectors", "Change phase"],
+                "risk_assessment": "Rate limiting and detection are primary risks. Throttle requests.",
+                "attack_vectors_identified": ["Continue with available tools"],
+                "recommended_approach": "Proceed methodically through available attack surface",
+                "priority_order": ["Enumerate endpoints", "Test for common vulns", "Escalate if findings exist"],
+            }
+
+        # Store structured result for wave planning and ReACT integration
+        self._last_deep_think_structured = result
+
+        # Also store as formatted string for prompt injection (backward compat)
+        self._last_deep_think = _format_deep_think_for_prompt(result)
+
+        logger.info(f"Deep Think complete: {len(result.get('hypotheses', []))} hypotheses, "
+                     f"{len(result.get('recommended_plan', []))} plan steps")
+
+        return result
 
     # ------------------------------------------------------------------
     # Prompt building
@@ -568,7 +667,7 @@ def _validate_decision(data: dict) -> dict:
         return None
 
     # Ensure action is valid
-    valid_actions = {"use_tool", "plan_tools", "transition_phase", "complete", "ask_user"}
+    valid_actions = {"use_tool", "plan_tools", "transition_phase", "complete", "ask_user", "deep_think"}
     action = data.get("action", "")
     if action not in valid_actions:
         # Try to infer action
@@ -589,3 +688,167 @@ def _validate_decision(data: dict) -> dict:
     data.setdefault("reasoning", "")
 
     return data
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DEEP THINK PARSING & FORMATTING
+# ═══════════════════════════════════════════════════════════════════════
+
+_DEEP_THINK_DEFAULTS = {
+    "situation_assessment": "",
+    "key_observations": [],
+    "hypotheses": [],
+    "recommended_plan": [],
+    "alternative_approaches": [],
+    "risk_assessment": "",
+    "attack_vectors_identified": [],
+    "recommended_approach": "",
+    "priority_order": [],
+}
+
+
+def _parse_deep_think_result(text: str) -> Optional[dict]:
+    """
+    Parse a Deep Think JSON result from LLM output.
+
+    Handles markdown fences, trailing commas, surrounding prose.
+    Returns normalized dict with all expected keys, or None on failure.
+    """
+    if not text or not text.strip():
+        return None
+
+    text = text.strip()
+
+    # Strip markdown code fences
+    fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    parsed = _try_json_parse(text)
+    if not parsed:
+        # Try to extract JSON object from surrounding text
+        brace_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if brace_match:
+            parsed = _try_json_parse(brace_match.group())
+
+    if not parsed or not isinstance(parsed, dict):
+        logger.warning(f"Failed to parse Deep Think result from: {text[:200]}")
+        return None
+
+    # Normalize: ensure all expected keys exist
+    for key, default in _DEEP_THINK_DEFAULTS.items():
+        parsed.setdefault(key, default)
+
+    # Normalize hypotheses to have required fields
+    normalized_hyps = []
+    for i, h in enumerate(parsed.get("hypotheses", [])):
+        if isinstance(h, str):
+            h = {"hypothesis": h, "test_method": "", "priority": i + 1}
+        elif isinstance(h, dict):
+            h.setdefault("hypothesis", "")
+            h.setdefault("test_method", "")
+            h.setdefault("priority", i + 1)
+        normalized_hyps.append(h)
+    parsed["hypotheses"] = normalized_hyps
+
+    # Normalize plan steps
+    normalized_plan = []
+    for i, s in enumerate(parsed.get("recommended_plan", [])):
+        if isinstance(s, str):
+            s = {"step": i + 1, "action": s, "tool": "auto", "reasoning": ""}
+        elif isinstance(s, dict):
+            s.setdefault("step", i + 1)
+            s.setdefault("action", "")
+            s.setdefault("tool", "auto")
+            s.setdefault("reasoning", "")
+        normalized_plan.append(s)
+    parsed["recommended_plan"] = normalized_plan
+
+    return parsed
+
+
+def _format_deep_think_for_prompt(result: dict) -> str:
+    """
+    Format a structured Deep Think result dict into a readable string
+    for injection into the system prompt.
+    """
+    lines = []
+
+    if result.get("situation_assessment"):
+        lines.append(f"**Situation:** {result['situation_assessment']}")
+
+    if result.get("key_observations"):
+        obs = ", ".join(str(o) for o in result["key_observations"][:5])
+        lines.append(f"**Observations:** {obs}")
+
+    if result.get("hypotheses"):
+        hyp_strs = []
+        for h in result["hypotheses"][:5]:
+            if isinstance(h, dict):
+                hyp_strs.append(f"P{h.get('priority', '?')}: {h.get('hypothesis', '')}")
+            else:
+                hyp_strs.append(str(h))
+        lines.append(f"**Hypotheses:** {'; '.join(hyp_strs)}")
+
+    if result.get("recommended_plan"):
+        plan_strs = []
+        for s in result["recommended_plan"][:6]:
+            if isinstance(s, dict):
+                plan_strs.append(f"{s.get('step', '?')}. {s.get('action', '')}")
+            else:
+                plan_strs.append(str(s))
+        lines.append(f"**Plan:** {' -> '.join(plan_strs)}")
+
+    if result.get("attack_vectors_identified"):
+        lines.append(f"**Attack Vectors:** {', '.join(str(v) for v in result['attack_vectors_identified'])}")
+
+    if result.get("recommended_approach"):
+        lines.append(f"**Approach:** {result['recommended_approach']}")
+
+    if result.get("priority_order"):
+        lines.append(f"**Priority:** {' -> '.join(str(p) for p in result['priority_order'])}")
+
+    if result.get("alternative_approaches"):
+        lines.append(f"**Alternatives:** {', '.join(str(a) for a in result['alternative_approaches'][:3])}")
+
+    if result.get("risk_assessment"):
+        lines.append(f"**Risks:** {result['risk_assessment']}")
+
+    return "\n\n".join(lines)
+
+
+def deep_think_to_prioritized_actions(result: dict) -> List[dict]:
+    """
+    Convert a Deep Think result into a list of prioritized action dicts
+    suitable for feeding back into the ReACT loop or WaveRunner.
+
+    Each action dict has: tool, action, reasoning, priority, source.
+    """
+    actions = []
+
+    # Primary: from recommended_plan
+    for step in result.get("recommended_plan", []):
+        if isinstance(step, dict) and step.get("action"):
+            actions.append({
+                "tool": step.get("tool", "auto"),
+                "action": step.get("action", ""),
+                "reasoning": step.get("reasoning", ""),
+                "priority": step.get("step", len(actions) + 1),
+                "source": "deep_think_plan",
+            })
+
+    # Secondary: from hypotheses (as test actions)
+    for hyp in result.get("hypotheses", []):
+        if isinstance(hyp, dict) and hyp.get("test_method"):
+            actions.append({
+                "tool": "auto",
+                "action": hyp.get("test_method", ""),
+                "reasoning": f"Testing hypothesis: {hyp.get('hypothesis', '')}",
+                "priority": hyp.get("priority", 99) + len(result.get("recommended_plan", [])),
+                "source": "deep_think_hypothesis",
+            })
+
+    # Sort by priority
+    actions.sort(key=lambda a: a.get("priority", 99))
+
+    return actions

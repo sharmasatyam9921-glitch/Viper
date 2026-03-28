@@ -367,28 +367,74 @@ class FindingValidator:
 
         if acao == "*":
             if acac == "true":
-                # Browsers actually block this combo, so it's NOT exploitable
-                return False, 0.1, "CORS: ACAO=* + ACAC=true is blocked by browsers (not exploitable)"
+                # Browsers block credentials with wildcard per CORS spec, but the
+                # misconfiguration still exposes unauthenticated data cross-origin
+                # and indicates broken CORS config. Report as MEDIUM, not HIGH.
+                return True, 0.35, "CORS: ACAO=* + ACAC=true (browsers block creds but unauthenticated data exposed, severity=MEDIUM)"
             return True, 0.3, "CORS: wildcard origin (limited impact, no credential access)"
 
         return False, 0.05, f"CORS: origin not reflected (ACAO={acao})"
 
     async def _validate_redirect(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
-        """Verify open redirect actually redirects to external domain."""
+        """Verify open redirect actually redirects to attacker-controlled domain.
+
+        Fixed: follows full redirect chain to check if evil URL is the FINAL
+        destination, not just any intermediate hop. Catches CAS/SSO forwarding
+        false positives where evil URL gets embedded as a query param in a
+        login redirect but never becomes the actual destination.
+        """
         url = finding.get("url", target_url)
+        evil_marker = finding.get("evil_target", "evil")  # pattern to look for in destination
 
-        result = await self.http.request("GET", url, allow_redirects=False)
-        if result.status == 0:
-            return False, 0.0, "Request failed"
+        # Follow up to 5 redirect hops
+        current_url = url
+        hops = 0
+        max_hops = 5
+        chain = []
 
-        if result.status in (301, 302, 303, 307, 308):
+        while hops < max_hops:
+            result = await self.http.request("GET", current_url, allow_redirects=False)
+            if result.status == 0:
+                return False, 0.0, "Request failed"
+
+            if result.status not in (301, 302, 303, 307, 308):
+                break  # No more redirects
+
             location = result.headers.get("Location", "")
-            if location:
-                loc_domain = urlparse(location).netloc
-                orig_domain = urlparse(url).netloc
-                if loc_domain and loc_domain != orig_domain:
-                    return True, 0.9, f"Redirects to external: {location}"
-                return False, 0.1, f"Redirect stays on same domain: {location}"
+            if not location:
+                break
+
+            chain.append({"hop": hops, "status": result.status, "location": location})
+
+            # Check if the redirect DESTINATION (not query params) contains evil marker
+            parsed_loc = urlparse(location)
+            if evil_marker in parsed_loc.netloc:
+                return True, 0.95, f"Redirect chain leads to attacker domain at hop {hops}: {location}"
+
+            # Resolve relative URLs
+            if not parsed_loc.scheme:
+                parsed_orig = urlparse(current_url)
+                location = f"{parsed_orig.scheme}://{parsed_orig.netloc}{location}"
+
+            current_url = location
+            hops += 1
+
+        # If we got here, evil domain was never the redirect destination
+        if chain:
+            # Check if evil marker appears ONLY in query params (FP pattern)
+            final_loc = chain[-1]["location"] if chain else ""
+            parsed_final = urlparse(final_loc)
+            if evil_marker in parsed_final.query and evil_marker not in parsed_final.netloc:
+                return False, 0.05, (
+                    f"FALSE POSITIVE: evil URL is query param in redirect chain, "
+                    f"not the destination. Final: {parsed_final.netloc}"
+                )
+            orig_domain = urlparse(url).netloc
+            loc_domain = urlparse(chain[-1]["location"]).netloc
+            if loc_domain and loc_domain != orig_domain:
+                # Different domain but NOT evil — likely SSO/login redirect
+                return False, 0.1, f"Redirect to {loc_domain} (not attacker-controlled)"
+            return False, 0.1, f"Redirect stays in same domain family: {chain[-1]['location']}"
 
         return False, 0.1, f"No redirect (status={result.status})"
 

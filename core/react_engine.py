@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from core.agent_state import TodoList, ObjectiveManager
+from core.phase_engine import is_tool_allowed_in_phase
+from core.roe_engine import RoEEngine
+from core.think_engine import ThinkEngine, deep_think_to_prioritized_actions
+
 logger = logging.getLogger("viper.react")
 
 
@@ -101,6 +106,8 @@ class ReACTEngine:
         model_router: Optional[Any] = None,
         max_steps: int = 15,
         verbose: bool = True,
+        think_engine: Optional[ThinkEngine] = None,
+        roe_engine: Optional[RoEEngine] = None,
     ):
         self.brain = brain
         self.router = model_router
@@ -109,6 +116,16 @@ class ReACTEngine:
         self._traces: List[ReACTTrace] = []
         self.evograph = None  # Set externally by ViperCore
         self._evograph_session_id = None  # Set per hunt
+        # LLM-managed todo list
+        self.todo_list = TodoList()
+        # G1: Multi-objective manager
+        self.objective_manager = ObjectiveManager()
+        # Deep Think integration
+        self.think_engine = think_engine
+        self._deep_think_actions: List[Dict] = []  # Prioritized actions from deep think
+        self._deep_think_triggered_at: Optional[int] = None  # Step number of last trigger
+        # F5: Rules of Engagement enforcement
+        self.roe_engine = roe_engine or RoEEngine()
 
     def log(self, msg: str, level: str = "INFO"):
         if self.verbose:
@@ -140,17 +157,139 @@ class ReACTEngine:
         self.log(f"Starting ReACT loop for {target} (max {self.max_steps} steps)")
 
         for step_num in range(1, self.max_steps + 1):
-            # THOUGHT: Reason about what to do next
-            thought, action, used_llm = await self._think(
-                target=target,
-                context=current_context,
-                findings=findings,
-                tried_attacks=tried_attacks,
-                step_num=step_num,
-            )
+            # ── DEEP THINK TRIGGER CHECK ──────────────────────────────
+            deep_think_fired = False
+            if self.think_engine:
+                should_dt, dt_reason = self._check_deep_think_trigger(
+                    trace, step_num, current_context, tried_attacks
+                )
+                if should_dt:
+                    deep_think_fired = True
+                    self.log(f"Step {step_num} | DEEP THINK triggered: {dt_reason}", "STRATEGY")
+                    dt_state = {
+                        "target": target,
+                        "current_phase": current_context.get("phase", "informational"),
+                        "current_iteration": step_num,
+                        "max_iterations": self.max_steps,
+                        "original_objective": f"Security test {target}",
+                        "execution_trace": [
+                            {
+                                "tool_name": s.action,
+                                "success": s.reward > 0,
+                                "tool_output": s.observation[:300],
+                                "error_message": "" if s.reward > 0 else "negative reward",
+                                "iteration": s.step_num,
+                            }
+                            for s in trace.steps
+                        ],
+                        "target_info": current_context,
+                        "todo_list": [],
+                    }
+                    try:
+                        dt_result = await self.think_engine.deep_think(dt_state, dt_reason)
+                        self._deep_think_actions = deep_think_to_prioritized_actions(dt_result)
+                        self._deep_think_triggered_at = step_num
+                        self.log(
+                            f"Step {step_num} | Deep Think produced "
+                            f"{len(self._deep_think_actions)} prioritized actions",
+                            "STRATEGY",
+                        )
+                    except Exception as exc:
+                        self.log(f"Step {step_num} | Deep Think failed: {exc}", "WARN")
+
+            # ── THOUGHT: Reason about what to do next ─────────────────
+            # If deep think produced prioritized actions, consume the next one
+            if self._deep_think_actions:
+                dt_action = self._deep_think_actions.pop(0)
+                thought = (
+                    f"[Deep Think plan] {dt_action.get('reasoning', '')} "
+                    f"(source: {dt_action.get('source', 'plan')})"
+                )
+                action = dt_action.get("action", dt_action.get("tool", ""))
+                # Try to match to a known attack pattern
+                matched = self._fuzzy_match_attack(action) if action else None
+                if matched:
+                    action = matched
+                    used_llm = True
+                else:
+                    # Fall through to normal think if deep think action not recognized
+                    thought, action, used_llm = await self._think(
+                        target=target,
+                        context=current_context,
+                        findings=findings,
+                        tried_attacks=tried_attacks,
+                        step_num=step_num,
+                    )
+                used_llm = True  # Deep think counts as LLM reasoning
+            else:
+                thought, action, used_llm = await self._think(
+                    target=target,
+                    context=current_context,
+                    findings=findings,
+                    tried_attacks=tried_attacks,
+                    step_num=step_num,
+                )
+
+            # ── Check if LLM explicitly requested deep_think action ───
+            if action == "deep_think" and self.think_engine:
+                self.log(f"Step {step_num} | LLM explicitly requested deep_think", "STRATEGY")
+                # Don't execute as an attack — trigger deep think on next iteration
+                step = ReACTStep(
+                    step_num=step_num,
+                    thought=thought,
+                    action="deep_think",
+                    action_input={"target": target},
+                    observation="Deep think will be invoked at next step.",
+                    reward=0.0,
+                    llm_used=used_llm,
+                )
+                trace.add_step(step)
+                # Force deep think on next iteration
+                self._deep_think_triggered_at = None  # Reset so trigger check fires
+                continue
 
             self.log(f"Step {step_num} | Thought: {thought[:100]}...")
             self.log(f"Step {step_num} | Action: {action}")
+
+            # ── F5: RoE enforcement before execution ──────────────────
+            roe_ok, roe_reason = self.roe_engine.enforce(
+                tool=action,
+                target=target,
+                args=current_context,
+                phase=current_context.get("phase"),
+            )
+            if not roe_ok:
+                self.log(f"Step {step_num} | RoE BLOCKED: {roe_reason}", "BLOCK")
+                step = ReACTStep(
+                    step_num=step_num,
+                    thought=thought,
+                    action=action,
+                    action_input={"target": target},
+                    observation=f"BLOCKED by Rules of Engagement: {roe_reason}",
+                    reward=-0.5,
+                    llm_used=used_llm,
+                )
+                trace.add_step(step)
+                tried_attacks.append(action)
+                continue
+
+            # ── Phase-aware tool enforcement ───────────────────────────
+            current_phase = current_context.get("phase", "RECON").upper()
+            phase_ok, phase_reason = is_tool_allowed_in_phase(action, current_phase)
+            if not phase_ok:
+                self.log(f"Step {step_num} | PHASE BLOCKED: {phase_reason}", "BLOCK")
+                step = ReACTStep(
+                    step_num=step_num,
+                    thought=thought,
+                    action=action,
+                    action_input={"target": target},
+                    observation=f"BLOCKED by phase enforcement: {phase_reason}",
+                    reward=-0.3,
+                    llm_used=used_llm,
+                )
+                trace.add_step(step)
+                tried_attacks.append(action)
+                continue
 
             tried_attacks.append(action)
 
@@ -171,6 +310,10 @@ class ReACTEngine:
                 llm_used=used_llm,
             )
             trace.add_step(step)
+
+            # Auto-complete todo items matching the executed action
+            if reward > 0:
+                self.todo_list.mark_completed_by_tool(action)
 
             # EvoGraph: record reasoning step
             if self.evograph and self._evograph_session_id:
@@ -197,6 +340,11 @@ class ReACTEngine:
 
             # Early termination: diminishing returns
             if step_num >= 3 and trace.total_reward <= -5:
+                # Before stopping, try deep think one more time if available
+                if self.think_engine and not deep_think_fired:
+                    self.log("Diminishing returns — attempting deep think before stopping")
+                    # Will trigger on next iteration via _check_deep_think_trigger
+                    continue
                 self.log("Diminishing returns, stopping early")
                 break
 
@@ -207,6 +355,26 @@ class ReACTEngine:
 
         self.log(f"Completed: {len(trace.steps)} steps, reward={trace.total_reward:.1f}, "
                  f"findings={len(findings)}")
+
+        # ── G1: Multi-objective management ────────────────────────────
+        # Complete current objective and check for next
+        current_obj = self.objective_manager.get_current()
+        if current_obj:
+            current_obj.findings_count = len(findings)
+            summary = (
+                f"{len(findings)} findings in {len(trace.steps)} steps, "
+                f"reward={trace.total_reward:.1f}"
+            )
+            if trace.total_reward <= -5 and not findings:
+                self.objective_manager.fail_current(summary)
+            else:
+                self.objective_manager.complete_current(summary)
+
+            # Auto-advance to next objective if available
+            if self.objective_manager.has_pending():
+                next_obj = self.objective_manager.advance()
+                if next_obj:
+                    self.log(f"Advancing to next objective: {next_obj.content[:80]}")
 
         return trace
 
@@ -257,6 +425,15 @@ class ReACTEngine:
         """Use LLM to reason about the next step."""
         available_attacks = list(self.brain.attack_patterns.keys())
 
+        # Include todo list context for LLM awareness
+        todo_context = self.todo_list.to_prompt_string()
+
+        # G1: Include objective history context
+        objective_history = self.objective_manager.get_history_prompt()
+
+        # Build objective history section
+        obj_section = f"\n{objective_history}\n\n" if objective_history else "\n"
+
         prompt = (
             f"Target: {target}\n"
             f"Step: {step_num}/{self.max_steps}\n"
@@ -268,20 +445,34 @@ class ReACTEngine:
             f"Attacks tried: {tried_attacks[-10:]}\n"
             f"Findings: {json.dumps(findings[-5:], default=str)[:800]}\n"
             f"Available attacks: {available_attacks}\n\n"
-            "Reason about what to try next. Pick ONE action from the available attacks list."
+            f"{todo_context}\n"
+            f"{obj_section}"
+            "Reason about what to try next. Pick ONE action from the available attacks list.\n"
+            "You may also return an 'updated_todo_list' array of "
+            '{"id": "...", "description": "...", "status": "pending|in_progress|completed|blocked", '
+            '"priority": "high|medium|low"} to update the task tracker.'
         )
+
+        # F5: Inject RoE rules into the system prompt so the LLM is aware
+        system_prompt = REACT_SYSTEM_PROMPT
+        roe_section = self.roe_engine.to_prompt_section()
+        if roe_section:
+            system_prompt = system_prompt + "\n\n" + roe_section
 
         try:
             response = await self.router.complete_for_task(
                 task="reasoning",
                 prompt=prompt,
-                system=REACT_SYSTEM_PROMPT,
+                system=system_prompt,
                 max_tokens=512,
                 json_mode=True,
             )
             if response:
                 data = response.extract_json_object()
                 if data:
+                    # Sync todo list from LLM response if present
+                    if "updated_todo_list" in data and isinstance(data["updated_todo_list"], list):
+                        self.todo_list.from_llm_response(data["updated_todo_list"])
                     return (
                         data.get("thought", ""),
                         data.get("action", "").lower().replace("-", "_").replace(" ", "_"),
@@ -350,6 +541,100 @@ class ReACTEngine:
             f"Highest access level reached: {max_access}. "
             f"Total reward: {trace.total_reward:.1f} over {len(trace.steps)} steps."
         )
+
+    def _check_deep_think_trigger(
+        self,
+        trace: ReACTTrace,
+        step_num: int,
+        context: Dict[str, Any],
+        tried_attacks: List[str],
+    ) -> tuple:
+        """
+        Check if Deep Think should trigger during the ReACT loop.
+
+        Returns (should_trigger: bool, reason: str).
+
+        Triggers:
+          1. reward < -3 after 3+ steps (cumulative negative)
+          2. 3+ consecutive negative reward steps
+          3. First step (initial strategy)
+          4. Cooldown: won't re-trigger within 3 steps of last trigger
+        """
+        # Cooldown check: don't trigger again within 3 steps
+        if self._deep_think_triggered_at is not None:
+            if step_num - self._deep_think_triggered_at < 3:
+                return False, ""
+
+        # Don't trigger if we still have queued deep think actions
+        if self._deep_think_actions:
+            return False, ""
+
+        # Trigger 1: First step — establish initial strategy
+        if step_num == 1:
+            return True, "first_step"
+
+        # Trigger 2: Cumulative reward < -3 after 3+ steps
+        if step_num >= 3 and trace.total_reward < -3:
+            return True, f"low_cumulative_reward ({trace.total_reward:.1f} after {step_num} steps)"
+
+        # Trigger 3: 3+ consecutive negative rewards
+        if len(trace.steps) >= 3:
+            last_3 = trace.steps[-3:]
+            if all(s.reward < 0 for s in last_3):
+                return True, f"3_consecutive_failures (rewards: {[s.reward for s in last_3]})"
+
+        # Trigger 4: Going in circles (same action repeated 3+ times)
+        if len(tried_attacks) >= 3:
+            last_3_attacks = tried_attacks[-3:]
+            if len(set(last_3_attacks)) == 1:
+                return True, f"action_repetition ('{last_3_attacks[0]}' repeated 3x)"
+
+        return False, ""
+
+    def add_objective(self, objective: str) -> None:
+        """Queue a new objective for multi-objective execution (G1)."""
+        self.objective_manager.add(objective)
+
+    async def run_all_objectives(
+        self,
+        target: str,
+        context: Dict[str, Any],
+        execute_fn: Callable,
+    ) -> List[ReACTTrace]:
+        """
+        Run ReACT loops for all queued objectives sequentially (G1).
+
+        Each objective gets its own ReACT loop. Context carries over between
+        objectives so that findings from earlier objectives inform later ones.
+
+        Returns:
+            List of ReACTTrace, one per objective.
+        """
+        traces = []
+        current_context = dict(context)
+
+        while True:
+            obj = self.objective_manager.get_current()
+            if obj is None or obj.status != "active":
+                if not self.objective_manager.has_pending():
+                    break
+                next_obj = self.objective_manager.advance()
+                if next_obj is None:
+                    break
+                obj = next_obj
+
+            self.log(f"Starting objective: {obj.content[:80]}")
+            trace = await self.reason_and_act(target, current_context, execute_fn)
+            traces.append(trace)
+
+            # Carry forward context enrichment from this trace
+            if trace.steps:
+                last_step = trace.steps[-1]
+                if last_step.action_input and "context_keys" in last_step.action_input:
+                    # The context was updated during the loop
+                    pass
+
+        return traces
 
     @property
     def traces(self) -> List[ReACTTrace]:

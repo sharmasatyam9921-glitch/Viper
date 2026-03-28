@@ -20,13 +20,14 @@ def get_skill_prompt(attack_path_type: str, phase: str = "exploitation") -> str:
         Combined system prompt + phase guidance text for the skill.
     """
     # Import lazily to avoid circular imports
-    from . import cve_exploit, brute_force, phishing, dos, unclassified
+    from . import cve_exploit, brute_force, phishing, dos, sql_injection, unclassified
 
     _SKILL_MODULES = {
         "cve_exploit": cve_exploit,
         "brute_force_credential_guess": brute_force,
         "phishing_social_engineering": phishing,
         "denial_of_service": dos,
+        "sql_injection": sql_injection,
     }
 
     # Check if it's a known built-in skill
@@ -64,5 +65,6 @@ SKILL_CATEGORIES = [
     "brute_force_credential_guess",
     "phishing_social_engineering",
     "denial_of_service",
+    "sql_injection",
     "unclassified",
 ]

@@ -14,6 +14,7 @@ Features:
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from datetime import datetime
@@ -21,9 +22,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+logger = logging.getLogger("viper.nuclei")
+
 HACKAGENT_DIR = Path(__file__).parent.parent
 NUCLEI_OUTPUT_DIR = HACKAGENT_DIR / "data" / "nuclei"
 NUCLEI_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Default custom template directory
+CUSTOM_TEMPLATES_DIR = HACKAGENT_DIR / "data" / "nuclei" / "custom"
 
 # Knowledge file for integration
 KNOWLEDGE_FILE = HACKAGENT_DIR / "core" / "viper_knowledge.json"
@@ -106,7 +117,8 @@ class NucleiScanner:
     Provides async interface for running scans and parsing results.
     """
     
-    def __init__(self, verbose: bool = True, tool_manager=None):
+    def __init__(self, verbose: bool = True, tool_manager=None,
+                 custom_template_dirs: Optional[List[str]] = None):
         self.verbose = verbose
         self.tool_manager = tool_manager
         if tool_manager and tool_manager.check_tool("nuclei"):
@@ -115,6 +127,13 @@ class NucleiScanner:
         else:
             self.nuclei_path = self._find_nuclei()
         self.templates_path = self._find_templates()
+
+        # Custom template discovery (G9)
+        self._custom_template_dirs: List[Path] = [CUSTOM_TEMPLATES_DIR]
+        if custom_template_dirs:
+            self._custom_template_dirs.extend(Path(d) for d in custom_template_dirs)
+        self._template_catalog: List[Dict] = []
+        self._discover_and_log_templates()
     
     def log(self, msg: str, level: str = "INFO"):
         if self.verbose:
@@ -163,9 +182,173 @@ class NucleiScanner:
         for p in common_paths:
             if p.exists():
                 return p
-        
+
         return None
-    
+
+    # ------------------------------------------------------------------
+    # G9: Custom template auto-discovery
+    # ------------------------------------------------------------------
+
+    def discover_custom_templates(self, template_dir: Optional[str] = None) -> List[Dict]:
+        """
+        Scan custom template directories for YAML nuclei templates.
+
+        Parses each .yaml/.yml file for: id, name, severity, author, description, tags.
+
+        Args:
+            template_dir: Optional additional directory to scan. If None, uses
+                          the configured custom_template_dirs list.
+
+        Returns:
+            List of template metadata dicts with keys:
+                id, name, severity, author, description, tags, path
+        """
+        dirs_to_scan = list(self._custom_template_dirs)
+        if template_dir:
+            dirs_to_scan.append(Path(template_dir))
+
+        templates: List[Dict] = []
+        seen_ids: Set[str] = set()
+
+        for tdir in dirs_to_scan:
+            if not tdir.is_dir():
+                continue
+
+            for fpath in sorted(tdir.rglob("*.yaml")):
+                meta = self._parse_template_yaml(fpath)
+                if meta and meta["id"] not in seen_ids:
+                    seen_ids.add(meta["id"])
+                    templates.append(meta)
+
+            # Also match .yml extension
+            for fpath in sorted(tdir.rglob("*.yml")):
+                meta = self._parse_template_yaml(fpath)
+                if meta and meta["id"] not in seen_ids:
+                    seen_ids.add(meta["id"])
+                    templates.append(meta)
+
+        return templates
+
+    def _parse_template_yaml(self, fpath: Path) -> Optional[Dict]:
+        """Parse a single nuclei template YAML file for metadata."""
+        if yaml is None:
+            # Fallback: basic regex parsing if PyYAML not available
+            return self._parse_template_fallback(fpath)
+
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                data = next(yaml.safe_load_all(f), None)
+
+            if not isinstance(data, dict):
+                return None
+
+            info = data.get("info", {})
+            if not isinstance(info, dict):
+                return None
+
+            template_id = data.get("id", fpath.stem)
+            if not template_id:
+                return None
+
+            return {
+                "id": str(template_id),
+                "name": str(info.get("name", "")),
+                "severity": str(info.get("severity", "unknown")).lower(),
+                "author": str(info.get("author", "")),
+                "description": str(info.get("description", ""))[:200],
+                "tags": str(info.get("tags", "")),
+                "path": str(fpath),
+            }
+        except Exception:
+            return None
+
+    def _parse_template_fallback(self, fpath: Path) -> Optional[Dict]:
+        """Regex-based fallback parser when PyYAML is unavailable."""
+        import re
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")[:4096]
+        except Exception:
+            return None
+
+        def _extract(key: str) -> str:
+            m = re.search(rf"^\s*{key}\s*:\s*(.+)$", content, re.MULTILINE)
+            return m.group(1).strip().strip("\"'") if m else ""
+
+        template_id = _extract("id") or fpath.stem
+        name = _extract("name")
+        severity = _extract("severity") or "unknown"
+        author = _extract("author")
+        description = _extract("description")[:200]
+        tags = _extract("tags")
+
+        if not template_id:
+            return None
+
+        return {
+            "id": template_id,
+            "name": name,
+            "severity": severity.lower(),
+            "author": author,
+            "description": description,
+            "tags": tags,
+            "path": str(fpath),
+        }
+
+    def _discover_and_log_templates(self):
+        """Discover custom templates at startup and log them."""
+        self._template_catalog = self.discover_custom_templates()
+        if self._template_catalog:
+            self.log(f"Discovered {len(self._template_catalog)} custom templates:")
+            for t in self._template_catalog:
+                self.log(f"  [{t['severity']}] {t['id']}: {t['name']}")
+        else:
+            self.log("No custom templates found in configured directories")
+
+    @property
+    def template_catalog(self) -> List[Dict]:
+        """Property exposing the discovered custom template catalog."""
+        return self._template_catalog
+
+    def get_template_catalog(self) -> str:
+        """
+        Return a formatted string listing all custom templates.
+
+        Suitable for injection into LLM system prompts so the agent knows
+        which custom templates are available.
+
+        Returns:
+            Formatted multi-line string, or empty string if no templates.
+        """
+        if not self._template_catalog:
+            return ""
+
+        lines = ["Custom Nuclei Templates Available:"]
+        lines.append(f"  Total: {len(self._template_catalog)}")
+        lines.append("")
+
+        # Group by severity
+        by_sev: Dict[str, List[Dict]] = {}
+        for t in self._template_catalog:
+            sev = t["severity"]
+            by_sev.setdefault(sev, []).append(t)
+
+        sev_order = ["critical", "high", "medium", "low", "info", "unknown"]
+        for sev in sev_order:
+            templates = by_sev.get(sev, [])
+            if not templates:
+                continue
+            lines.append(f"  [{sev.upper()}] ({len(templates)}):")
+            for t in templates:
+                lines.append(f"    - {t['id']}: {t['name']}")
+                if t["description"]:
+                    lines.append(f"      {t['description']}")
+                if t["tags"]:
+                    lines.append(f"      tags: {t['tags']}")
+                lines.append(f"      path: {t['path']}")
+            lines.append("")
+
+        return "\n".join(lines)
+
     async def check_and_update_templates(self) -> bool:
         """Update nuclei templates"""
         if not self.nuclei_path:

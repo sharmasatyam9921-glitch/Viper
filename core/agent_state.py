@@ -6,9 +6,12 @@ No LangGraph/LangChain dependency. Uses only stdlib.
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, List, Optional
 import uuid
 import json
+import logging
+
+logger = logging.getLogger("viper.state")
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────
@@ -68,6 +71,126 @@ class TodoItem:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
         }
+
+
+class TodoList:
+    """
+    LLM-managed todo list for tracking attack plan progress.
+
+    The LLM proposes tasks, marks them in-progress, and completes them.
+    The engine auto-completes items when a matching tool action succeeds.
+    """
+
+    def __init__(self):
+        self.items: List[TodoItem] = []
+
+    def add(self, description: str, priority: int = 0, tool_hint: str = "") -> TodoItem:
+        """Add a new todo item. priority: 0=highest."""
+        pri_map = {0: Priority.HIGH, 1: Priority.MEDIUM}
+        item = TodoItem(
+            description=description,
+            priority=pri_map.get(priority, Priority.LOW),
+            notes=f"tool_hint:{tool_hint}" if tool_hint else "",
+        )
+        self.items.append(item)
+        logger.debug("TodoList: added '%s' (id=%s, priority=%s)", description, item.id, item.priority.value)
+        return item
+
+    def update_status(self, item_id: str, status: str) -> None:
+        """Update the status of an item by ID."""
+        for item in self.items:
+            if item.id == item_id:
+                try:
+                    item.status = TodoStatus(status)
+                except ValueError:
+                    item.status = TodoStatus.PENDING
+                if status == "completed":
+                    item.completed_at = datetime.now(timezone.utc).isoformat()
+                logger.debug("TodoList: %s -> %s", item_id, status)
+                return
+        logger.debug("TodoList: item %s not found", item_id)
+
+    def get_pending(self) -> List[TodoItem]:
+        """Return all pending or in-progress items, sorted by priority."""
+        priority_order = {Priority.HIGH: 0, Priority.MEDIUM: 1, Priority.LOW: 2}
+        return sorted(
+            [i for i in self.items if i.status in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS)],
+            key=lambda i: priority_order.get(i.priority, 9),
+        )
+
+    def get_next(self) -> Optional[TodoItem]:
+        """Return the highest-priority pending item, or None."""
+        pending = self.get_pending()
+        return pending[0] if pending else None
+
+    def to_prompt_string(self) -> str:
+        """Format todo list for LLM context injection."""
+        return format_todo_list([i.to_dict() for i in self.items])
+
+    def from_llm_response(self, items: List[dict]) -> None:
+        """
+        Sync the todo list from LLM's updated_todo_list response.
+        New items (no matching id) are added; existing items get status updated.
+        """
+        existing_ids = {i.id for i in self.items}
+        for raw in items:
+            item_id = raw.get("id")
+            status = raw.get("status", "pending")
+            if item_id and item_id in existing_ids:
+                self.update_status(item_id, status)
+            else:
+                # New item from LLM
+                pri_str = raw.get("priority", "medium")
+                try:
+                    pri = Priority(pri_str)
+                except ValueError:
+                    pri = Priority.MEDIUM
+                new_item = TodoItem(
+                    id=item_id or uuid.uuid4().hex[:8],
+                    description=raw.get("description", ""),
+                    status=TodoStatus(status) if status in [s.value for s in TodoStatus] else TodoStatus.PENDING,
+                    priority=pri,
+                    notes=raw.get("notes", ""),
+                )
+                self.items.append(new_item)
+                logger.debug("TodoList: LLM added new item '%s' (id=%s)", new_item.description, new_item.id)
+
+    def mark_completed_by_tool(self, tool_name: str) -> None:
+        """Auto-complete items whose tool_hint matches the executed tool."""
+        for item in self.items:
+            if item.status in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS):
+                hint = ""
+                if item.notes and "tool_hint:" in item.notes:
+                    hint = item.notes.split("tool_hint:", 1)[1].split(";")[0].strip()
+                if hint and hint.lower() in tool_name.lower():
+                    item.complete(notes=f"auto-completed by {tool_name}")
+                    logger.debug("TodoList: auto-completed '%s' via tool %s", item.description, tool_name)
+
+    def to_list_of_dicts(self) -> List[dict]:
+        """Serialize all items to list of dicts for state persistence."""
+        return [i.to_dict() for i in self.items]
+
+    def load_from_dicts(self, items: List[dict]) -> None:
+        """Restore items from state dicts."""
+        self.items = []
+        for d in items:
+            try:
+                status = TodoStatus(d.get("status", "pending"))
+            except ValueError:
+                status = TodoStatus.PENDING
+            try:
+                priority = Priority(d.get("priority", "medium"))
+            except ValueError:
+                priority = Priority.MEDIUM
+            self.items.append(TodoItem(
+                id=d.get("id", uuid.uuid4().hex[:8]),
+                description=d.get("description", ""),
+                status=status,
+                priority=priority,
+                notes=d.get("notes", ""),
+                created_at=d.get("created_at", datetime.now(timezone.utc).isoformat()),
+                completed_at=d.get("completed_at"),
+            ))
 
 
 @dataclass
@@ -183,16 +306,139 @@ class ToolConfirmationRequest:
 class ConversationObjective:
     objective_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     content: str = ""
+    status: str = "active"  # active, completed, failed
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: Optional[str] = None
+    findings_count: int = 0
+    execution_trace_summary: str = ""
 
     def to_dict(self) -> dict:
         return {
             "objective_id": self.objective_id,
             "content": self.content,
+            "status": self.status,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
+            "findings_count": self.findings_count,
+            "execution_trace_summary": self.execution_trace_summary,
         }
+
+
+class ObjectiveManager:
+    """
+    Manages multiple objectives within a single conversation session.
+
+    Supports sequential objective execution: when one objective completes,
+    the manager advances to the next pending objective. The LLM receives
+    context about completed objectives to maintain coherence.
+    """
+
+    def __init__(self):
+        self.objectives: List[ConversationObjective] = []
+        self.current_index: int = -1
+
+    def add(self, objective: str) -> ConversationObjective:
+        """Add a new objective to the queue. Auto-advances if none is current."""
+        obj = ConversationObjective(content=objective)
+        self.objectives.append(obj)
+        logger.info("ObjectiveManager: added objective '%s' (id=%s)", objective[:60], obj.objective_id)
+        if self.current_index == -1:
+            self.current_index = len(self.objectives) - 1
+            logger.debug("ObjectiveManager: auto-advanced to index %d", self.current_index)
+        return obj
+
+    def complete_current(self, summary: str) -> None:
+        """Mark the current objective as completed with a summary."""
+        obj = self.get_current()
+        if obj is None:
+            logger.warning("ObjectiveManager: no current objective to complete")
+            return
+        obj.status = "completed"
+        obj.completed_at = datetime.now(timezone.utc).isoformat()
+        obj.execution_trace_summary = summary
+        logger.info("ObjectiveManager: completed objective '%s' (id=%s)", obj.content[:60], obj.objective_id)
+
+    def fail_current(self, reason: str) -> None:
+        """Mark the current objective as failed."""
+        obj = self.get_current()
+        if obj is None:
+            return
+        obj.status = "failed"
+        obj.completed_at = datetime.now(timezone.utc).isoformat()
+        obj.execution_trace_summary = reason
+        logger.info("ObjectiveManager: failed objective '%s': %s", obj.content[:60], reason)
+
+    def get_current(self) -> Optional[ConversationObjective]:
+        """Return the current active objective, or None."""
+        if 0 <= self.current_index < len(self.objectives):
+            return self.objectives[self.current_index]
+        return None
+
+    def has_pending(self) -> bool:
+        """Return True if there are objectives that haven't started yet."""
+        for i, obj in enumerate(self.objectives):
+            if i > self.current_index and obj.status == "active":
+                return True
+        # Also true if current is completed/failed and there's a next one
+        current = self.get_current()
+        if current and current.status in ("completed", "failed"):
+            for obj in self.objectives[self.current_index + 1:]:
+                if obj.status == "active":
+                    return True
+        return False
+
+    def advance(self) -> Optional[ConversationObjective]:
+        """Advance to the next pending objective. Returns it, or None if no more."""
+        start = self.current_index + 1
+        for i in range(start, len(self.objectives)):
+            if self.objectives[i].status == "active":
+                self.current_index = i
+                logger.info("ObjectiveManager: advanced to objective %d '%s'",
+                            i, self.objectives[i].content[:60])
+                return self.objectives[i]
+        logger.debug("ObjectiveManager: no more pending objectives")
+        return None
+
+    def get_history_prompt(self) -> str:
+        """Build an LLM context string summarizing completed/failed objectives."""
+        completed = [o for o in self.objectives if o.status in ("completed", "failed")]
+        if not completed:
+            return ""
+
+        lines = ["## Previous Objectives"]
+        for i, obj in enumerate(completed, 1):
+            status_tag = "COMPLETED" if obj.status == "completed" else "FAILED"
+            lines.append(f"  {i}. [{status_tag}] {obj.content}")
+            if obj.execution_trace_summary:
+                lines.append(f"     Summary: {obj.execution_trace_summary}")
+            if obj.findings_count > 0:
+                lines.append(f"     Findings: {obj.findings_count}")
+        return "\n".join(lines)
+
+    def increment_findings(self) -> None:
+        """Increment findings_count on the current objective."""
+        obj = self.get_current()
+        if obj:
+            obj.findings_count += 1
+
+    def to_list_of_dicts(self) -> List[dict]:
+        """Serialize all objectives for state persistence."""
+        return [o.to_dict() for o in self.objectives]
+
+    def load_from_dicts(self, items: List[dict], current_index: int = -1) -> None:
+        """Restore objectives from state dicts."""
+        self.objectives = []
+        for d in items:
+            self.objectives.append(ConversationObjective(
+                objective_id=d.get("objective_id", uuid.uuid4().hex[:8]),
+                content=d.get("content", ""),
+                status=d.get("status", "active"),
+                created_at=d.get("created_at", datetime.now(timezone.utc).isoformat()),
+                completed_at=d.get("completed_at"),
+                findings_count=d.get("findings_count", 0),
+                execution_trace_summary=d.get("execution_trace_summary", ""),
+            ))
+        self.current_index = current_index
 
 
 @dataclass
@@ -352,8 +598,13 @@ def create_initial_state(
         "chain_failures": [],      # what didn't work and why
         "chain_decisions": [],     # reasoning for major decisions
 
-        # Current objective
+        # Current objective (legacy single-objective field)
         "objective": ConversationObjective(content=objective).to_dict(),
+
+        # Multi-objective support (G1)
+        "conversation_objectives": [ConversationObjective(content=objective).to_dict()],
+        "current_objective_index": 0,
+        "objective_history_prompt": "",
 
         # Approval flow (phase transitions)
         "awaiting_approval": False,
