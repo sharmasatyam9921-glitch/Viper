@@ -8,10 +8,8 @@ Falls back to networkx+SQLite when Neo4j is unavailable.
 
 import json
 import os
-import queue
 import sqlite3
 import logging
-import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
@@ -739,24 +737,11 @@ class GraphEngine:
     Provides high-level methods for populating graph from recon/scan/exploit data.
     """
 
-    _SENTINEL = object()  # Poison pill for clean shutdown
-
     def __init__(self, db_path: str = None, project_id: str = "default", user_id: str = "viper"):
         self.project_id = project_id
         self.user_id = user_id
         self._backend = self._select_backend(db_path)
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="graph")
-
-        # Background write queue
-        self._async_writes_enabled = True
-        self._write_queue: queue.Queue = queue.Queue()
-        self._writer_thread = threading.Thread(
-            target=self._writer_loop, name="graph-writer", daemon=True,
-        )
-        self._writer_thread.start()
-        self._write_errors: List[Exception] = []
-        self._write_lock = threading.Lock()
-
         logger.info(f"GraphEngine initialized: {self._backend.stats().get('backend', 'unknown')}")
 
     def _select_backend(self, db_path: str = None) -> GraphBackend:
@@ -1115,116 +1100,11 @@ class GraphEngine:
         vis_edges = [{"from": e["from"], "to": e["to"], "title": e.get("rel", ""), "arrows": "to"} for e in graph_data["edges"]]
         return {"nodes": vis_nodes, "edges": vis_edges}
 
-    # ── Background write queue ──
+    # ── Async fire-and-forget writes ──
 
-    @property
-    def async_writes_enabled(self) -> bool:
-        """Whether write_async queues writes or falls through to synchronous."""
-        return self._async_writes_enabled
-
-    @async_writes_enabled.setter
-    def async_writes_enabled(self, value: bool):
-        self._async_writes_enabled = value
-
-    def write_async(self, method_name: str, *args, **kwargs):
-        """
-        Queue a graph write for background execution.
-
-        When async_writes_enabled is True, the call is pushed onto the write
-        queue and executed by the background writer thread.  When False, the
-        method is invoked synchronously on the calling thread.
-
-        Args:
-            method_name: Name of a method on this GraphEngine instance
-                         (e.g. "add_node", "add_finding", "link").
-            *args, **kwargs: Forwarded to the resolved method.
-        """
-        method = getattr(self, method_name, None)
-        if method is None:
-            raise AttributeError(f"GraphEngine has no method '{method_name}'")
-
-        if not self._async_writes_enabled:
-            return method(*args, **kwargs)
-
-        self._write_queue.put((method_name, args, kwargs))
-
-    def _writer_loop(self):
-        """Background thread that drains the write queue sequentially."""
-        while True:
-            item = self._write_queue.get()
-            if item is self._SENTINEL:
-                self._write_queue.task_done()
-                break
-            method_name, args, kwargs = item
-            try:
-                method = getattr(self, method_name)
-                method(*args, **kwargs)
-            except Exception as exc:
-                logger.error(f"Background graph write failed ({method_name}): {exc}")
-                with self._write_lock:
-                    self._write_errors.append(exc)
-            finally:
-                self._write_queue.task_done()
-
-    def flush(self, timeout: float = None):
-        """
-        Block until the write queue is fully drained.
-
-        Call this at hunt end to ensure all queued graph writes have been
-        persisted before generating reports or shutting down.
-
-        Args:
-            timeout: Max seconds to wait. None means wait forever.
-
-        Raises:
-            TimeoutError: If the queue is not drained within *timeout*.
-        """
-        if timeout is None:
-            self._write_queue.join()
-        else:
-            done = threading.Event()
-
-            def _watch():
-                self._write_queue.join()
-                done.set()
-
-            watcher = threading.Thread(target=_watch, daemon=True)
-            watcher.start()
-            if not done.wait(timeout=timeout):
-                raise TimeoutError(
-                    f"Graph write queue not drained within {timeout}s "
-                    f"({self._write_queue.qsize()} items remaining)"
-                )
-
-    def drain_errors(self) -> List[Exception]:
-        """Return and clear any errors from background writes."""
-        with self._write_lock:
-            errs = list(self._write_errors)
-            self._write_errors.clear()
-        return errs
-
-    @property
-    def pending_writes(self) -> int:
-        """Approximate number of queued writes waiting to execute."""
-        return self._write_queue.qsize()
-
-    def shutdown(self):
-        """
-        Flush pending writes, stop the writer thread, and release resources.
-
-        Blocks until the queue is empty, then sends a poison pill to the
-        writer thread and waits for it to exit.
-        """
-        # Drain all pending work first
-        self._write_queue.join()
-        # Send poison pill
-        self._write_queue.put(self._SENTINEL)
-        self._writer_thread.join(timeout=5)
-        # Persist and close
-        self.save()
-        self._executor.shutdown(wait=False)
-        self._backend.close()
-        logger.info("GraphEngine shutdown complete")
+    def write_async(self, fn, *args, **kwargs):
+        """Submit a graph write to background thread."""
+        self._executor.submit(fn, *args, **kwargs)
 
     # ── Persistence ──
 
@@ -1234,8 +1114,10 @@ class GraphEngine:
             self._backend._save_to_sqlite()
 
     def close(self):
-        """Shutdown graph engine (delegates to shutdown for clean teardown)."""
-        self.shutdown()
+        """Shutdown graph engine."""
+        self.save()
+        self._executor.shutdown(wait=False)
+        self._backend.close()
 
     def __enter__(self):
         return self

@@ -9,14 +9,11 @@ When an LLM is available, the Thought step uses it to reason about context.
 Falls back to ViperBrain's Q-learning when LLM is unavailable or rate-limited.
 """
 
-import asyncio
-import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.agent_state import TodoList, ObjectiveManager
@@ -119,10 +116,6 @@ class ReACTEngine:
         self._traces: List[ReACTTrace] = []
         self.evograph = None  # Set externally by ViperCore
         self._evograph_session_id = None  # Set per hunt
-        self.failure_analyzer = None  # Set externally by ViperCore
-        # Chain failures memory: tracks failed attempts so LLM avoids repeating them
-        self._chain_failures: List[Dict[str, str]] = []
-        self._max_failures_in_context = 8  # Last N failures shown to LLM
         # LLM-managed todo list
         self.todo_list = TodoList()
         # G1: Multi-objective manager
@@ -133,50 +126,6 @@ class ReACTEngine:
         self._deep_think_triggered_at: Optional[int] = None  # Step number of last trigger
         # F5: Rules of Engagement enforcement
         self.roe_engine = roe_engine or RoEEngine()
-        # Phase 5: Skill-specific prompt injected by ViperCore after classification
-        self.skill_prompt: Optional[str] = None
-        # Guidance injection: human-in-the-loop during hunts
-        self._guidance_queue: List[str] = []
-        # Checkpointing: stop/resume hunts
-        self._checkpoint_dir = Path(__file__).parent.parent / "state"
-        self._checkpoint_interval = 5  # Save every N steps
-
-    def inject_guidance(self, message: str):
-        """Inject human guidance into the next ReACT step."""
-        self._guidance_queue.append(message)
-        self.log(f"Guidance queued: {message[:60]}...", "GUIDE")
-
-    def save_checkpoint(self, target: str, trace, context: dict,
-                        findings: list, tried_attacks: list, step_num: int):
-        """Save hunt state for resume."""
-        self._checkpoint_dir.mkdir(exist_ok=True)
-        h = hashlib.md5(target.encode()).hexdigest()[:12]
-        path = self._checkpoint_dir / f"checkpoint_{h}.json"
-        data = {
-            "target": target,
-            "step_num": step_num,
-            "context": {k: v for k, v in context.items()
-                        if isinstance(v, (str, int, float, bool, list, dict, type(None)))},
-            "findings": findings,
-            "tried_attacks": tried_attacks,
-            "chain_failures": self._chain_failures[-20:],
-            "timestamp": datetime.now().isoformat(),
-        }
-        path.write_text(json.dumps(data, default=str, indent=2))
-        self.log(f"Checkpoint saved at step {step_num}", "SAVE")
-
-    def load_checkpoint(self, target: str) -> Optional[dict]:
-        """Load saved hunt state for resume."""
-        h = hashlib.md5(target.encode()).hexdigest()[:12]
-        path = self._checkpoint_dir / f"checkpoint_{h}.json"
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                self.log(f"Checkpoint loaded from step {data.get('step_num', '?')}", "LOAD")
-                return data
-            except (json.JSONDecodeError, OSError):
-                pass
-        return None
 
     def log(self, msg: str, level: str = "INFO"):
         if self.verbose:
@@ -188,7 +137,6 @@ class ReACTEngine:
         target: str,
         context: Dict[str, Any],
         execute_fn: Callable,
-        resume: bool = False,
     ) -> ReACTTrace:
         """
         Run the full ReACT loop on a target.
@@ -197,7 +145,6 @@ class ReACTEngine:
             target: Target URL.
             context: Initial context dict (technologies, page_content, etc.).
             execute_fn: Async callable(url, attack_type, context) -> (reward, new_context, finding).
-            resume: If True, attempt to resume from a saved checkpoint.
 
         Returns:
             ReACTTrace with the full reasoning history.
@@ -206,24 +153,10 @@ class ReACTEngine:
         current_context = dict(context)
         findings: List[Dict] = []
         tried_attacks: List[str] = []
-        self._chain_failures = []  # Reset failures memory per hunt
-        start_step = 1
-
-        # Resume from checkpoint if requested
-        if resume:
-            checkpoint = self.load_checkpoint(target)
-            if checkpoint:
-                current_context.update(checkpoint.get("context", {}))
-                findings = checkpoint.get("findings", [])
-                tried_attacks = checkpoint.get("tried_attacks", [])
-                self._chain_failures = checkpoint.get("chain_failures", [])
-                start_step = checkpoint.get("step_num", 0) + 1
-                self.log(f"Resumed from step {start_step - 1} ({len(findings)} findings, "
-                         f"{len(tried_attacks)} tried)")
 
         self.log(f"Starting ReACT loop for {target} (max {self.max_steps} steps)")
 
-        for step_num in range(start_step, self.max_steps + 1):
+        for step_num in range(1, self.max_steps + 1):
             # ── DEEP THINK TRIGGER CHECK ──────────────────────────────
             deep_think_fired = False
             if self.think_engine:
@@ -296,50 +229,6 @@ class ReACTEngine:
                     tried_attacks=tried_attacks,
                     step_num=step_num,
                 )
-
-            # ── Wave execution: parallel probes ─────────────────────
-            if isinstance(action, list):
-                self.log(f"Step {step_num} | WAVE: {action}")
-                wave_results = await asyncio.gather(
-                    *[execute_fn(target, a, current_context) for a in action],
-                    return_exceptions=True,
-                )
-                combined_obs = []
-                wave_reward = 0.0
-                for a, result in zip(action, wave_results):
-                    tried_attacks.append(a)
-                    if isinstance(result, Exception):
-                        combined_obs.append(f"{a}: ERROR {result}")
-                        wave_reward -= 1.0
-                    else:
-                        r, ctx, f = result
-                        wave_reward += r
-                        obs = self._observe(a, r, f, ctx)
-                        combined_obs.append(f"{a}: {obs[:80]}")
-                        if f:
-                            findings.append(f)
-                        if r > 0:
-                            current_context = ctx  # Update context on success
-                observation = "WAVE RESULTS:\n" + "\n".join(combined_obs)
-                step = ReACTStep(
-                    step_num=step_num,
-                    thought=thought,
-                    action=f"wave({','.join(action)})",
-                    action_input={"target": target, "wave_size": len(action)},
-                    observation=observation,
-                    reward=wave_reward,
-                    llm_used=used_llm,
-                )
-                trace.add_step(step)
-                self.log(f"Step {step_num} | Wave reward: {wave_reward}")
-                if wave_reward <= 0:
-                    self._chain_failures.append({
-                        "step": step_num,
-                        "action": f"wave({','.join(action)})",
-                        "result": observation[:120],
-                    })
-                self.brain.update(current_context, action[0], wave_reward, current_context)
-                continue
 
             # ── Check if LLM explicitly requested deep_think action ───
             if action == "deep_think" and self.think_engine:
@@ -425,13 +314,6 @@ class ReACTEngine:
             # Auto-complete todo items matching the executed action
             if reward > 0:
                 self.todo_list.mark_completed_by_tool(action)
-            else:
-                # Record failure for chain memory — LLM sees this in next prompt
-                self._chain_failures.append({
-                    "step": step_num,
-                    "action": action,
-                    "result": observation[:120],
-                })
 
             # EvoGraph: record reasoning step
             if self.evograph and self._evograph_session_id:
@@ -443,25 +325,6 @@ class ReACTEngine:
                 except Exception:
                     pass
 
-            # Feedback: analyze consecutive failures for learning
-            if reward <= 0 and self.failure_analyzer and step_num >= 3:
-                _consec_fails = sum(1 for s in trace.steps[-3:] if s.reward <= 0)
-                if _consec_fails >= 3:
-                    try:
-                        lesson = await self.failure_analyzer.analyze({
-                            "attack_type": action,
-                            "target": target,
-                            "payload": "",
-                            "response_status": 0,
-                            "response_body": observation[:500],
-                            "response_headers": {},
-                            "rejection_reason": f"ReACT: {_consec_fails} consecutive failures",
-                        })
-                        if lesson and self.evograph:
-                            self.evograph.ingest_failure_lesson(lesson)
-                    except Exception:
-                        pass
-
             if finding:
                 findings.append(finding)
                 self.log(f"Step {step_num} | FINDING: {finding.get('type', 'unknown')}")
@@ -470,23 +333,13 @@ class ReACTEngine:
             self.brain.update(current_context, action, reward, new_context)
             current_context = new_context
 
-            # Checkpoint every N steps for stop/resume
-            if step_num % self._checkpoint_interval == 0:
-                try:
-                    self.save_checkpoint(target, trace, current_context,
-                                         findings, tried_attacks, step_num)
-                except Exception:
-                    pass
-
             # Early termination: high access achieved
             if current_context.get("access_level", 0) >= 3:
                 self.log(f"Target compromised at step {step_num}")
                 break
 
-            # Early termination: diminishing returns — require more evidence before stopping
-            # With avg -0.3/step, -10 threshold ≈ 33 failed steps; start checking after step 7
-            _dim_threshold = -10 if step_num >= 10 else -8
-            if step_num >= 7 and trace.total_reward <= _dim_threshold:
+            # Early termination: diminishing returns
+            if step_num >= 3 and trace.total_reward <= -5:
                 # Before stopping, try deep think one more time if available
                 if self.think_engine and not deep_think_fired:
                     self.log("Diminishing returns — attempting deep think before stopping")
@@ -545,28 +398,13 @@ class ReACTEngine:
                 target, context, findings, tried_attacks, step_num
             )
             if thought and action:
-                # Wave execution: LLM returned multiple actions
-                if isinstance(action, list):
-                    validated = []
-                    for a in action:
-                        if a in self.brain.attack_patterns:
-                            validated.append(a)
-                        else:
-                            m = self._fuzzy_match_attack(a)
-                            if m:
-                                validated.append(m)
-                    if len(validated) > 1:
-                        return thought, validated, True
-                    elif validated:
-                        return thought, validated[0], True
-                # Single action (default)
-                if isinstance(action, str) and action in self.brain.attack_patterns:
+                # Validate action exists in brain's patterns
+                if action in self.brain.attack_patterns:
                     return thought, action, True
                 # Try fuzzy match
-                if isinstance(action, str):
-                    matched = self._fuzzy_match_attack(action)
-                    if matched:
-                        return thought, matched, True
+                matched = self._fuzzy_match_attack(action)
+                if matched:
+                    return thought, matched, True
 
         # Fallback: Q-learning via ViperBrain
         action = self.brain.choose_attack(context)
@@ -596,19 +434,6 @@ class ReACTEngine:
         # Build objective history section
         obj_section = f"\n{objective_history}\n\n" if objective_history else "\n"
 
-        # Human guidance injection
-        guidance_section = ""
-        if self._guidance_queue:
-            guidance = self._guidance_queue.pop(0)
-            guidance_section = f"HUMAN GUIDANCE (prioritize this): {guidance}\n\n"
-
-        # Chain failures memory: show recent failures so LLM doesn't repeat them
-        failures_section = ""
-        if self._chain_failures:
-            recent = self._chain_failures[-self._max_failures_in_context:]
-            lines = [f"  - Step {f['step']}: {f['action']} → {f['result'][:80]}" for f in recent]
-            failures_section = "FAILED ATTEMPTS (do NOT retry these):\n" + "\n".join(lines) + "\n\n"
-
         prompt = (
             f"Target: {target}\n"
             f"Step: {step_num}/{self.max_steps}\n"
@@ -620,12 +445,9 @@ class ReACTEngine:
             f"Attacks tried: {tried_attacks[-10:]}\n"
             f"Findings: {json.dumps(findings[-5:], default=str)[:800]}\n"
             f"Available attacks: {available_attacks}\n\n"
-            f"{guidance_section}"
-            f"{failures_section}"
             f"{todo_context}\n"
             f"{obj_section}"
             "Reason about what to try next. Pick ONE action from the available attacks list.\n"
-            'For parallel probes, return "actions": ["action1", "action2"] instead of "action".\n'
             "You may also return an 'updated_todo_list' array of "
             '{"id": "...", "description": "...", "status": "pending|in_progress|completed|blocked", '
             '"priority": "high|medium|low"} to update the task tracker.'
@@ -636,9 +458,6 @@ class ReACTEngine:
         roe_section = self.roe_engine.to_prompt_section()
         if roe_section:
             system_prompt = system_prompt + "\n\n" + roe_section
-        # Phase 5: Inject skill-specific prompt for classified attack path
-        if self.skill_prompt:
-            system_prompt = system_prompt + "\n\n## Attack Skill Guidance\n" + self.skill_prompt
 
         try:
             response = await self.router.complete_for_task(
@@ -654,15 +473,8 @@ class ReACTEngine:
                     # Sync todo list from LLM response if present
                     if "updated_todo_list" in data and isinstance(data["updated_todo_list"], list):
                         self.todo_list.from_llm_response(data["updated_todo_list"])
-                    thought = data.get("thought", "")
-                    # Support wave execution: "actions": ["a", "b", "c"]
-                    actions = data.get("actions", [])
-                    if isinstance(actions, list) and len(actions) > 1:
-                        cleaned = [a.lower().replace("-", "_").replace(" ", "_") for a in actions]
-                        return thought, cleaned
-                    # Single action (default)
                     return (
-                        thought,
+                        data.get("thought", ""),
                         data.get("action", "").lower().replace("-", "_").replace(" ", "_"),
                     )
                 # Parse as plain text fallback

@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
-from .triage_queries import TRIAGE_QUERIES, run_triage_queries, run_all_triage
+from .triage_queries import TRIAGE_QUERIES, run_triage_queries
 
 logger = logging.getLogger("viper.triage_engine")
 
@@ -98,35 +98,17 @@ class TriageEngine:
         score *= finding.get('confidence', 0.5)
         return {'finding': finding, 'priority_score': score, 'action': 'investigate' if score > 5 else 'monitor'}
 
-    def deterministic_triage(self) -> dict:
-        """
-        Phase 2: Run 9 deterministic triage queries BEFORE LLM reasoning.
-
-        Returns a dict with all query results plus a Redamon-style risk
-        score (0-4000).  This runs fast, requires no LLM, and provides
-        the structured signal that the ReACT engine can consume directly.
-        """
-        if not self.graph:
-            logger.warning("No graph engine — skipping deterministic triage")
-            return {"risk_score": 0, "summary": {}}
-        return run_all_triage(self.graph)
-
     async def triage(self) -> List[RemediationDraft]:
         """
         Full triage pipeline (async, uses LLM if available):
 
-        1. Run 9 deterministic triage queries (Phase 2 — pre-LLM)
-        2. Run legacy triage queries for full data collection
+        1. Run 9 triage queries against graph
+        2. Collect raw findings
         3. LLM-correlate and deduplicate
         4. Prioritize into severity tiers (Emergency, Critical, High, Medium, Low)
         5. Return RemediationDraft list
         """
-        # Phase 2: Deterministic triage (runs BEFORE LLM)
-        det_results = self.deterministic_triage()
-        risk_score = det_results.get("risk_score", 0)
-        logger.info(f"Phase 2 deterministic triage: risk_score={risk_score}")
-
-        # Phase 1: Static collection (legacy queries for full data)
+        # Phase 1: Static collection
         logger.info("Phase 1: Running triage queries...")
         raw_data = run_triage_queries(self.graph)
         total_records = sum(r["count"] for r in raw_data)
