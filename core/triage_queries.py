@@ -700,3 +700,435 @@ def _run_cypher(graph_engine, query: str) -> List[Dict]:
             return [dict(record) for record in result]
     else:
         raise RuntimeError("Neo4j backend has no query method")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 — Deterministic Triage Queries (Redamon-style)
+#
+# 9 hardcoded graph queries that run BEFORE LLM reasoning.  Each function
+# accepts a GraphEngine and returns a list of dicts (findings / nodes).
+# Uses the public GraphEngine API: find(node_type, **filters), neighbors().
+# ══════════════════════════════════════════════════════════════════════════════
+
+from datetime import datetime, timedelta
+
+_VULN_PATTERNS = {
+    "sqli", "sql_injection", "xss", "cross-site scripting", "rce",
+    "remote code execution", "ssrf", "server-side request forgery",
+    "lfi", "rfi", "path_traversal", "open_redirect", "idor",
+    "command_injection", "deserialization", "xxe", "ssti",
+}
+
+_MISCONFIG_CATEGORIES = {
+    "cors", "csp", "missing-header", "x-frame-options",
+    "strict-transport-security", "content-security-policy",
+    "access-control", "misconfiguration", "header",
+}
+
+_ADMIN_KEYWORDS = {
+    "admin", "debug", "console", "phpmyadmin", "adminer",
+    "wp-admin", "manager", "dashboard", "cpanel", "webmin",
+    "actuator", "graphiql", "swagger", "api-docs", "_profiler",
+    "elmah", "trace.axd", "server-status", "server-info",
+}
+
+_WEAK_CIPHERS = {"sha1", "md5", "rc4", "des", "3des", "export"}
+_WEAK_KEY_BITS = 2048  # RSA keys below this are weak
+
+
+def query_endpoint_vulns(graph) -> List[Dict]:
+    """Find endpoints with known vulnerability patterns."""
+    vulns = graph.find("Vulnerability")
+    results = []
+    for v in vulns:
+        name_lower = (v.get("name", "") + " " + v.get("category", "")).lower()
+        if not any(p in name_lower for p in _VULN_PATTERNS):
+            continue
+        vid = v["id"]
+        endpoints = graph.neighbors(vid, rel_type="FOUND_AT")
+        params = graph.neighbors(vid, rel_type="AFFECTS_PARAMETER")
+        results.append({
+            "vuln_id": vid,
+            "name": v.get("name", ""),
+            "severity": v.get("severity", ""),
+            "category": v.get("category", ""),
+            "cvss_score": v.get("cvss_score"),
+            "endpoints": [
+                {"path": ep.get("path", ""), "method": ep.get("method", ""), "url": ep.get("url", "")}
+                for ep in endpoints
+            ],
+            "parameters": [
+                {"name": p.get("name", ""), "injectable": p.get("is_injectable", False)}
+                for p in params
+            ],
+        })
+    return results
+
+
+def query_cve_chains(graph) -> List[Dict]:
+    """Find CVE nodes linked to exploitable services."""
+    techs = graph.find("Technology")
+    results = []
+    for t in techs:
+        tid = t["id"]
+        cves = graph.neighbors(tid, rel_type="HAS_KNOWN_CVE")
+        if not cves:
+            continue
+        exploitable_cves = []
+        for c in cves:
+            cvss = c.get("cvss_score", c.get("cvss", 0))
+            exploits = graph.neighbors(c["id"], rel_type="EXPLOITED_CVE")
+            exploitable_cves.append({
+                "cve_id": c.get("cve_id", c.get("id", "")),
+                "cvss": cvss,
+                "has_exploit": len(exploits) > 0,
+                "exploit_count": len(exploits),
+            })
+        # Only include techs that actually have CVEs with exploits or high CVSS
+        has_exploit = any(cv["has_exploit"] for cv in exploitable_cves)
+        max_cvss = max((cv.get("cvss") or 0) for cv in exploitable_cves)
+        if has_exploit or max_cvss >= 7.0:
+            results.append({
+                "technology": t.get("name", ""),
+                "version": t.get("version", ""),
+                "cves": exploitable_cves,
+                "has_public_exploit": has_exploit,
+                "max_cvss": max_cvss,
+            })
+    return results
+
+
+def query_exposed_secrets(graph) -> List[Dict]:
+    """Find secret/credential nodes from recon."""
+    results = []
+    # GitHub secrets
+    repos = graph.find("GithubRepository")
+    for repo in repos:
+        rid = repo["id"]
+        paths = graph.neighbors(rid, rel_type="HAS_PATH")
+        for path in paths:
+            secrets = graph.neighbors(path["id"], rel_type="CONTAINS_SECRET")
+            for s in secrets:
+                results.append({
+                    "source": "github",
+                    "repo": repo.get("full_name", repo.get("name", "")),
+                    "path": path.get("path", ""),
+                    "secret_type": s.get("secret_type", ""),
+                    "severity": "critical",
+                })
+            sens_files = graph.neighbors(path["id"], rel_type="CONTAINS_SENSITIVE_FILE")
+            for sf in sens_files:
+                results.append({
+                    "source": "github_sensitive_file",
+                    "repo": repo.get("full_name", repo.get("name", "")),
+                    "path": sf.get("path", ""),
+                    "secret_type": sf.get("secret_type", ""),
+                    "severity": "high",
+                })
+    # Chain findings of type credential_found
+    cred_findings = graph.find("ChainFinding", finding_type="credential_found")
+    for cf in cred_findings:
+        results.append({
+            "source": "chain_finding",
+            "title": cf.get("title", ""),
+            "target_ip": cf.get("target_ip", ""),
+            "target_port": cf.get("target_port", ""),
+            "severity": cf.get("severity", "critical"),
+        })
+    return results
+
+
+def query_confirmed_exploits(graph) -> List[Dict]:
+    """Find nodes with confirmed exploit evidence."""
+    results = []
+    # ExploitGvm nodes
+    exploits = graph.find("ExploitGvm")
+    for ex in exploits:
+        cves = graph.neighbors(ex["id"], rel_type="EXPLOITED_CVE")
+        for c in cves:
+            techs = graph.neighbors(c["id"], rel_type="HAS_KNOWN_CVE")
+            results.append({
+                "exploit_id": ex.get("id", ""),
+                "source": ex.get("source", ""),
+                "cve_id": c.get("cve_id", c.get("id", "")),
+                "cvss": c.get("cvss_score", c.get("cvss")),
+                "affected_tech": [t.get("name", "") for t in techs],
+            })
+    # Chain findings with exploit_success
+    exploit_findings = graph.find("ChainFinding", finding_type="exploit_success")
+    for ef in exploit_findings:
+        results.append({
+            "exploit_id": ef.get("finding_id", ef.get("id", "")),
+            "source": "attack_chain",
+            "title": ef.get("title", ""),
+            "severity": ef.get("severity", ""),
+            "evidence": ef.get("evidence", ""),
+            "target_ip": ef.get("target_ip", ""),
+        })
+    return results
+
+
+def query_cert_issues(graph) -> List[Dict]:
+    """Find expired/weak TLS certificates."""
+    certs = graph.find("Certificate")
+    now = datetime.utcnow()
+    soon = now + timedelta(days=30)
+    results = []
+    for cert in certs:
+        issues = []
+        # Check expiry
+        not_after = cert.get("not_after")
+        if not_after:
+            try:
+                exp = datetime.fromisoformat(str(not_after).replace("Z", "+00:00")).replace(tzinfo=None)
+                if exp < now:
+                    issues.append("expired")
+                elif exp < soon:
+                    issues.append("expiring_soon")
+            except (ValueError, TypeError):
+                pass
+        # Check self-signed
+        if cert.get("self_signed"):
+            issues.append("self_signed")
+        # Check weak key
+        key_bits = cert.get("key_bits")
+        if key_bits and isinstance(key_bits, (int, float)) and key_bits < _WEAK_KEY_BITS:
+            issues.append(f"weak_key_{int(key_bits)}bit")
+        # Check weak signature algorithm
+        sig_alg = (cert.get("signature_algorithm") or "").lower()
+        if any(w in sig_alg for w in _WEAK_CIPHERS):
+            issues.append(f"weak_sig_{sig_alg}")
+        if issues:
+            # Find associated URLs
+            parents = graph.neighbors(cert["id"], rel_type="HAS_CERTIFICATE")
+            urls = [p.get("url", p.get("address", "")) for p in parents]
+            results.append({
+                "subject_cn": cert.get("subject_cn", ""),
+                "issues": issues,
+                "expires": str(not_after or ""),
+                "key_bits": key_bits,
+                "signature_algorithm": cert.get("signature_algorithm", ""),
+                "associated_urls": urls,
+            })
+    return results
+
+
+def query_misconfigurations(graph) -> List[Dict]:
+    """Find CORS, CSP, header misconfigs."""
+    vulns = graph.find("Vulnerability")
+    results = []
+    for v in vulns:
+        cat = (v.get("category", "") + " " + v.get("name", "")).lower()
+        source = (v.get("source") or "").lower()
+        if source == "security_check" or any(m in cat for m in _MISCONFIG_CATEGORIES):
+            parents = graph.neighbors(v["id"], rel_type="HAS_VULNERABILITY")
+            affected_url = parents[0].get("url", "") if parents else ""
+            results.append({
+                "vuln_id": v.get("id", ""),
+                "name": v.get("name", ""),
+                "category": v.get("category", ""),
+                "severity": v.get("severity", ""),
+                "description": v.get("description", ""),
+                "affected_url": affected_url,
+            })
+    return results
+
+
+def query_open_admin_panels(graph) -> List[Dict]:
+    """Find admin/debug endpoints."""
+    endpoints = graph.find("Endpoint")
+    results = []
+    for ep in endpoints:
+        path = (ep.get("path") or "").lower()
+        if any(kw in path for kw in _ADMIN_KEYWORDS):
+            # Resolve parent base URL
+            parents = graph.neighbors(ep["id"], rel_type="BELONGS_TO")
+            base_url = parents[0].get("url", "") if parents else ""
+            results.append({
+                "path": ep.get("path", ""),
+                "method": ep.get("method", ""),
+                "base_url": base_url,
+                "status_code": ep.get("status_code"),
+                "content_type": ep.get("content_type", ""),
+            })
+    # Also check BaseURL nodes for admin-like paths
+    base_urls = graph.find("BaseURL")
+    for bu in base_urls:
+        url = (bu.get("url") or "").lower()
+        if any(kw in url for kw in _ADMIN_KEYWORDS):
+            results.append({
+                "path": bu.get("url", ""),
+                "method": "GET",
+                "base_url": bu.get("url", ""),
+                "status_code": bu.get("status_code"),
+                "content_type": "",
+            })
+    return results
+
+
+def query_injectable_params(graph) -> List[Dict]:
+    """Find parameters marked injectable."""
+    params = graph.find("Parameter")
+    results = []
+    for p in params:
+        if p.get("is_injectable"):
+            # Find parent vulnerability or endpoint
+            parent_vulns = graph.neighbors(p["id"], rel_type="AFFECTS_PARAMETER")
+            parent_eps = graph.neighbors(p["id"], rel_type="HAS_PARAMETER")
+            results.append({
+                "name": p.get("name", ""),
+                "type": p.get("type", ""),
+                "injection_type": p.get("injection_type", ""),
+                "vuln_count": len(parent_vulns),
+                "endpoint_count": len(parent_eps),
+            })
+    return results
+
+
+def query_stale_technologies(graph) -> List[Dict]:
+    """Find outdated tech with known CVEs."""
+    techs = graph.find("Technology")
+    results = []
+    for t in techs:
+        tid = t["id"]
+        cves = graph.neighbors(tid, rel_type="HAS_KNOWN_CVE")
+        if not cves:
+            continue
+        version = t.get("version", "")
+        max_cvss = 0.0
+        cve_list = []
+        kev_count = 0
+        for c in cves:
+            cvss = c.get("cvss_score", c.get("cvss", 0)) or 0
+            if isinstance(cvss, str):
+                try:
+                    cvss = float(cvss)
+                except ValueError:
+                    cvss = 0.0
+            max_cvss = max(max_cvss, cvss)
+            if c.get("cisa_kev"):
+                kev_count += 1
+            cve_list.append(c.get("cve_id", c.get("id", "")))
+        results.append({
+            "technology": t.get("name", ""),
+            "version": version,
+            "cve_count": len(cves),
+            "max_cvss": max_cvss,
+            "kev_count": kev_count,
+            "cve_ids": cve_list[:10],  # cap for readability
+        })
+    # Sort by max CVSS descending
+    results.sort(key=lambda r: r["max_cvss"], reverse=True)
+    return results
+
+
+# ── Risk scoring (Redamon-style 0-4000) ──────────────────────────────────────
+
+def compute_risk_score(triage_results: dict) -> int:
+    """
+    Weighted risk score 0-4000 (Redamon-style).
+
+    Higher score = higher risk / more urgent triage.
+    """
+    score = 0
+    if triage_results.get("confirmed_exploits"):
+        score += 1200
+    if triage_results.get("public_exploits"):
+        score += 1000
+    if triage_results.get("credentials_found"):
+        score += 900
+    if triage_results.get("cisa_kev"):
+        score += 800
+    if triage_results.get("secrets_exposed"):
+        score += 500
+    score += len(triage_results.get("injectable_params", [])) * 100
+    score += len(triage_results.get("misconfigs", [])) * 50
+    return min(score, 4000)
+
+
+# ── Run all Phase 2 triage ────────────────────────────────────────────────────
+
+def run_all_triage(graph) -> dict:
+    """
+    Run all 9 deterministic triage queries and return combined results
+    with a Redamon-style risk score.
+
+    Args:
+        graph: GraphEngine instance
+
+    Returns:
+        dict with keys for each query result + 'risk_score' (0-4000)
+    """
+    results = {}
+
+    # 1. Endpoint vulns
+    endpoint_vulns = query_endpoint_vulns(graph)
+    results["endpoint_vulns"] = endpoint_vulns
+
+    # 2. CVE chains
+    cve_chains = query_cve_chains(graph)
+    results["cve_chains"] = cve_chains
+
+    # 3. Exposed secrets
+    secrets = query_exposed_secrets(graph)
+    results["secrets_exposed"] = secrets
+
+    # 4. Confirmed exploits
+    confirmed = query_confirmed_exploits(graph)
+    results["confirmed_exploits"] = confirmed
+
+    # 5. Cert issues
+    cert_issues = query_cert_issues(graph)
+    results["cert_issues"] = cert_issues
+
+    # 6. Misconfigurations
+    misconfigs = query_misconfigurations(graph)
+    results["misconfigs"] = misconfigs
+
+    # 7. Open admin panels
+    admin_panels = query_open_admin_panels(graph)
+    results["admin_panels"] = admin_panels
+
+    # 8. Injectable params
+    injectable = query_injectable_params(graph)
+    results["injectable_params"] = injectable
+
+    # 9. Stale technologies
+    stale_tech = query_stale_technologies(graph)
+    results["stale_technologies"] = stale_tech
+
+    # Derived flags for risk scoring
+    results["public_exploits"] = any(
+        cv.get("has_public_exploit") for cv in cve_chains
+    )
+    results["credentials_found"] = any(
+        s.get("source") == "chain_finding" for s in secrets
+    )
+    results["cisa_kev"] = any(
+        t.get("kev_count", 0) > 0 for t in stale_tech
+    )
+
+    # Compute risk score
+    results["risk_score"] = compute_risk_score(results)
+
+    # Summary counts
+    results["summary"] = {
+        "endpoint_vulns": len(endpoint_vulns),
+        "cve_chains": len(cve_chains),
+        "secrets_exposed": len(secrets),
+        "confirmed_exploits": len(confirmed),
+        "cert_issues": len(cert_issues),
+        "misconfigs": len(misconfigs),
+        "admin_panels": len(admin_panels),
+        "injectable_params": len(injectable),
+        "stale_technologies": len(stale_tech),
+        "risk_score": results["risk_score"],
+    }
+
+    logger.info(
+        f"Phase 2 triage complete: risk_score={results['risk_score']}, "
+        f"vulns={len(endpoint_vulns)}, exploits={len(confirmed)}, "
+        f"secrets={len(secrets)}, misconfigs={len(misconfigs)}"
+    )
+
+    return results

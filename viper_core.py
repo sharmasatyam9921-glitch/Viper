@@ -902,6 +902,38 @@ class ViperCore:
                 if gvm_res.get("phase"):
                     results["phases"]["gvm"] = gvm_res["phase"]
 
+            # Phase 4c: Attack Path Classification
+            # Classify the attack path from recon context and inject skill prompt
+            if classify_attack and get_skill_prompt and self._react_engine:
+                try:
+                    tech_list = list(target.technologies) if target.technologies else []
+                    param_list = list(target.parameters)[:10] if target.parameters else []
+                    endpoints = [f.get("url", "") for f in results["findings"][:5]]
+                    classification_objective = (
+                        f"Security test {target_url} — "
+                        f"technologies: {', '.join(tech_list[:8])}; "
+                        f"parameters: {', '.join(param_list[:8])}; "
+                        f"endpoints: {', '.join(endpoints[:5])}"
+                    )
+                    classification = await classify_attack(
+                        classification_objective,
+                        model_router=getattr(self._react_engine, 'router', None),
+                    )
+                    attack_type = (
+                        classification.attack_path_type
+                        if hasattr(classification, 'attack_path_type')
+                        else "cve_exploit"
+                    )
+                    self.log(f"  [Classify] Attack path: {attack_type} "
+                             f"(confidence={getattr(classification, 'confidence', '?')})")
+                    skill_prompt = get_skill_prompt(attack_type)
+                    if skill_prompt:
+                        self._react_engine.skill_prompt = skill_prompt
+                        self.log(f"  [Classify] Injected skill prompt for '{attack_type}' "
+                                 f"({len(skill_prompt)} chars)")
+                except Exception as e:
+                    self.log(f"  [Classify] Attack path classification failed: {e}", "WARN")
+
             # Phase 5: Manual Attacks
             remaining_seconds = (end_time - datetime.now()).total_seconds()
             manual_minutes = max(manual_min, remaining_seconds / 60.0)

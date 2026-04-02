@@ -9,6 +9,7 @@ When an LLM is available, the Thought step uses it to reason about context.
 Falls back to ViperBrain's Q-learning when LLM is unavailable or rate-limited.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -117,6 +118,9 @@ class ReACTEngine:
         self.evograph = None  # Set externally by ViperCore
         self._evograph_session_id = None  # Set per hunt
         self.failure_analyzer = None  # Set externally by ViperCore
+        # Chain failures memory: tracks failed attempts so LLM avoids repeating them
+        self._chain_failures: List[Dict[str, str]] = []
+        self._max_failures_in_context = 8  # Last N failures shown to LLM
         # LLM-managed todo list
         self.todo_list = TodoList()
         # G1: Multi-objective manager
@@ -127,6 +131,8 @@ class ReACTEngine:
         self._deep_think_triggered_at: Optional[int] = None  # Step number of last trigger
         # F5: Rules of Engagement enforcement
         self.roe_engine = roe_engine or RoEEngine()
+        # Phase 5: Skill-specific prompt injected by ViperCore after classification
+        self.skill_prompt: Optional[str] = None
 
     def log(self, msg: str, level: str = "INFO"):
         if self.verbose:
@@ -154,6 +160,7 @@ class ReACTEngine:
         current_context = dict(context)
         findings: List[Dict] = []
         tried_attacks: List[str] = []
+        self._chain_failures = []  # Reset failures memory per hunt
 
         self.log(f"Starting ReACT loop for {target} (max {self.max_steps} steps)")
 
@@ -230,6 +237,50 @@ class ReACTEngine:
                     tried_attacks=tried_attacks,
                     step_num=step_num,
                 )
+
+            # ── Wave execution: parallel probes ─────────────────────
+            if isinstance(action, list):
+                self.log(f"Step {step_num} | WAVE: {action}")
+                wave_results = await asyncio.gather(
+                    *[execute_fn(target, a, current_context) for a in action],
+                    return_exceptions=True,
+                )
+                combined_obs = []
+                wave_reward = 0.0
+                for a, result in zip(action, wave_results):
+                    tried_attacks.append(a)
+                    if isinstance(result, Exception):
+                        combined_obs.append(f"{a}: ERROR {result}")
+                        wave_reward -= 1.0
+                    else:
+                        r, ctx, f = result
+                        wave_reward += r
+                        obs = self._observe(a, r, f, ctx)
+                        combined_obs.append(f"{a}: {obs[:80]}")
+                        if f:
+                            findings.append(f)
+                        if r > 0:
+                            current_context = ctx  # Update context on success
+                observation = "WAVE RESULTS:\n" + "\n".join(combined_obs)
+                step = ReACTStep(
+                    step_num=step_num,
+                    thought=thought,
+                    action=f"wave({','.join(action)})",
+                    action_input={"target": target, "wave_size": len(action)},
+                    observation=observation,
+                    reward=wave_reward,
+                    llm_used=used_llm,
+                )
+                trace.add_step(step)
+                self.log(f"Step {step_num} | Wave reward: {wave_reward}")
+                if wave_reward <= 0:
+                    self._chain_failures.append({
+                        "step": step_num,
+                        "action": f"wave({','.join(action)})",
+                        "result": observation[:120],
+                    })
+                self.brain.update(current_context, action[0], wave_reward, current_context)
+                continue
 
             # ── Check if LLM explicitly requested deep_think action ───
             if action == "deep_think" and self.think_engine:
@@ -315,6 +366,13 @@ class ReACTEngine:
             # Auto-complete todo items matching the executed action
             if reward > 0:
                 self.todo_list.mark_completed_by_tool(action)
+            else:
+                # Record failure for chain memory — LLM sees this in next prompt
+                self._chain_failures.append({
+                    "step": step_num,
+                    "action": action,
+                    "result": observation[:120],
+                })
 
             # EvoGraph: record reasoning step
             if self.evograph and self._evograph_session_id:
@@ -420,13 +478,28 @@ class ReACTEngine:
                 target, context, findings, tried_attacks, step_num
             )
             if thought and action:
-                # Validate action exists in brain's patterns
-                if action in self.brain.attack_patterns:
+                # Wave execution: LLM returned multiple actions
+                if isinstance(action, list):
+                    validated = []
+                    for a in action:
+                        if a in self.brain.attack_patterns:
+                            validated.append(a)
+                        else:
+                            m = self._fuzzy_match_attack(a)
+                            if m:
+                                validated.append(m)
+                    if len(validated) > 1:
+                        return thought, validated, True
+                    elif validated:
+                        return thought, validated[0], True
+                # Single action (default)
+                if isinstance(action, str) and action in self.brain.attack_patterns:
                     return thought, action, True
                 # Try fuzzy match
-                matched = self._fuzzy_match_attack(action)
-                if matched:
-                    return thought, matched, True
+                if isinstance(action, str):
+                    matched = self._fuzzy_match_attack(action)
+                    if matched:
+                        return thought, matched, True
 
         # Fallback: Q-learning via ViperBrain
         action = self.brain.choose_attack(context)
@@ -456,6 +529,13 @@ class ReACTEngine:
         # Build objective history section
         obj_section = f"\n{objective_history}\n\n" if objective_history else "\n"
 
+        # Chain failures memory: show recent failures so LLM doesn't repeat them
+        failures_section = ""
+        if self._chain_failures:
+            recent = self._chain_failures[-self._max_failures_in_context:]
+            lines = [f"  - Step {f['step']}: {f['action']} → {f['result'][:80]}" for f in recent]
+            failures_section = "FAILED ATTEMPTS (do NOT retry these):\n" + "\n".join(lines) + "\n\n"
+
         prompt = (
             f"Target: {target}\n"
             f"Step: {step_num}/{self.max_steps}\n"
@@ -467,9 +547,11 @@ class ReACTEngine:
             f"Attacks tried: {tried_attacks[-10:]}\n"
             f"Findings: {json.dumps(findings[-5:], default=str)[:800]}\n"
             f"Available attacks: {available_attacks}\n\n"
+            f"{failures_section}"
             f"{todo_context}\n"
             f"{obj_section}"
             "Reason about what to try next. Pick ONE action from the available attacks list.\n"
+            'For parallel probes, return "actions": ["action1", "action2"] instead of "action".\n'
             "You may also return an 'updated_todo_list' array of "
             '{"id": "...", "description": "...", "status": "pending|in_progress|completed|blocked", '
             '"priority": "high|medium|low"} to update the task tracker.'
@@ -480,6 +562,9 @@ class ReACTEngine:
         roe_section = self.roe_engine.to_prompt_section()
         if roe_section:
             system_prompt = system_prompt + "\n\n" + roe_section
+        # Phase 5: Inject skill-specific prompt for classified attack path
+        if self.skill_prompt:
+            system_prompt = system_prompt + "\n\n## Attack Skill Guidance\n" + self.skill_prompt
 
         try:
             response = await self.router.complete_for_task(
@@ -495,8 +580,15 @@ class ReACTEngine:
                     # Sync todo list from LLM response if present
                     if "updated_todo_list" in data and isinstance(data["updated_todo_list"], list):
                         self.todo_list.from_llm_response(data["updated_todo_list"])
+                    thought = data.get("thought", "")
+                    # Support wave execution: "actions": ["a", "b", "c"]
+                    actions = data.get("actions", [])
+                    if isinstance(actions, list) and len(actions) > 1:
+                        cleaned = [a.lower().replace("-", "_").replace(" ", "_") for a in actions]
+                        return thought, cleaned
+                    # Single action (default)
                     return (
-                        data.get("thought", ""),
+                        thought,
                         data.get("action", "").lower().replace("-", "_").replace(" ", "_"),
                     )
                 # Parse as plain text fallback
