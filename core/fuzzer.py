@@ -11,13 +11,22 @@ Features:
 Author: VIPER Contributors
 """
 
+import asyncio
 import random
+import logging
+
+logger = logging.getLogger("viper.fuzzer")
 import string
 import base64
 import urllib.parse
 from typing import List, Dict, Generator, Optional, Callable
 from dataclasses import dataclass
 import itertools
+
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None  # type: ignore
 
 
 @dataclass
@@ -163,7 +172,7 @@ class PayloadMutator:
                 mutated = mutator(payload)
                 if mutated and mutated not in results:
                     results.append(mutated)
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
         
         return results
@@ -378,7 +387,11 @@ class SmartFuzzer:
 
             try:
                 response = await send_func(payload)
-            except Exception:
+            except (asyncio.TimeoutError, ConnectionError) as e:
+                logger.debug(f"Fuzz send_func network error for payload={payload!r}: {e}")
+                continue
+            except Exception as e:
+                logger.debug(f"Fuzz send_func failed for payload={payload!r}: {e}")
                 continue
 
             if self.is_interesting(response):
@@ -631,8 +644,8 @@ class GeneticFuzzer:
                     mutation = bp.get("mutation", "")
                     if mutation and mutation not in population:
                         population.append(mutation)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load evograph bypasses for attack_type={attack_type}: {e}")
 
         # Fill remaining slots with mutations
         while len(population) < self.population_size and base_payloads:
@@ -705,7 +718,11 @@ class GeneticFuzzer:
                             interesting=True,
                             reason=f"Fitness={score:.3f} (gen {gen})",
                         ))
-                except Exception:
+                except (asyncio.TimeoutError, ConnectionError) as e:
+                    logger.debug(f"Genetic fuzz network error for payload={payload!r}: {e}")
+                    scored.append((payload, 0.0))
+                except Exception as e:
+                    logger.debug(f"Genetic fuzz send_func failed for payload={payload!r}: {e}")
                     scored.append((payload, 0.0))
 
             if not scored:

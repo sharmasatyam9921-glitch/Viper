@@ -13,6 +13,9 @@ Features:
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("viper.surface_mapper")
 import json
 import re
 from datetime import datetime
@@ -210,7 +213,7 @@ class SurfaceMapper:
                         if any(marker in content.lower() for marker in 
                                ['swagger', 'openapi', 'api', 'endpoint', 'paths']):
                             return (url, content)
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
             return None
         
@@ -249,7 +252,7 @@ class SurfaceMapper:
                 version = spec['info'].get('version')
                 if version:
                     surface.version_info.append(f"API Version: {version}")
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     async def _crawl_and_analyze(self, target: str, surface: SurfaceMap, 
@@ -289,7 +292,7 @@ class SurfaceMapper:
                         for link in links:
                             if link not in self.visited_urls:
                                 to_visit.append((link, current_depth + 1))
-            except:
+            except Exception as e:  # noqa: BLE001
                 continue
     
     async def _analyze_page(self, url: str, body: str, surface: SurfaceMap):
@@ -464,7 +467,7 @@ class SurfaceMapper:
                                     'value': match[:100]  # Truncate
                                 })
                                 self.log(f"  [!] Potential secret in {js_url}", "VULN")
-            except:
+            except Exception as e:  # noqa: BLE001
                 continue
     
     async def _detect_graphql(self, target: str, surface: SurfaceMap):
@@ -499,7 +502,7 @@ class SurfaceMapper:
                                     'snippet': 'GraphQL introspection enabled'
                                 })
                                 self.log(f"  [!] GraphQL introspection enabled!", "VULN")
-            except:
+            except Exception as e:  # noqa: BLE001
                 continue
 
 

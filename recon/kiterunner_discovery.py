@@ -108,7 +108,7 @@ def _find_wordlist() -> Optional[str]:
     search_paths = [
         os.path.expanduser("~/.kiterunner"),
         os.path.expanduser("~/kiterunner"),
-        os.path.expanduser("~/.redamon/tools/kiterunner"),
+        os.path.expanduser("~/.viper/tools/kiterunner"),
         "/usr/share/kiterunner",
         "/opt/kiterunner",
     ]

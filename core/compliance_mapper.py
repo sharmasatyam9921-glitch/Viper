@@ -92,6 +92,11 @@ CWE_COMPLIANCE = {
         "pci_dss": "2.1 Default Passwords",
         "nist": "IA-5 Authenticator Management",
     },
+    "CWE-601": {  # Open Redirect
+        "owasp": "A01:2021 Broken Access Control",
+        "pci_dss": "6.5.8 Improper Access Control",
+        "nist": "SC-23 Session Authenticity",
+    },
 }
 
 # Vuln type → CWE mapping
@@ -111,6 +116,17 @@ VULN_TO_CWE = {
     "cors": "CWE-200", "cors_check": "CWE-200", "cors_misconfig": "CWE-200",
     "info_disclosure": "CWE-200",
     "secret_exposure": "CWE-798",
+    "js_secret": "CWE-798",
+    "hardcoded_secret": "CWE-798",
+    "api_key_exposure": "CWE-798",
+    "debug_endpoints": "CWE-200",
+    "info_leakage": "CWE-200",
+    "source_maps": "CWE-200",
+    "open_redirect": "CWE-601",
+    "open_redirect_basic": "CWE-601",
+    "lfi": "CWE-22",
+    "lfi_basic": "CWE-22",
+    "lfi_wrapper": "CWE-22",
 }
 
 

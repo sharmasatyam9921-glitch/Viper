@@ -153,16 +153,30 @@ class ViperDB:
         except sqlite3.IntegrityError:
             return None  # Duplicate
 
-    def is_duplicate(self, target_id: int, vuln_type: str, url: str, payload: str = None) -> Tuple[bool, Optional[int]]:
+    def is_duplicate(self, target_id: int, vuln_type: str, url: str,
+                     payload: str = None, session_start: str = None) -> Tuple[bool, Optional[int]]:
+        """Check for duplicate within the current scan session only.
+
+        session_start: ISO timestamp string — only findings found AFTER this
+        time are considered duplicates. Prevents old-session findings from
+        blocking new discoveries.
+        """
+        # Use current session window: findings from the last 2 hours by default
+        if not session_start:
+            from datetime import datetime, timedelta
+            session_start = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+
         if payload:
             row = self.conn.execute(
-                "SELECT id FROM findings WHERE target_id = ? AND vuln_type = ? AND url = ? AND payload = ?",
-                (target_id, vuln_type, url, payload),
+                "SELECT id FROM findings WHERE target_id = ? AND vuln_type = ? AND url = ? "
+                "AND payload = ? AND found_at >= ?",
+                (target_id, vuln_type, url, payload, session_start),
             ).fetchone()
         else:
             row = self.conn.execute(
-                "SELECT id FROM findings WHERE target_id = ? AND vuln_type = ? AND url = ?",
-                (target_id, vuln_type, url),
+                "SELECT id FROM findings WHERE target_id = ? AND vuln_type = ? AND url = ? "
+                "AND found_at >= ?",
+                (target_id, vuln_type, url, session_start),
             ).fetchone()
         if row:
             return True, row["id"]

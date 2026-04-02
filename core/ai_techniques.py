@@ -14,6 +14,9 @@ Updated: 2026-02-16
 """
 
 import json
+import logging
+
+logger = logging.getLogger("viper.ai_techniques")
 import random
 import base64
 import codecs
@@ -776,7 +779,7 @@ class CollectiveMemoryV2:
         if self.path.exists():
             try:
                 return json.loads(self.path.read_text())
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
         return {
             "techniques": {},

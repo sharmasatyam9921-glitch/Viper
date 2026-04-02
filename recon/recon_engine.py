@@ -10,6 +10,9 @@ Features:
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("viper.recon_engine")
 import json
 import os
 import random
@@ -151,7 +154,7 @@ class ReconEngine:
                     text=True
                 )
                 self.tools[tool] = result.returncode == 0
-            except:
+            except Exception as e:  # noqa: BLE001
                 self.tools[tool] = False
 
         self.log(f"Available tools: {[t for t, v in self.tools.items() if v]}")
@@ -298,9 +301,9 @@ class ReconEngine:
                     records['ZONE_TRANSFER'] = [str(n) for n in zone.nodes.keys()]
                     self.log(f"[!] Zone transfer successful from {ns}!", "VULN")
                     break
-                except:
+                except Exception as e:  # noqa: BLE001
                     pass
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
         
         return records
@@ -364,6 +367,8 @@ class ReconEngine:
                 except Exception as e:
                     self.log(f"  {name} failed: {e}", "WARN")
 
+        # Remove empty strings, error messages (contain spaces), and invalid hostnames
+        subdomains = {s for s in subdomains if s and ' ' not in s and len(s) < 253 and '.' in s}
         self.log(f"  Total unique subdomains found: {len(subdomains)}")
         return subdomains
     
@@ -377,7 +382,7 @@ class ReconEngine:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
             return set(stdout.decode().strip().split('\n'))
-        except:
+        except Exception as e:  # noqa: BLE001
             return set()
     
     async def _run_amass(self, domain: str) -> Set[str]:
@@ -390,7 +395,7 @@ class ReconEngine:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
             return set(stdout.decode().strip().split('\n'))
-        except:
+        except Exception as e:  # noqa: BLE001
             return set()
 
     async def _query_crtsh(self, domain: str) -> Set[str]:
@@ -473,7 +478,7 @@ class ReconEngine:
                     lambda: resolver.resolve(subdomain, 'A')
                 )
                 return subdomain
-            except:
+            except Exception as e:  # noqa: BLE001
                 return None
         
         # Check in batches
@@ -499,7 +504,7 @@ class ReconEngine:
                     async with self.session.head(url, allow_redirects=True) as resp:
                         if resp.status < 500:
                             return host
-                except:
+                except Exception as e:  # noqa: BLE001
                     pass
             return None
         
@@ -565,7 +570,7 @@ class ReconEngine:
                     open_ports.extend([int(p) for p in port_matches])
             
             return open_ports
-        except:
+        except Exception as e:  # noqa: BLE001
             return []
     
     async def _python_port_scan(self, host: str, ports: List[int]) -> List[int]:
@@ -577,7 +582,7 @@ class ReconEngine:
                 # Resolve hostname first
                 try:
                     ip = socket.gethostbyname(host)
-                except:
+                except Exception as e:  # noqa: BLE001
                     ip = host
                 
                 reader, writer = await asyncio.wait_for(
@@ -587,7 +592,7 @@ class ReconEngine:
                 writer.close()
                 await writer.wait_closed()
                 return port
-            except:
+            except Exception as e:  # noqa: BLE001
                 return None
         
         # Check in batches
@@ -639,7 +644,7 @@ class ReconEngine:
             
             if stdout:
                 return json.loads(stdout.decode().strip())
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
         return None
     
@@ -710,7 +715,7 @@ class ReconEngine:
                     tech_info["technologies"] = list(set(techs))
                     return tech_info
                     
-            except:
+            except Exception as e:  # noqa: BLE001
                 continue
         
         return None
@@ -944,7 +949,7 @@ class ReconEngine:
                     writer.close()
                     await writer.wait_closed()
                     return port
-                except:
+                except Exception as e:  # noqa: BLE001
                     return None
 
         tasks = [check_port(p) for p in self.TOP_100_PORTS]
@@ -976,7 +981,7 @@ class ReconEngine:
                     asyncio.open_connection(ip, port),
                     timeout=3
                 )
-            except:
+            except Exception as e:  # noqa: BLE001
                 return (port, None)
 
             info = {"service": "unknown", "version": "", "banner": ""}
@@ -1078,7 +1083,7 @@ class ReconEngine:
                 try:
                     writer.close()
                     await writer.wait_closed()
-                except:
+                except Exception as e:  # noqa: BLE001
                     pass
 
             return (port, info if info["banner"] or info["version"] else None)
@@ -1132,7 +1137,7 @@ class ReconEngine:
                             "content_type": content_type.split(';')[0].strip(),
                             "size": len(body),
                         }
-                except:
+                except Exception as e:  # noqa: BLE001
                     return None
 
         self.log(f"  API brute-force: {len(self.COMMON_API_PATHS)} paths against {base_url}")
@@ -1351,7 +1356,11 @@ class ReconEngine:
                         html = await resp.text()
                         headers = dict(resp.headers)
                         return self._run_wappalyzer(url, html, headers)
-            except Exception:
+            except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
+                logger.debug(f"Wappalyzer fetch failed for {url}: {e}")
+                continue
+            except Exception as e:
+                logger.debug(f"Unexpected error during Wappalyzer fetch for {url}: {e}")
                 continue
         return []
 

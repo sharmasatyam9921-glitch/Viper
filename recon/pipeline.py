@@ -135,6 +135,7 @@ class ReconResults:
     js_files: List[str] = field(default_factory=list)
     api_endpoints: List[Dict] = field(default_factory=list)
     parameters: Dict[str, List[str]] = field(default_factory=dict)
+    endpoints: List[str] = field(default_factory=list)
 
     # Phase 5 — Vulnerability Scanning
     vulnerabilities: List[Dict] = field(default_factory=list)
@@ -265,9 +266,21 @@ class ReconPipeline:
         """Submit a graph write to the background thread (deep-copy safe)."""
         if self._graph_executor is None:
             return
-        snap_a = [copy.deepcopy(a) for a in args]
-        snap_k = {k: copy.deepcopy(v) for k, v in kwargs.items()}
-        future = self._graph_executor.submit(fn, *snap_a, **snap_k)
+        # Deep-copy only JSON-serialisable data, skip unpicklable objects
+        # (graph engine, queue objects, etc.)
+        safe_args = []
+        for a in args:
+            try:
+                safe_args.append(copy.deepcopy(a))
+            except (TypeError, AttributeError):
+                safe_args.append(a)  # Pass reference if not copyable
+        safe_kwargs = {}
+        for k, v in kwargs.items():
+            try:
+                safe_kwargs[k] = copy.deepcopy(v)
+            except (TypeError, AttributeError):
+                safe_kwargs[k] = v
+        future = self._graph_executor.submit(fn, *safe_args, **safe_kwargs)
         self._graph_futures.append(future)
 
     def _graph_finish(self):
@@ -815,21 +828,17 @@ class ReconPipeline:
             tf = _write_targets_file(alive_hosts[:10])
             try:
                 out = await _run_tool(
-                    ["katana", "-list", tf, "-silent", "-json",
-                     "-depth", "3", "-js-crawl", "-known-files", "all"],
+                    ["katana", "-list", tf, "-silent",
+                     "-depth", "3", "-js-crawl"],
                     timeout=300,
                 )
                 if out:
                     for line in out.splitlines():
-                        try:
-                            j = json.loads(line)
-                            url = j.get("request", {}).get("endpoint", j.get("url", ""))
-                            if url:
-                                crawled.add(url)
-                                if url.endswith(".js"):
-                                    js_files.add(url)
-                        except json.JSONDecodeError:
-                            pass
+                        url = line.strip()
+                        if url and url.startswith("http"):
+                            crawled.add(url)
+                            if url.endswith(".js"):
+                                js_files.add(url)
             finally:
                 Path(tf).unlink(missing_ok=True)
         else:
@@ -879,9 +888,10 @@ class ReconPipeline:
         try:
             SurfaceMapper = _import_surface_mapper()
             mapper = SurfaceMapper()
-            for url in alive_hosts[:5]:
+            # Only map the primary host — viper_core Phase 3 handles full per-port mapping
+            for url in alive_hosts[:1]:
                 try:
-                    surface = await mapper.map_surface(url, max_depth=2, max_pages=50)
+                    surface = await mapper.map_surface(url, crawl_depth=2, max_pages=50)
                     api_endpoints.extend(getattr(surface, "api_endpoints", []))
                     for u, p_set in getattr(surface, "url_parameters", {}).items():
                         params[u] = list(p_set) if isinstance(p_set, set) else p_set
@@ -977,12 +987,12 @@ class ReconPipeline:
         try:
             NucleiScanner = _import_nuclei()
             scanner = NucleiScanner(verbose=True)
-            for url in alive_hosts[:20]:
+            for url in alive_hosts[:1]:
                 try:
                     sr = await scanner.scan(
                         url,
                         severity=self.settings.get(
-                            "nuclei_severity", "low,medium,high,critical"),
+                            "nuclei_severity", ["low", "medium", "high", "critical"]),
                         rate_limit=self.settings.get("nuclei_rate_limit", 100),
                     )
                     for f in sr.findings:
@@ -1000,7 +1010,7 @@ class ReconPipeline:
             tf = _write_targets_file(alive_hosts[:20])
             try:
                 out = await _run_tool(
-                    ["nuclei", "-l", tf, "-json", "-silent",
+                    ["nuclei", "-l", tf, "-jsonl", "-silent",
                      "-severity", "low,medium,high,critical",
                      "-rate-limit", "100"],
                     timeout=600,

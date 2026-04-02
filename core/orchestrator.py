@@ -444,7 +444,7 @@ class ViperOrchestrator:
             if asyncio.iscoroutinefunction(tool_fn):
                 output = await tool_fn(**tool_args)
             else:
-                output = await asyncio.get_event_loop().run_in_executor(None, lambda: tool_fn(**tool_args))
+                output = await asyncio.get_running_loop().run_in_executor(None, lambda: tool_fn(**tool_args))
             success = True
             error = None
         except Exception as exc:
@@ -523,7 +523,7 @@ class ViperOrchestrator:
                 if asyncio.iscoroutinefunction(fn):
                     out = await fn(**args)
                 else:
-                    out = await asyncio.get_event_loop().run_in_executor(None, lambda: fn(**args))
+                    out = await asyncio.get_running_loop().run_in_executor(None, lambda: fn(**args))
                 return {
                     "tool_name": name,
                     "tool_args": args,

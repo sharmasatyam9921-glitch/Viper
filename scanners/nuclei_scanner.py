@@ -152,7 +152,7 @@ class NucleiScanner:
                 path = result.stdout.strip().split('\n')[0]
                 self.log(f"Found nuclei: {path}")
                 return path
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
         
         # Check common paths
@@ -259,7 +259,11 @@ class NucleiScanner:
                 "tags": str(info.get("tags", "")),
                 "path": str(fpath),
             }
-        except Exception:
+        except (OSError, ValueError) as e:
+            logger.debug(f"Failed to parse nuclei template YAML {fpath}: {e}")
+            return None
+        except Exception as e:
+            logger.debug(f"Unexpected error parsing nuclei template {fpath}: {e}")
             return None
 
     def _parse_template_fallback(self, fpath: Path) -> Optional[Dict]:
@@ -267,7 +271,8 @@ class NucleiScanner:
         import re
         try:
             content = fpath.read_text(encoding="utf-8", errors="replace")[:4096]
-        except Exception:
+        except (OSError, ValueError) as e:
+            logger.debug(f"Failed to read nuclei template {fpath}: {e}")
             return None
 
         def _extract(key: str) -> str:
@@ -406,7 +411,7 @@ class NucleiScanner:
         cmd = [
             self.nuclei_path,
             '-u', target,
-            '-json',
+            '-jsonl',
             '-silent',
             '-rate-limit', str(rate_limit),
             '-stats',

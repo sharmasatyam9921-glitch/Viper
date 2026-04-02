@@ -321,27 +321,47 @@ class FindingValidator:
 
     async def _validate_ssrf(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
         """Verify SSRF by checking if internal content was returned."""
+        import urllib.parse as _up
         url = finding.get("url", target_url)
+        payload = finding.get("payload", "")
         result = await self.http.get(url)
         if result.status == 0:
             return False, 0.0, "Request failed"
 
         body = result.body.lower()
-        # Check for cloud metadata indicators
+
+        # Strip the payload URL from the body before checking — avoids URL-reflection FPs
+        # where the app echoes back the query string containing the metadata URL
+        if payload:
+            body = body.replace(payload.lower(), "").replace(
+                _up.quote(payload).lower(), ""
+            )
+        # Also strip the raw URL query string to remove ?content=http://169... reflections
+        parsed = _up.urlparse(url)
+        if parsed.query:
+            body = body.replace(parsed.query.lower(), "")
+
+        # Check for cloud metadata indicators (must appear in response BODY, not reflected URL)
+        # Only high-confidence markers: structured metadata responses, not just URL fragments
         metadata_indicators = [
-            "ami-id", "instance-id", "iam", "security-credentials",
-            "computeMetadata", "access_token", "instance/service-accounts",
-            "169.254.169.254", "metadata.google.internal",
+            ("ami-id", 0.9),
+            ("instance-id", 0.9),
+            ("iam", 0.7),
+            ("computeMetadata", 0.9),
+            ("access_token", 0.85),
+            ("instance/service-accounts", 0.9),
         ]
-        for indicator in metadata_indicators:
+        for indicator, conf in metadata_indicators:
             if indicator.lower() in body:
-                return True, 0.9, f"Cloud metadata indicator found: {indicator}"
+                return True, conf, f"Cloud metadata indicator found: {indicator}"
 
-        # Check for internal service response patterns
-        if any(x in body for x in ["localhost", "127.0.0.1", "internal"]):
-            return True, 0.5, "Internal host reference in response"
+        # Check for internal service response patterns (not URL-derived)
+        if "root:x:" in body or "ssh-" in body[:200]:
+            return True, 0.85, "File content / SSH banner in SSRF response"
+        if "redis_version" in body or "mongo" in body:
+            return True, 0.8, "Internal service banner in SSRF response"
 
-        return False, 0.2, "No SSRF indicators in response"
+        return False, 0.1, "No SSRF indicators in response body (URL reflection excluded)"
 
     async def _validate_cors(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
         """Verify CORS misconfiguration is actually exploitable."""

@@ -84,7 +84,20 @@ def main():
     parser.add_argument("--export", help="Export project data to ZIP file")
     parser.add_argument("--import-zip", dest="import_zip", help="Import project data from ZIP file")
     parser.add_argument("--project", default="default", help="Project ID for multi-project support")
+    parser.add_argument("--preflight-only", action="store_true", help="Run preflight checks and exit")
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip preflight checks")
     args = parser.parse_args()
+
+    # ── Preflight checks ──
+    if not args.skip_preflight:
+        from core.preflight import run_preflight
+        ok, report = run_preflight()
+        report.print_report()
+        if args.preflight_only:
+            sys.exit(0 if ok else 1)
+        if not ok:
+            print("❌ Critical preflight failures. Use --skip-preflight to bypass.")
+            sys.exit(1)
 
     if args.dashboard_only:
         from dashboard.server import main as dashboard_main

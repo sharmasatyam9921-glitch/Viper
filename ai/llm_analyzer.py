@@ -10,6 +10,9 @@ Integration with VIPER primary agent for:
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("viper.llm_analyzer")
 import json
 import os
 from datetime import datetime
@@ -143,7 +146,7 @@ class LLMAnalyzer:
         """Load analysis queue"""
         try:
             return json.loads(ANALYSIS_QUEUE_FILE.read_text())
-        except:
+        except Exception as e:  # noqa: BLE001
             return []
     
     def _save_queue(self, queue: List[Dict]):
@@ -154,7 +157,7 @@ class LLMAnalyzer:
         """Load analysis results"""
         try:
             return json.loads(ANALYSIS_RESULTS_FILE.read_text())
-        except:
+        except Exception as e:  # noqa: BLE001
             return {}
     
     def _save_results(self, results: Dict[str, Dict]):
@@ -333,7 +336,7 @@ class LLMAnalyzer:
                 req_time = datetime.fromisoformat(req.get('timestamp', ''))
                 if req_time > cutoff:
                     new_queue.append(req)
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
         
         self._save_queue(new_queue)

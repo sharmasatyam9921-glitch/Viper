@@ -144,7 +144,7 @@ class LogicModeler:
         )
 
         try:
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
             )

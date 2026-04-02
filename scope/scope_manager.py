@@ -10,6 +10,9 @@ Features:
 """
 
 import json
+import logging
+
+logger = logging.getLogger("viper.scope_manager")
 import re
 from datetime import datetime
 from pathlib import Path
@@ -102,7 +105,7 @@ class ScopeEntry:
                 network = ipaddress.ip_network(self.target, strict=False)
                 ip = ipaddress.ip_address(target_domain)
                 return ip in network
-            except:
+            except Exception as e:  # noqa: BLE001
                 return False
         
         return False

@@ -97,7 +97,7 @@ class RaceEngine:
             try:
                 data = payload.encode() if payload else None
                 req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
-                resp = await asyncio.get_event_loop().run_in_executor(
+                resp = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
                 )
@@ -172,7 +172,7 @@ class RaceEngine:
             t0 = time.monotonic()
             try:
                 req = urllib.request.Request(url, method=method, headers=hdrs)
-                await asyncio.get_event_loop().run_in_executor(
+                await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
                 )

@@ -34,9 +34,14 @@ class EvoGraph:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_tables()
+        self._init_schema_meta()
+        self._check_schema()
+        self._validate_schema()
 
     def _init_tables(self):
         self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
+
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 target TEXT NOT NULL,
@@ -100,6 +105,102 @@ class EvoGraph:
         """)
         self.conn.commit()
 
+    # ── Schema validation ──
+
+    SCHEMA_VERSION = 1
+
+    EXPECTED_TABLES = {
+        "sessions": {"id", "target", "tech_stack", "start_time", "end_time", "findings_count", "total_reward"},
+        "attack_history": {"id", "session_id", "attack_type", "target_tech", "success", "confidence", "reward", "reasoning", "timestamp"},
+        "tech_attack_map": {"id", "tech_signature", "attack_type", "attempts", "successes", "total_reward", "avg_reward"},
+        "q_snapshots": {"id", "session_id", "state_key", "action", "q_value"},
+        "reasoning_traces": {"id", "session_id", "step_num", "thought", "action", "observation", "reward", "timestamp"},
+    }
+
+    def _init_schema_meta(self):
+        """Create schema_meta table for version tracking."""
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        # Set version if not present
+        row = self.conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        if not row:
+            self.conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('version', ?)",
+                (str(self.SCHEMA_VERSION),)
+            )
+            self.conn.commit()
+
+    def _validate_schema(self):
+        """Verify all expected tables and columns exist."""
+        for table, expected_cols in self.EXPECTED_TABLES.items():
+            # Check table exists
+            exists = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)
+            ).fetchone()
+            if not exists:
+                logger.error("Schema validation failed: table '%s' missing", table)
+                raise RuntimeError(f"EvoGraph schema invalid: table '{table}' missing")
+
+            # Check columns
+            columns = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            actual_cols = {col["name"] for col in columns}
+            missing = expected_cols - actual_cols
+            if missing:
+                logger.warning(
+                    "Schema validation: table '%s' missing columns %s (may need migration)",
+                    table, missing,
+                )
+
+    def _check_schema(self):
+        """Read schema version from schema_meta and run migrations if needed."""
+        row = self.conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        if not row:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)",
+                (str(self.SCHEMA_VERSION),),
+            )
+            self.conn.commit()
+            return
+        stored = int(row["value"])
+        if stored < self.SCHEMA_VERSION:
+            # No migrations needed yet for v1
+            logger.info("EvoGraph schema migration: v%d → v%d", stored, self.SCHEMA_VERSION)
+        elif stored > self.SCHEMA_VERSION:
+            logger.warning(
+                "EvoGraph schema version %d is newer than supported version %d — "
+                "some features may not work correctly",
+                stored, self.SCHEMA_VERSION,
+            )
+
+    def validate_schema(self) -> bool:
+        """Verify each of the 5 main tables exists with expected columns.
+
+        Returns True if all tables present with expected columns, False otherwise.
+        """
+        for table, expected_cols in self.EXPECTED_TABLES.items():
+            rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            if not rows:
+                logger.warning("validate_schema: table '%s' missing", table)
+                return False
+            actual_cols = {col["name"] for col in rows}
+            missing = expected_cols - actual_cols
+            if missing:
+                logger.warning(
+                    "validate_schema: table '%s' missing columns %s", table, missing
+                )
+                return False
+        return True
+
+    def get_schema_version(self) -> int:
+        """Return current schema version."""
+        row = self.conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        return int(row["value"]) if row else 0
+
     # ── Session lifecycle ──
 
     def start_session(self, target_url: str, tech_stack: List[str]) -> int:
@@ -135,7 +236,7 @@ class EvoGraph:
     def is_duplicate_finding(self, target: str, vuln_type: str, url: str) -> bool:
         """Check if this finding was already recorded in a previous session."""
         cursor = self.conn.execute(
-            "SELECT COUNT(*) FROM attacks WHERE target_tech LIKE ? AND attack_type=? AND success=1",
+            "SELECT COUNT(*) FROM attack_history WHERE target_tech LIKE ? AND attack_type=? AND success=1",
             (f"%{target}%", vuln_type)
         )
         return cursor.fetchone()[0] > 0

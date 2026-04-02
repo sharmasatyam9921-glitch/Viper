@@ -130,15 +130,56 @@ class TargetGuardrail:
         return True, reason
 
     def validate_target_sync(self, target: str) -> Tuple[bool, str]:
-        """Synchronous version of validate_target (no LLM assessment)."""
+        """Synchronous version of validate_target (no LLM assessment).
+
+        Works both inside and outside an existing event loop.
+        """
         import asyncio
-        loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(
-                self.validate_target(target, model_router=None)
-            )
-        finally:
-            loop.close()
+            # If we're already in an async context, we can't use run_until_complete
+            loop = asyncio.get_running_loop()
+            # Inside async context — run the sync-safe path directly
+            return self._validate_target_direct(target)
+        except RuntimeError:
+            # No running loop — safe to create one
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(
+                    self.validate_target(target, model_router=None)
+                )
+            finally:
+                loop.close()
+
+    def _validate_target_direct(self, target: str) -> Tuple[bool, str]:
+        """Direct synchronous validation (no async, no LLM)."""
+        domain = self._extract_domain(target)
+        if not domain:
+            return False, f"Could not parse target: {target}"
+
+        # Check allowlist
+        for pattern in self.allowlist:
+            if pattern in domain.lower():
+                return True, f"Target matches allowlist pattern: {pattern}"
+
+        # Check blocklist
+        domain_lower = domain.lower()
+        tld = domain_lower.rsplit(".", 1)[-1] if "." in domain_lower else ""
+        for blocked in self.blocklist:
+            blocked_l = blocked.lower()
+            if tld == blocked_l or f".{blocked_l}." in f".{domain_lower}.":
+                return False, f"Target domain '{domain}' matches blocklist entry: {blocked}"
+
+        # Check private IPs
+        try:
+            import ipaddress
+            ip = ipaddress.ip_address(domain)
+            for net in self._private_nets:
+                if ip in net:
+                    return True, f"Target is a private IP ({net})"
+        except ValueError:
+            pass
+
+        return True, "Target allowed (default permit)"
 
     def validate(self, target: str) -> Tuple[bool, str]:
         """Backward-compatible sync validate (alias for validate_target_sync)."""

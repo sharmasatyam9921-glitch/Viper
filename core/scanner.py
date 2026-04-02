@@ -12,6 +12,9 @@ Author: VIPER Contributors
 """
 
 import urllib.request
+import logging
+
+logger = logging.getLogger("viper.scanner")
 import urllib.parse
 import urllib.error
 import ssl
@@ -99,7 +102,7 @@ class HTTPScanner:
             body = ""
             try:
                 body = e.read().decode('utf-8', errors='ignore')
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
             
             return ScanResult(

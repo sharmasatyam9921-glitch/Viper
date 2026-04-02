@@ -123,7 +123,7 @@ class OAuthFuzzer:
             req = urllib.request.Request(url, method="GET", headers={
                 "User-Agent": "VIPER-OAuthFuzzer/1.0",
             })
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
             )
@@ -188,7 +188,7 @@ class OAuthFuzzer:
                 req = urllib.request.Request(url, method="GET", headers={
                     "User-Agent": "VIPER-OAuthFuzzer/1.0",
                 })
-                resp = await asyncio.get_event_loop().run_in_executor(
+                resp = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda r=req: urllib.request.urlopen(r, timeout=self.timeout, context=self._ssl_ctx),
                 )
@@ -229,7 +229,7 @@ class OAuthFuzzer:
             req = urllib.request.Request(self.redirect_uri, headers={
                 "User-Agent": "VIPER-OAuthFuzzer/1.0",
             })
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
             )
@@ -290,7 +290,7 @@ class OAuthFuzzer:
             req = urllib.request.Request(url, method="GET", headers={
                 "User-Agent": "VIPER-OAuthFuzzer/1.0",
             })
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
             )
@@ -335,7 +335,7 @@ class OAuthFuzzer:
             req = urllib.request.Request(url, method="GET", headers={
                 "User-Agent": "VIPER-OAuthFuzzer/1.0",
             })
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
             )
@@ -389,7 +389,7 @@ class OAuthFuzzer:
                     "Authorization": f"Bearer {token}",
                     "User-Agent": "VIPER-OAuthFuzzer/1.0",
                 })
-                resp = await asyncio.get_event_loop().run_in_executor(
+                resp = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda r=req: urllib.request.urlopen(r, timeout=self.timeout, context=self._ssl_ctx),
                 )
@@ -442,7 +442,7 @@ class OAuthFuzzer:
                 "Content-Type": "application/x-www-form-urlencoded",
                 "User-Agent": "VIPER-OAuthFuzzer/1.0",
             })
-            resp = await asyncio.get_event_loop().run_in_executor(
+            resp = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx),
             )

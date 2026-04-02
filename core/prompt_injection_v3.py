@@ -17,6 +17,9 @@ Author: VIPER Contributors
 """
 
 import base64
+import logging
+
+logger = logging.getLogger("viper.prompt_injection_v3")
 import random
 import json
 from dataclasses import dataclass
@@ -382,7 +385,7 @@ class AdaptiveInjector:
         try:
             with open(self.knowledge_file) as f:
                 return json.load(f)
-        except:
+        except Exception as e:  # noqa: BLE001
             return {
                 "targets": {},
                 "effective_patterns": [],
