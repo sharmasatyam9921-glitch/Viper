@@ -455,6 +455,7 @@ class ViperCore:
                 self.log(f"[EvoGraph] Init failed: {e}", "WARN")
 
         # VIPER 3.0: Phase-aware execution engine
+        # (FailureAnalyzer wired to ReACT after init, see below)
         self.phase_engine = None
         if PHASE_ENGINE_AVAILABLE:
             try:
@@ -608,6 +609,9 @@ class ViperCore:
             try:
                 self.failure_analyzer = FailureAnalyzer()
                 self.log("[FailureAnalyzer] Loaded (%d historical lessons)" % len(self.failure_analyzer.lessons), "INFO")
+                # Wire to ReACT engine for real-time failure learning
+                if self._react_engine:
+                    self._react_engine.failure_analyzer = self.failure_analyzer
             except Exception as e:
                 self.log(f"[FailureAnalyzer] Init failed: {e}", "WARN")
 
@@ -944,7 +948,45 @@ class ViperCore:
         """Extract domain from URL"""
         from core.utils import extract_domain
         return extract_domain(url)
-    
+
+    async def _feed_failure(self, attack_type: str, target_url: str,
+                            payload: str, status: int, body: str,
+                            headers: dict, rejection_reason: str = ""):
+        """Feed a failed/rejected attack attempt into the learning pipeline.
+
+        Connects: FailureAnalyzer → EvoGraph.failure_lessons → Q-learning penalty.
+        """
+        # 1. FailureAnalyzer: get structured lesson
+        if self.failure_analyzer:
+            try:
+                lesson = await self.failure_analyzer.analyze({
+                    "attack_type": attack_type,
+                    "target": target_url,
+                    "payload": payload,
+                    "response_status": status,
+                    "response_body": body,
+                    "response_headers": headers,
+                    "rejection_reason": rejection_reason,
+                })
+                # 2. Persist lesson to EvoGraph
+                if lesson and self.evograph:
+                    self.evograph.ingest_failure_lesson(lesson)
+                    self.log(f"  [Learn] Failure lesson: {getattr(lesson, 'failure_reason', 'analyzed')}", "DEBUG")
+            except Exception as e:
+                self.log(f"  [Learn] Failure analysis error: {e}", "DEBUG")
+
+        # 3. Penalize in EvoGraph attack history (negative reward)
+        if self.evograph and self._evograph_session_id:
+            try:
+                techs = list(self.current_target.technologies) if self.current_target else []
+                self.evograph.record_attack(
+                    self._evograph_session_id, attack_type, techs,
+                    success=False, confidence=0.0, reward=-1.0,
+                    reasoning=f"FP rejected: {rejection_reason}",
+                )
+            except Exception:
+                pass
+
     # =====================
     # ORIGINAL HUNT METHOD
     # =====================
@@ -1207,6 +1249,12 @@ class ViperCore:
                         if confidence < 0.4:
                             self.log(f"  [FP] {attack_name} rejected: confidence={confidence:.2f} — {reason}")
                             self.metrics["false_positives_caught"] = self.metrics.get("false_positives_caught", 0) + 1
+                            # Feedback loop: analyze failure for future learning
+                            await self._feed_failure(
+                                attack_name, target.url, payload,
+                                status, body[:500], dict(resp_headers) if 'resp_headers' in dir() else {},
+                                reason,
+                            )
                             continue
                         candidate["validation"] = reason
                         self.metrics["validated_findings"] = self.metrics.get("validated_findings", 0) + 1
@@ -1246,6 +1294,32 @@ class ViperCore:
                         self.log(f"  [POC] Saved: {poc_path.name}")
                     except (OSError, AttributeError) as e:
                         self.log(f"  [POC] Save failed: {e}", "WARN")
+
+                # Feedback: correlate across targets for pattern detection
+                if self.cross_correlator:
+                    try:
+                        similar = self.cross_correlator.correlate_finding({
+                            "vuln_type": attack_name,
+                            "target_url": target.url,
+                            "technologies": list(target.technologies),
+                        })
+                        if similar:
+                            candidate["similar_targets"] = [s.target_url for s in similar[:5]]
+                            self.log(f"  [Correlator] {len(similar)} similar targets found")
+                    except Exception as e:
+                        self.log(f"  [Correlator] Error: {e}", "DEBUG")
+
+                # Feedback: record success to EvoGraph
+                if self.evograph and self._evograph_session_id:
+                    try:
+                        self.evograph.record_attack(
+                            self._evograph_session_id, attack_name,
+                            list(target.technologies), success=True,
+                            confidence=candidate.get("confidence", 0.5),
+                            reward=10.0,
+                        )
+                    except Exception:
+                        pass
 
                 return True, candidate
 
@@ -1695,6 +1769,18 @@ class ViperCore:
             except Exception as e:
                 self.log(f"[EvoGraph] end_session failed: {e}", "WARN")
             self._evograph_session_id = None
+
+        # Log learning summary
+        if self.failure_analyzer and self.failure_analyzer.lessons:
+            new_lessons = len(self.failure_analyzer.lessons)
+            self.log(f"[Learn] {new_lessons} failure lessons accumulated", "INFO")
+        if self.cross_correlator:
+            try:
+                patterns = getattr(self.cross_correlator, '_correlation_count', 0)
+                if patterns:
+                    self.log(f"[Learn] {patterns} cross-target correlations detected", "INFO")
+            except Exception:
+                pass
 
         # VIPER 3.0: Save attack graph to DB
         if enable_graph and self.attack_graph and len(self.attack_graph) > 0:

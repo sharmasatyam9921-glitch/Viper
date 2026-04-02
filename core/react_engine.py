@@ -116,6 +116,7 @@ class ReACTEngine:
         self._traces: List[ReACTTrace] = []
         self.evograph = None  # Set externally by ViperCore
         self._evograph_session_id = None  # Set per hunt
+        self.failure_analyzer = None  # Set externally by ViperCore
         # LLM-managed todo list
         self.todo_list = TodoList()
         # G1: Multi-objective manager
@@ -325,6 +326,25 @@ class ReACTEngine:
                 except Exception:
                     pass
 
+            # Feedback: analyze consecutive failures for learning
+            if reward <= 0 and self.failure_analyzer and step_num >= 3:
+                _consec_fails = sum(1 for s in trace.steps[-3:] if s.reward <= 0)
+                if _consec_fails >= 3:
+                    try:
+                        lesson = await self.failure_analyzer.analyze({
+                            "attack_type": action,
+                            "target": target,
+                            "payload": "",
+                            "response_status": 0,
+                            "response_body": observation[:500],
+                            "response_headers": {},
+                            "rejection_reason": f"ReACT: {_consec_fails} consecutive failures",
+                        })
+                        if lesson and self.evograph:
+                            self.evograph.ingest_failure_lesson(lesson)
+                    except Exception:
+                        pass
+
             if finding:
                 findings.append(finding)
                 self.log(f"Step {step_num} | FINDING: {finding.get('type', 'unknown')}")
@@ -338,8 +358,10 @@ class ReACTEngine:
                 self.log(f"Target compromised at step {step_num}")
                 break
 
-            # Early termination: diminishing returns
-            if step_num >= 3 and trace.total_reward <= -5:
+            # Early termination: diminishing returns — require more evidence before stopping
+            # With avg -0.3/step, -10 threshold ≈ 33 failed steps; start checking after step 7
+            _dim_threshold = -10 if step_num >= 10 else -8
+            if step_num >= 7 and trace.total_reward <= _dim_threshold:
                 # Before stopping, try deep think one more time if available
                 if self.think_engine and not deep_think_fired:
                     self.log("Diminishing returns — attempting deep think before stopping")
