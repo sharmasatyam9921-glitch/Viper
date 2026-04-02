@@ -4,6 +4,9 @@ HackAgent - Hunt a target with LIVE dashboard updates
 """
 
 import requests
+import logging
+
+logger = logging.getLogger("viper.hunt_target")
 import json
 import re
 import time
@@ -229,7 +232,7 @@ def main():
             if "Store" in layout_str:
                 log("🎯 Found client-side data stores", "found")
                 
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     r = req("GET", TARGET + "/_dash-dependencies")
@@ -245,7 +248,7 @@ def main():
                 f"Exposes {len(deps)} callback definitions",
                 "Reveals app structure to attackers"
             )
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     # ==================== SCAN ====================

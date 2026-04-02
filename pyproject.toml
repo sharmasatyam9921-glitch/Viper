@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks integration tests",
+]
+
+[tool.coverage.run]
+source = ["core"]
+omit = ["tests/*", "archive/*", "dashboard/*"]

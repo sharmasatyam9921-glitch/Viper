@@ -122,7 +122,14 @@ SANITIZE_REPORT.txt
 data/mitre_db/
 
 # VIPER 5.0 exclusions
-archive/
+archive/hunt_sessions/
+archive/natas/
+archive/prompt-injection-toolkit/
+archive/pentagi-study/
+!archive/old_entry_points/
+!archive/old_dashboards/
+!archive/old_agents/
+!archive/old_modules/
 recon/current_targets.txt
 recon/robinhood_subs.txt
 recon/superbet_targets.txt

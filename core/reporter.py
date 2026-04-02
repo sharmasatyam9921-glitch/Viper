@@ -14,27 +14,9 @@ import json
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 
-
-@dataclass
-class Finding:
-    """A single vulnerability finding."""
-    id: str
-    title: str
-    severity: str  # critical, high, medium, low, info
-    cvss: float
-    vulnerability_type: str
-    endpoint: str
-    parameter: Optional[str]
-    payload: Optional[str]
-    evidence: str
-    impact: str
-    remediation: str
-    references: List[str]
-    
-    def to_dict(self) -> Dict:
-        return asdict(self)
+from .models import Finding
 
 
 class ReportGenerator:

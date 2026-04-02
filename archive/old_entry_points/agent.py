@@ -453,28 +453,58 @@ class HackAgent:
         return "An attacker could exploit this vulnerability to compromise security."
     
     def _generate_poc(self, finding: Finding) -> str:
-        """Generate proof of concept."""
-        poc = f"""# Proof of Concept - {finding.title}
+        """Generate proof of concept using VIPER's PoC generator."""
+        try:
+            from core.poc_generator import PoCGenerator
+            gen = PoCGenerator()
 
-## Request
-```http
-# TODO: Add actual PoC request
-GET /vulnerable-endpoint HTTP/1.1
-Host: {finding.affected_asset}
+            # Map Finding dataclass to poc_generator's expected dict format
+            finding_dict = {
+                "type": finding.vulnerability_type,
+                "url": finding.affected_asset,
+                "payload": finding.steps_to_reproduce[0] if finding.steps_to_reproduce else "",
+                "evidence": finding.description,
+                "marker": "",
+                "cvss": finding.cvss or 0.0,
+            }
+
+            # generate() returns standalone Python script code
+            poc_script = gen.generate(finding_dict)
+
+            # Also generate curl command
+            curl_cmd = gen.generate_curl(finding_dict)
+
+            return f"""# Proof of Concept - {finding.title}
+
+## Automated PoC Script (Python)
+```python
+{poc_script}
 ```
 
-## Response
-```
-# Expected vulnerable response demonstrating the issue
-```
-
-## Automated Reproduction
+## Quick Reproduction (curl)
 ```bash
-# curl command or script to reproduce
-curl -X GET "{finding.affected_asset}/vulnerable-endpoint"
+{curl_cmd}
 ```
+
+## Steps to Reproduce
+{chr(10).join(f"{i+1}. {step}" for i, step in enumerate(finding.steps_to_reproduce)) if finding.steps_to_reproduce else "See automated script above."}
 """
-        return poc
+        except (ImportError, Exception):
+            # Fallback to basic template if poc_generator unavailable
+            steps = "\n".join(f"{i+1}. {s}" for i, s in enumerate(finding.steps_to_reproduce)) if finding.steps_to_reproduce else "1. Navigate to the affected URL"
+            return f"""# Proof of Concept - {finding.title}
+
+## Target
+- **Asset:** {finding.affected_asset}
+- **Type:** {finding.vulnerability_type}
+- **Severity:** {finding.severity}
+
+## Steps to Reproduce
+{steps}
+
+## Impact
+{finding.impact}
+"""
     
     def _generate_report(self, finding: Finding) -> str:
         """Generate a professional bug bounty report."""

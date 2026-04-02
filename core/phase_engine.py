@@ -9,19 +9,11 @@ and ensures thorough reconnaissance before attacking.
 
 import logging
 import time
-from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
+from .models import Phase
+
 logger = logging.getLogger("viper.phase_engine")
-
-
-class Phase(str, Enum):
-    """Attack workflow phases in execution order."""
-    RECON = "RECON"
-    SURFACE = "SURFACE"
-    SCAN = "SCAN"
-    EXPLOIT = "EXPLOIT"
-    POST_EXPLOIT = "POST_EXPLOIT"
 
 
 # Phase ordering for comparison

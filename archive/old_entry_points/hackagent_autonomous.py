@@ -5,6 +5,9 @@ Continuous penetration testing and vulnerability discovery
 """
 
 import json
+import logging
+
+logger = logging.getLogger("viper.hackagent_autonomous")
 import time
 import requests
 import re
@@ -294,7 +297,7 @@ class HackAgentAutonomous:
             if sentinel.get("defcon_history"):
                 recent = sentinel["defcon_history"][-1]
                 self.log(f"Sentinel DEFCON: {recent.get('level', 5)}", "INTEL")
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     def report_to_sentinel(self):

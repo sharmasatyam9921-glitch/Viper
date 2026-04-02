@@ -7,6 +7,9 @@ Runs end-to-end: scan → analyze → chain → exploit → report
 """
 
 import json
+import logging
+
+logger = logging.getLogger("viper.attack_chain")
 import asyncio
 import socket
 import ssl
@@ -16,45 +19,9 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
 from pathlib import Path
-from enum import Enum
 import re
 
-
-class Severity(Enum):
-    CRITICAL = 5
-    HIGH = 4
-    MEDIUM = 3
-    LOW = 2
-    INFO = 1
-
-
-@dataclass
-class Finding:
-    """A single vulnerability finding."""
-    target: str
-    vuln_type: str
-    severity: Severity
-    title: str
-    description: str
-    evidence: str
-    payload: Optional[str] = None
-    remediation: str = ""
-    cvss: float = 0.0
-    cwe: str = ""
-    
-    def to_dict(self) -> dict:
-        return {
-            "target": self.target,
-            "type": self.vuln_type,
-            "severity": self.severity.name,
-            "title": self.title,
-            "description": self.description,
-            "evidence": self.evidence,
-            "payload": self.payload,
-            "remediation": self.remediation,
-            "cvss": self.cvss,
-            "cwe": self.cwe
-        }
+from .models import Finding, Severity
 
 
 @dataclass
@@ -92,12 +59,12 @@ class PortScanner:
                 try:
                     sock.send(b"HEAD / HTTP/1.0\r\n\r\n")
                     banner = sock.recv(1024).decode('utf-8', errors='ignore')[:200]
-                except:
+                except Exception as e:  # noqa: BLE001
                     pass
                 sock.close()
                 return (port, True, banner)
             sock.close()
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
         return (port, False, "")
     
@@ -321,7 +288,7 @@ class VulnScanner:
                                     remediation="Encode output using context-appropriate encoding",
                                     cwe="CWE-79"
                                 )
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
         return None
 
@@ -363,8 +330,8 @@ class VulnScannerSQLi:
                                 cwe="CWE-89",
                                 cvss=9.8
                             )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"SQLi probe failed for {url} param={param} payload={payload}: {e}")
         return None
 
 
@@ -404,8 +371,8 @@ class VulnScannerSSTI:
                             cwe="CWE-1336",
                             cvss=9.8
                         )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"SSTI probe failed for {url} param={param} payload={payload}: {e}")
         return None
 
 
@@ -444,8 +411,8 @@ class VulnScannerSSRF:
                                 cwe="CWE-918",
                                 cvss=8.6
                             )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"SSRF probe failed for {url} param={param} payload={payload}: {e}")
         return None
 
 

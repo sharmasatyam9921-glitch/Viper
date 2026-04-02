@@ -1,5 +1,7 @@
 # VIPER Core Modules
 
+from .models import Finding, Severity, Phase, Target
+
 from .ai_techniques import (
     EncodingEngine,
     PromptInjectionEngineV2 as PromptInjectionEngine,
@@ -22,7 +24,6 @@ from .scanner import (
 
 from .reporter import (
     ReportGenerator,
-    Finding,
     create_finding_from_template,
     FINDING_TEMPLATES,
 )
@@ -35,6 +36,12 @@ from .fuzzer import (
 )
 
 __all__ = [
+    # Models
+    'Finding',
+    'Severity',
+    'Phase',
+    'Target',
+
     # AI Techniques
     'EncodingEngine',
     'PromptInjectionEngine',

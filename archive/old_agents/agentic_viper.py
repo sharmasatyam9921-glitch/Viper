@@ -17,6 +17,9 @@ Author: VIPER Contributors
 """
 
 import json
+import logging
+
+logger = logging.getLogger("viper.agentic_viper")
 import re
 import time
 import hashlib
@@ -48,7 +51,7 @@ class Memory:
         if self.path.exists():
             try:
                 return json.loads(self.path.read_text())
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
         return {
             "successful_attacks": [],
@@ -149,7 +152,7 @@ class Tools:
     def decode_base64(s: str) -> str:
         try:
             return base64.b64decode(s).decode('utf-8', errors='ignore')
-        except:
+        except Exception as e:  # noqa: BLE001
             return ""
     
     @staticmethod
@@ -160,7 +163,7 @@ class Tools:
     def decode_hex(s: str) -> str:
         try:
             return bytes.fromhex(s).decode('utf-8', errors='ignore')
-        except:
+        except Exception as e:  # noqa: BLE001
             return ""
     
     @staticmethod

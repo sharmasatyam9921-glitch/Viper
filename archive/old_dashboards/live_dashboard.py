@@ -5,6 +5,9 @@ Uses a shared state file that the scanner updates
 """
 
 import http.server
+import logging
+
+logger = logging.getLogger("viper.live_dashboard")
 import socketserver
 import json
 import os
@@ -19,7 +22,7 @@ def get_state():
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     return {
         "phase": "idle",

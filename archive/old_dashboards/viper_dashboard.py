@@ -17,6 +17,9 @@ Shows:
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("viper.viper_dashboard")
 import json
 import os
 from datetime import datetime
@@ -46,7 +49,7 @@ def load_json(path: Path, default=None):
     if path.exists():
         try:
             return json.loads(path.read_text())
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     return default or {}
 
@@ -214,7 +217,7 @@ def get_reports(page=1, per_page=20, search=None):
         stat = f.stat()
         try:
             content = f.read_text(encoding='utf-8', errors='ignore')[:1000]
-        except:
+        except Exception as e:  # noqa: BLE001
             content = ""
         
         # Count severities

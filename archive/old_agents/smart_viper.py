@@ -11,6 +11,9 @@ VIPER that:
 """
 
 import json
+import logging
+
+logger = logging.getLogger("viper.smart_viper")
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -574,7 +577,7 @@ class SmartVIPER(AgenticVIPER):
                     pwd_match = re.search(r'password for natas\d+ is (\w+)', resp)
                     if pwd_match:
                         return {"success": True, "password": pwd_match.group(1), "decoded": final}
-            except:
+            except Exception as e:  # noqa: BLE001
                 pass
         
         return {"success": False}

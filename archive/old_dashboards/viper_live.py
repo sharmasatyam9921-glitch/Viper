@@ -5,6 +5,9 @@ Port 8889 - No SENTINEL (that's on 8888)
 """
 
 import asyncio
+import logging
+
+logger = logging.getLogger("viper.viper_live")
 import json
 import sys
 from datetime import datetime
@@ -368,7 +371,7 @@ async def get_viper_status():
             capture_output=True, text=True, timeout=5
         )
         status['viper']['running'] = 'viper_core' in result.stdout or len(result.stdout.strip()) > 0
-    except:
+    except Exception as e:  # noqa: BLE001
         pass
     
     # Load metrics
@@ -390,9 +393,9 @@ async def get_viper_status():
                         hours, rem = divmod(int(delta.total_seconds()), 3600)
                         mins, _ = divmod(rem, 60)
                         status['viper']['uptime'] = f"{hours}h {mins}m"
-                    except:
+                    except Exception as e:  # noqa: BLE001
                         pass
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     # Load targets
@@ -404,7 +407,7 @@ async def get_viper_status():
                 targets = data if isinstance(data, list) else data.get('targets', [])
                 status['targets'] = targets[:10]
                 status['viper']['target_count'] = len(targets)
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     # Load recent findings from knowledge
@@ -415,7 +418,7 @@ async def get_viper_status():
                 knowledge = json.load(f)
                 vulns = knowledge.get('vulnerabilities', [])
                 status['findings'] = vulns[-20:] if vulns else []
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     # Load recent logs
@@ -426,7 +429,7 @@ async def get_viper_status():
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
                 status['logs'] = [l.strip() for l in lines[-50:] if l.strip()]
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     
     status['timestamp'] = datetime.now().isoformat()
@@ -450,7 +453,7 @@ async def handle_findings(request):
             with open(knowledge_file) as f:
                 knowledge = json.load(f)
                 findings = knowledge.get('vulnerabilities', [])
-        except:
+        except Exception as e:  # noqa: BLE001
             pass
     return web.json_response({'findings': findings})
 

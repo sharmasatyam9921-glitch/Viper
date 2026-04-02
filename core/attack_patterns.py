@@ -8,15 +8,8 @@ Not just payloads - full attack methodologies.
 
 from dataclasses import dataclass
 from typing import List, Dict, Optional
-from enum import Enum
 
-
-class Severity(Enum):
-    CRITICAL = "critical"
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-    INFO = "informational"
+from .models import Severity
 
 
 @dataclass

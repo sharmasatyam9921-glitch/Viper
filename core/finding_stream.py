@@ -32,6 +32,7 @@ class NotificationConfig:
     email_from: str = ""
     email_to: str = ""
     email_password: str = ""
+    clawdbot_gateway: str = ""  # Clawdbot gateway URL for Telegram relay
 
     @classmethod
     def from_env(cls) -> "NotificationConfig":
@@ -45,6 +46,7 @@ class NotificationConfig:
             email_from=os.environ.get("SMTP_FROM", ""),
             email_to=os.environ.get("SMTP_TO", ""),
             email_password=os.environ.get("SMTP_PASSWORD", ""),
+            clawdbot_gateway=os.environ.get("CLAWDBOT_GATEWAY", ""),
         )
 
 
@@ -97,6 +99,8 @@ class FindingStream:
             tasks.append(self._send_telegram(finding))
         if self.config.email_from and self.config.email_to:
             tasks.append(self._send_email([finding], subject_prefix="URGENT"))
+        if self.config.clawdbot_gateway:
+            tasks.append(self._send_clawdbot(finding))
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -197,7 +201,7 @@ class FindingStream:
                 url, data=data, method="POST",
                 headers={"Content-Type": "application/json"},
             )
-            await asyncio.get_event_loop().run_in_executor(
+            await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: urllib.request.urlopen(req, timeout=10, context=self._ssl_ctx),
             )
@@ -225,6 +229,20 @@ class FindingStream:
         }
 
         await self._webhook_post(url, payload)
+
+    # ── Clawdbot Gateway ──
+
+    async def _send_clawdbot(self, finding: dict) -> None:
+        """Send finding to Clawdbot gateway for Telegram relay."""
+        if not self.config.clawdbot_gateway:
+            return
+        severity = finding.get("severity", "info").upper()
+        vuln = finding.get("vuln_type", finding.get("type", "unknown"))
+        url = finding.get("target_url", finding.get("url", "N/A"))
+        msg = f"VIPER Finding [{severity}]\nType: {vuln}\nURL: {url}"
+        payload = {"text": msg, "priority": "high" if severity in ("CRITICAL", "HIGH") else "normal"}
+        gateway = self.config.clawdbot_gateway.rstrip("/")
+        await self._webhook_post(f"{gateway}/api/notify", payload)
 
     # ── Email ──
 
@@ -256,7 +274,7 @@ class FindingStream:
                     server.login(self.config.email_from, self.config.email_password)
                     server.send_message(msg)
 
-            await asyncio.get_event_loop().run_in_executor(None, _send)
+            await asyncio.get_running_loop().run_in_executor(None, _send)
             logger.info("Email sent: %s", subject)
         except Exception as exc:
             logger.debug("Email send failed: %s", exc)
