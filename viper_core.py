@@ -152,6 +152,7 @@ _ml.register("recon.pipeline", "ReconPipeline")
 # MCP & tools
 _ml.register("tools.mcp_tools", "MCPToolInterface")
 _ml.register("tools.msf_persistent", "PersistentMsfConsole")
+_ml.register("tools.playwright_tool", "PlaywrightTool")
 
 # Attack modules (v5.0)
 _ml.register("core.agent_bus", "AgentBus", "Priority")
@@ -214,6 +215,7 @@ HUMAN_TIMING_AVAILABLE = _ml.available("HumanTimingProfile")
 CHAIN_OF_CUSTODY_AVAILABLE = _ml.available("ChainOfCustody")
 CVSS4_AVAILABLE = _ml.available("CvssV4Score")
 FINDING_STREAM_AVAILABLE = _ml.available("FindingStream")
+PLAYWRIGHT_AVAILABLE = _ml.available("PlaywrightTool")
 
 # ── Convenience accessors for loaded modules ──
 # These replace the direct imports (e.g., `ReconEngine` → `_ml.get("ReconEngine")`)
@@ -311,6 +313,7 @@ run_triage_queries = _ml.get("run_triage_queries")
 shodan_enrich = _ml.get("enrich_ip_sync")
 CvssV4Score = _ml.get("CvssV4Score")
 calculate_cvss4 = _ml.get("calculate_cvss4")
+PlaywrightTool = _ml.get("PlaywrightTool")
 
 
 class ViperCore:

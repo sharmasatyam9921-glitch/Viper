@@ -2719,6 +2719,76 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response({"error": str(e)}, status=500)
 
+        # ── Template Upload ────────────────────────────────────────
+        elif path == "/api/templates/upload":
+            try:
+                import yaml
+                if content_length > 102400:  # 100KB limit
+                    self._json_response({"error": "File too large (max 100KB)"}, status=413)
+                    return
+                template_dir = HACKAGENT_DIR / "data" / "nuclei" / "custom"
+                template_dir.mkdir(parents=True, exist_ok=True)
+                tpl = yaml.safe_load(body)
+                if not isinstance(tpl, dict) or "id" not in tpl:
+                    self._json_response({"error": "Invalid Nuclei template: missing 'id'"}, status=400)
+                    return
+                info = tpl.get("info", {})
+                tpl_id = tpl["id"]
+                # Sanitize filename
+                safe_name = "".join(c for c in tpl_id if c.isalnum() or c in "-_") + ".yaml"
+                (template_dir / safe_name).write_bytes(body)
+                self._json_response({
+                    "status": "ok",
+                    "template": {"id": tpl_id, "name": info.get("name", ""), "severity": info.get("severity", ""), "file": safe_name},
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/templates":
+            # List templates (POST for filter support)
+            try:
+                import yaml
+                template_dir = HACKAGENT_DIR / "data" / "nuclei" / "custom"
+                templates = []
+                if template_dir.exists():
+                    for f in sorted(template_dir.glob("*.yaml")):
+                        try:
+                            tpl = yaml.safe_load(f.read_text(encoding="utf-8"))
+                            info = tpl.get("info", {}) if isinstance(tpl, dict) else {}
+                            templates.append({"id": tpl.get("id", f.stem), "name": info.get("name", ""), "severity": info.get("severity", ""), "file": f.name})
+                        except Exception:
+                            templates.append({"id": f.stem, "name": f.stem, "severity": "unknown", "file": f.name})
+                self._json_response({"templates": templates})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        # ── Project Management ────────────────────────────────────
+        elif path == "/api/projects":
+            try:
+                from core.project_manager import ProjectManager
+                pm = ProjectManager()
+                data = json.loads(body) if body else {}
+                pid = pm.create(
+                    name=data.get("name", "Untitled"),
+                    target=data.get("target", ""),
+                    scope=data.get("scope"),
+                    settings=data.get("settings"),
+                    notes=data.get("notes", ""),
+                )
+                self._json_response({"status": "ok", "project_id": pid})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path.startswith("/api/projects/") and path.endswith("/activate"):
+            try:
+                from core.project_manager import ProjectManager
+                pm = ProjectManager()
+                pid = int(path.split("/")[3])
+                pm.set_current(pid)
+                self._json_response({"status": "ok", "active_project": pid})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
         else:
             self.send_error(404)
 
@@ -2766,6 +2836,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/triage/findings":
             self._json_response(get_triage_findings())
+
+        # ── Project Management (GET) ──
+        elif path == "/api/projects":
+            try:
+                from core.project_manager import ProjectManager
+                pm = ProjectManager()
+                status = qp("status", "active")
+                projects = pm.list_all(status=status)
+                current = pm.get_current()
+                self._json_response({"projects": projects, "current": current})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path.startswith("/api/projects/") and path.count("/") == 3:
+            try:
+                from core.project_manager import ProjectManager
+                pm = ProjectManager()
+                pid = int(path.split("/")[3])
+                proj = pm.get(pid)
+                if proj:
+                    self._json_response(proj)
+                else:
+                    self._json_response({"error": "Project not found"}, status=404)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Template Management (GET) ──
+        elif path == "/api/templates":
+            try:
+                import yaml
+                template_dir = HACKAGENT_DIR / "data" / "nuclei" / "custom"
+                templates = []
+                if template_dir.exists():
+                    for f in sorted(template_dir.glob("*.yaml")):
+                        try:
+                            tpl = yaml.safe_load(f.read_text(encoding="utf-8"))
+                            info = tpl.get("info", {}) if isinstance(tpl, dict) else {}
+                            templates.append({"id": tpl.get("id", f.stem), "name": info.get("name", ""), "severity": info.get("severity", ""), "file": f.name})
+                        except Exception:
+                            templates.append({"id": f.stem, "name": f.stem, "severity": "unknown", "file": f.name})
+                self._json_response({"templates": templates})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
 
         elif path == "/api/codefix/status":
             self._json_response(get_codefix_status())

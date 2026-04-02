@@ -10,11 +10,13 @@ Falls back to ViperBrain's Q-learning when LLM is unavailable or rate-limited.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.agent_state import TodoList, ObjectiveManager
@@ -133,6 +135,48 @@ class ReACTEngine:
         self.roe_engine = roe_engine or RoEEngine()
         # Phase 5: Skill-specific prompt injected by ViperCore after classification
         self.skill_prompt: Optional[str] = None
+        # Guidance injection: human-in-the-loop during hunts
+        self._guidance_queue: List[str] = []
+        # Checkpointing: stop/resume hunts
+        self._checkpoint_dir = Path(__file__).parent.parent / "state"
+        self._checkpoint_interval = 5  # Save every N steps
+
+    def inject_guidance(self, message: str):
+        """Inject human guidance into the next ReACT step."""
+        self._guidance_queue.append(message)
+        self.log(f"Guidance queued: {message[:60]}...", "GUIDE")
+
+    def save_checkpoint(self, target: str, trace, context: dict,
+                        findings: list, tried_attacks: list, step_num: int):
+        """Save hunt state for resume."""
+        self._checkpoint_dir.mkdir(exist_ok=True)
+        h = hashlib.md5(target.encode()).hexdigest()[:12]
+        path = self._checkpoint_dir / f"checkpoint_{h}.json"
+        data = {
+            "target": target,
+            "step_num": step_num,
+            "context": {k: v for k, v in context.items()
+                        if isinstance(v, (str, int, float, bool, list, dict, type(None)))},
+            "findings": findings,
+            "tried_attacks": tried_attacks,
+            "chain_failures": self._chain_failures[-20:],
+            "timestamp": datetime.now().isoformat(),
+        }
+        path.write_text(json.dumps(data, default=str, indent=2))
+        self.log(f"Checkpoint saved at step {step_num}", "SAVE")
+
+    def load_checkpoint(self, target: str) -> Optional[dict]:
+        """Load saved hunt state for resume."""
+        h = hashlib.md5(target.encode()).hexdigest()[:12]
+        path = self._checkpoint_dir / f"checkpoint_{h}.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                self.log(f"Checkpoint loaded from step {data.get('step_num', '?')}", "LOAD")
+                return data
+            except (json.JSONDecodeError, OSError):
+                pass
+        return None
 
     def log(self, msg: str, level: str = "INFO"):
         if self.verbose:
@@ -144,6 +188,7 @@ class ReACTEngine:
         target: str,
         context: Dict[str, Any],
         execute_fn: Callable,
+        resume: bool = False,
     ) -> ReACTTrace:
         """
         Run the full ReACT loop on a target.
@@ -152,6 +197,7 @@ class ReACTEngine:
             target: Target URL.
             context: Initial context dict (technologies, page_content, etc.).
             execute_fn: Async callable(url, attack_type, context) -> (reward, new_context, finding).
+            resume: If True, attempt to resume from a saved checkpoint.
 
         Returns:
             ReACTTrace with the full reasoning history.
@@ -161,10 +207,23 @@ class ReACTEngine:
         findings: List[Dict] = []
         tried_attacks: List[str] = []
         self._chain_failures = []  # Reset failures memory per hunt
+        start_step = 1
+
+        # Resume from checkpoint if requested
+        if resume:
+            checkpoint = self.load_checkpoint(target)
+            if checkpoint:
+                current_context.update(checkpoint.get("context", {}))
+                findings = checkpoint.get("findings", [])
+                tried_attacks = checkpoint.get("tried_attacks", [])
+                self._chain_failures = checkpoint.get("chain_failures", [])
+                start_step = checkpoint.get("step_num", 0) + 1
+                self.log(f"Resumed from step {start_step - 1} ({len(findings)} findings, "
+                         f"{len(tried_attacks)} tried)")
 
         self.log(f"Starting ReACT loop for {target} (max {self.max_steps} steps)")
 
-        for step_num in range(1, self.max_steps + 1):
+        for step_num in range(start_step, self.max_steps + 1):
             # ── DEEP THINK TRIGGER CHECK ──────────────────────────────
             deep_think_fired = False
             if self.think_engine:
@@ -411,6 +470,14 @@ class ReACTEngine:
             self.brain.update(current_context, action, reward, new_context)
             current_context = new_context
 
+            # Checkpoint every N steps for stop/resume
+            if step_num % self._checkpoint_interval == 0:
+                try:
+                    self.save_checkpoint(target, trace, current_context,
+                                         findings, tried_attacks, step_num)
+                except Exception:
+                    pass
+
             # Early termination: high access achieved
             if current_context.get("access_level", 0) >= 3:
                 self.log(f"Target compromised at step {step_num}")
@@ -529,6 +596,12 @@ class ReACTEngine:
         # Build objective history section
         obj_section = f"\n{objective_history}\n\n" if objective_history else "\n"
 
+        # Human guidance injection
+        guidance_section = ""
+        if self._guidance_queue:
+            guidance = self._guidance_queue.pop(0)
+            guidance_section = f"HUMAN GUIDANCE (prioritize this): {guidance}\n\n"
+
         # Chain failures memory: show recent failures so LLM doesn't repeat them
         failures_section = ""
         if self._chain_failures:
@@ -547,6 +620,7 @@ class ReACTEngine:
             f"Attacks tried: {tried_attacks[-10:]}\n"
             f"Findings: {json.dumps(findings[-5:], default=str)[:800]}\n"
             f"Available attacks: {available_attacks}\n\n"
+            f"{guidance_section}"
             f"{failures_section}"
             f"{todo_context}\n"
             f"{obj_section}"
