@@ -1039,8 +1039,13 @@ class ViperCore:
         _session_start = session_start or (datetime.utcnow() - timedelta(hours=2)).isoformat()
 
         base_url = target.url.rstrip('/')
-        
+        _attack_start = time.time()
+        _max_attack_secs = 30  # Per-attack time limit to avoid one attack hogging the budget
+
         for payload in attack.payloads:
+            if time.time() - _attack_start > _max_attack_secs:
+                self.log(f"  [{attack_name}] Time limit ({_max_attack_secs}s), moving on", "WARN")
+                break
             test_url = base_url
             
             if attack.category == "recon":
@@ -1116,13 +1121,25 @@ class ViperCore:
                         base_url, method="POST", data=payload
                     )
                 else:
-                    if target.parameters:
-                        param = list(target.parameters)[0]
-                        parsed = urllib.parse.urlparse(base_url)
-                        test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={urllib.parse.quote(payload)}"
-                    else:
-                        test_url = f"{base_url}?id={urllib.parse.quote(payload)}"
-                    status, body, headers = await self.request(test_url)
+                    # Test ALL discovered parameters (not just first)
+                    params_to_test = list(target.parameters)[:5] if target.parameters else ["id"]
+                    urls_to_test = [base_url] + [e for e in list(target.endpoints)[:3] if e != base_url]
+                    found_hit = False
+                    for test_base in urls_to_test:
+                        if found_hit:
+                            break
+                        parsed = urllib.parse.urlparse(test_base)
+                        for param in params_to_test:
+                            test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={urllib.parse.quote(payload)}"
+                            status, body, headers = await self.request(test_url)
+                            if status != 0:
+                                match_result = self._check_markers(attack.success_markers, body, headers)
+                                if match_result:
+                                    found_hit = True
+                                    break
+                    if not found_hit:
+                        # Use last response for marker check below
+                        pass
             
             elif attack.category == "auth":
                 if "jwt" in attack_name:
@@ -1130,14 +1147,18 @@ class ViperCore:
                     hdrs = {"Authorization": f"Bearer {payload}"}
                     status, body, headers = await self.request(base_url, headers=hdrs)
                 elif "idor" in attack_name:
-                    # Try substituting IDs in URL parameters
-                    if target.parameters:
-                        param = list(target.parameters)[0]
-                        parsed = urllib.parse.urlparse(base_url)
+                    # Try substituting IDs in ALL discovered parameters
+                    id_params = [p for p in (target.parameters or set()) if any(k in p.lower() for k in ("id", "user", "account", "uid", "pid"))]
+                    if not id_params:
+                        id_params = list(target.parameters)[:3] if target.parameters else ["id"]
+                    parsed = urllib.parse.urlparse(base_url)
+                    for param in id_params[:3]:
                         test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={urllib.parse.quote(payload)}"
-                    else:
-                        test_url = f"{base_url}?id={urllib.parse.quote(payload)}"
-                    status, body, headers = await self.request(test_url)
+                        status, body, headers = await self.request(test_url)
+                        if status != 0:
+                            match_result = self._check_markers(attack.success_markers, body, headers)
+                            if match_result:
+                                break
                 elif "verb" in attack_name:
                     # HTTP verb tampering — payload is the method
                     status, body, headers = await self.request(base_url, method=payload)
@@ -1166,9 +1187,40 @@ class ViperCore:
             elif attack.category == "misc":
                 if "cors" in attack_name and ": " in payload:
                     hdr_name, hdr_val = payload.split(": ", 1)
+                    # Replace {target} placeholder with actual target
+                    hdr_val = hdr_val.replace("{target}", self._extract_domain(target.url))
                     status, body, headers = await self.request(
                         base_url, headers={hdr_name: hdr_val}
                     )
+                    # CORS: check response headers for misconfiguration
+                    if status != 0:
+                        resp_headers_str = str(headers).lower()
+                        if "access-control-allow-origin" in resp_headers_str:
+                            acao = ""
+                            for k, v in (headers.items() if hasattr(headers, 'items') else []):
+                                if k.lower() == "access-control-allow-origin":
+                                    acao = v
+                            if acao and (acao == "*" or "evil" in acao or acao == "null"):
+                                # Force a finding — CORS is misconfigured
+                                body = f"CORS MISCONFIGURED: Access-Control-Allow-Origin: {acao}"
+                elif "clickjacking" in attack_name or "x_frame" in attack_name:
+                    status, body, headers = await self.request(base_url)
+                    if status != 0:
+                        resp_headers_lower = {k.lower(): v for k, v in (headers.items() if hasattr(headers, 'items') else [])}
+                        has_xfo = "x-frame-options" in resp_headers_lower
+                        has_csp_fa = any("frame-ancestors" in str(v) for v in resp_headers_lower.values())
+                        if not has_xfo and not has_csp_fa:
+                            body = "CLICKJACKING: No X-Frame-Options or CSP frame-ancestors header"
+                elif "security_headers" in attack_name:
+                    status, body, headers = await self.request(base_url)
+                    if status != 0:
+                        resp_headers_lower = {k.lower() for k, _ in (headers.items() if hasattr(headers, 'items') else [])}
+                        missing = []
+                        for hdr in ["strict-transport-security", "content-security-policy", "x-content-type-options"]:
+                            if hdr not in resp_headers_lower:
+                                missing.append(hdr)
+                        if missing:
+                            body = f"MISSING SECURITY HEADERS: {', '.join(missing)}"
                 else:
                     status, body, headers = await self.request(base_url)
 
@@ -1214,8 +1266,16 @@ class ViperCore:
                         )
                         candidate["confidence"] = confidence
                         candidate["validation_reason"] = reason
-                        if confidence < 0.4:
-                            self.log(f"  [FP] {attack_name} rejected: confidence={confidence:.2f} — {reason}")
+                        # Adaptive FP threshold — lower for vuln types with inherent ambiguity
+                        _fp_thresholds = {
+                            "cors": 0.2, "cors_misconfig": 0.2, "cors_misconfiguration": 0.2,
+                            "xxe": 0.3, "debug_endpoints": 0.25, "clickjacking": 0.2,
+                            "x_frame_options": 0.2, "cache_poisoning": 0.3,
+                            "open_redirect": 0.3, "crlf_injection": 0.3,
+                        }
+                        min_conf = _fp_thresholds.get(attack_name, 0.35)
+                        if confidence < min_conf:
+                            self.log(f"  [FP] {attack_name} rejected: confidence={confidence:.2f} < {min_conf} — {reason}")
                             self.metrics["false_positives_caught"] = self.metrics.get("false_positives_caught", 0) + 1
                             continue
                         candidate["validation"] = reason
@@ -1525,6 +1585,12 @@ class ViperCore:
         if not self._react_engine or (datetime.now() < end_time and not findings):
             if self._react_engine:
                 self.log("  [Fallback] Running standard attacks for remaining time")
+                # Prioritize quick wins (header checks, CORS) before heavy fuzzing
+                _quick_wins = ["clickjacking", "security_headers_missing", "cors_misconfiguration",
+                               "csrf_token_leak", "dom_xss"]
+                for qw in _quick_wins:
+                    if qw not in tried_attacks and qw in self.knowledge.attacks:
+                        attack_queue.insert(0, qw)
 
             while datetime.now() < end_time:
                 if not attack_queue:

@@ -274,7 +274,13 @@ class ReACTEngine:
                 continue
 
             # ── Phase-aware tool enforcement ───────────────────────────
+            # Auto-advance to EXPLOIT after recon steps are done (step 3+)
             current_phase = current_context.get("phase", "RECON").upper()
+            if step_num >= 3 and current_phase in ("RECON", "SURFACE", "SCAN"):
+                current_context["phase"] = "EXPLOIT"
+                current_phase = "EXPLOIT"
+                self.log(f"Step {step_num} | Phase auto-advanced to EXPLOIT", "PHASE")
+
             phase_ok, phase_reason = is_tool_allowed_in_phase(action, current_phase)
             if not phase_ok:
                 self.log(f"Step {step_num} | PHASE BLOCKED: {phase_reason}", "BLOCK")
@@ -338,14 +344,17 @@ class ReACTEngine:
                 self.log(f"Target compromised at step {step_num}")
                 break
 
-            # Early termination: diminishing returns
-            if step_num >= 3 and trace.total_reward <= -5:
+            # Early termination: diminishing returns — adaptive threshold
+            # Phase-blocked steps give -0.3, legitimate failures give -1.0
+            # Require enough steps before quitting to avoid premature exit
+            _min_steps = 8
+            _threshold = -10.0 if current_context.get("phase", "").upper() == "EXPLOIT" else -8.0
+            if step_num >= _min_steps and trace.total_reward <= _threshold:
                 # Before stopping, try deep think one more time if available
                 if self.think_engine and not deep_think_fired:
                     self.log("Diminishing returns — attempting deep think before stopping")
-                    # Will trigger on next iteration via _check_deep_think_trigger
                     continue
-                self.log("Diminishing returns, stopping early")
+                self.log(f"Diminishing returns (reward={trace.total_reward:.1f} after {step_num} steps), stopping")
                 break
 
         # Final assessment

