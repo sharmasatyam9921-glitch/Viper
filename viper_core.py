@@ -140,7 +140,12 @@ _ml.register("core.skill_prompts", "get_skill_prompt")
 _ml.register("recon.wappalyzer", "Wappalyzer")
 _ml.register("recon.mitre_enricher", "MitreEnricher")
 _ml.register("recon.shodan_enricher", "enrich_ip_sync")
-_ml.register("recon.github_secrets", "SecretScanner")
+# Note: recon.github_secrets also exports SecretScanner but with different API.
+# Import separately to avoid name collision with core.secret_scanner.
+try:
+    from recon.github_secrets import SecretScanner as GithubSecretScanner
+except ImportError:
+    GithubSecretScanner = None
 
 # Triage & settings
 _ml.register("core.triage_engine", "TriageEngine")
