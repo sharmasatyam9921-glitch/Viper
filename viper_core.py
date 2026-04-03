@@ -98,6 +98,10 @@ _ml.register("core.html_reporter", "generate_report", "save_report")
 _ml.register("core.reporter", "CvssV4Score", "calculate_cvss4")
 _ml.register("core.report_narrative", "ReportNarrative")
 _ml.register("core.report_exporter", "ReportExporter")
+
+# Observability + tool registry
+_ml.register("ai.observability", "LLMObserver", "get_observer")
+_ml.register("core.tool_registry", "ToolRegistry", "ToolType")
 _ml.register("core.finding_stream", "FindingStream", "NotificationConfig")
 
 # Engines
@@ -209,6 +213,8 @@ HUMAN_TIMING_AVAILABLE = _ml.available("HumanTimingProfile")
 CHAIN_OF_CUSTODY_AVAILABLE = _ml.available("ChainOfCustody")
 CVSS4_AVAILABLE = _ml.available("CvssV4Score")
 FINDING_STREAM_AVAILABLE = _ml.available("FindingStream")
+LLM_OBSERVER_AVAILABLE = _ml.available("LLMObserver")
+TOOL_REGISTRY_AVAILABLE = _ml.available("ToolRegistry")
 
 # ── Convenience accessors for loaded modules ──
 # These replace the direct imports (e.g., `ReconEngine` → `_ml.get("ReconEngine")`)
@@ -306,6 +312,10 @@ run_triage_queries = _ml.get("run_triage_queries")
 shodan_enrich = _ml.get("enrich_ip_sync")
 CvssV4Score = _ml.get("CvssV4Score")
 calculate_cvss4 = _ml.get("calculate_cvss4")
+LLMObserver = _ml.get("LLMObserver")
+get_observer = _ml.get("get_observer")
+ToolRegistry = _ml.get("ToolRegistry")
+ToolType = _ml.get("ToolType")
 
 
 class ViperCore:

@@ -132,6 +132,74 @@ def _search_tavily(query: str, api_key: str, num_results: int = 5) -> List[Searc
     return results
 
 
+def _search_duckduckgo(query: str, num_results: int = 5) -> List[SearchResult]:
+    """DuckDuckGo HTML search — free, no API key required."""
+    results = []
+    try:
+        data = urllib.parse.urlencode({"q": query, "kl": "us-en"}).encode()
+        req = urllib.request.Request(
+            "https://html.duckduckgo.com/html/",
+            data=data,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        import re
+        # Parse result blocks from DDG HTML
+        blocks = re.findall(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>'
+            r'.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+            html, re.DOTALL,
+        )
+        for url, title, snippet in blocks[:num_results]:
+            # DDG wraps URLs in redirect — extract actual URL
+            actual = re.search(r'uddg=([^&]+)', url)
+            clean_url = urllib.parse.unquote(actual.group(1)) if actual else url
+            clean_title = re.sub(r'<[^>]+>', '', title).strip()
+            clean_snippet = re.sub(r'<[^>]+>', '', snippet).strip()
+            if clean_url and clean_title:
+                results.append(SearchResult(
+                    title=clean_title,
+                    url=clean_url,
+                    snippet=clean_snippet,
+                    source="duckduckgo",
+                ))
+    except Exception as e:
+        logger.debug("DuckDuckGo search failed: %s", e)
+    return results
+
+
+def _search_searxng(query: str, base_url: str, num_results: int = 5) -> List[SearchResult]:
+    """SearXNG self-hosted search engine."""
+    results = []
+    if not base_url:
+        return results
+    try:
+        params = urllib.parse.urlencode({
+            "q": query,
+            "format": "json",
+            "categories": "general",
+            "language": "en",
+        })
+        url = f"{base_url.rstrip('/')}/search?{params}"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+
+        for item in data.get("results", [])[:num_results]:
+            results.append(SearchResult(
+                title=item.get("title", ""),
+                url=item.get("url", ""),
+                snippet=item.get("content", ""),
+                source="searxng",
+            ))
+    except Exception as e:
+        logger.debug("SearXNG search failed: %s", e)
+    return results
+
+
 # ── Main WebSearchTool class ──────────────────────────────────────────────
 
 class WebSearchTool:
@@ -186,11 +254,19 @@ class WebSearchTool:
         if "tavily" not in self._providers and self._tavily_key:
             self._providers.append("tavily")
 
+        # DuckDuckGo — always available (free, no key)
+        self._providers.append("duckduckgo")
+
+        # SearXNG — self-hosted, available if URL configured
+        self._searxng_url = os.environ.get("SEARXNG_URL", "")
+        if self._searxng_url:
+            self._providers.append("searxng")
+
         if not self._providers:
             logger.warning(
-                "WebSearchTool: no API keys configured. "
-                "Set SERPAPI_KEY or TAVILY_API_KEY environment variables. "
-                "Searches will return empty results."
+                "WebSearchTool: no search providers available. "
+                "Set SERPAPI_KEY or TAVILY_API_KEY for premium search, "
+                "or SEARXNG_URL for self-hosted. DuckDuckGo is always available."
             )
 
     @property
@@ -214,7 +290,7 @@ class WebSearchTool:
             return []
 
         # Run synchronous HTTP calls in a thread to avoid blocking
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         for provider in self._providers:
             try:
@@ -225,6 +301,14 @@ class WebSearchTool:
                 elif provider == "tavily":
                     results = await loop.run_in_executor(
                         None, _search_tavily, query, self._tavily_key, num_results
+                    )
+                elif provider == "duckduckgo":
+                    results = await loop.run_in_executor(
+                        None, _search_duckduckgo, query, num_results
+                    )
+                elif provider == "searxng":
+                    results = await loop.run_in_executor(
+                        None, _search_searxng, query, self._searxng_url, num_results
                     )
                 else:
                     continue
