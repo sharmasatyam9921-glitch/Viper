@@ -90,9 +90,12 @@ class ScopeEntry:
             # Exact domain or subdomain match
             return target_domain == entry_lower or target_domain.endswith('.' + entry_lower)
         
-        elif self.asset_type == 'url':
-            # URL prefix match
-            return target_lower.startswith(entry_lower)
+        elif self.asset_type in ('url', 'api'):
+            # URL/API match — compare domains (scope entries often lack scheme)
+            if '://' in entry_lower:
+                return target_lower.startswith(entry_lower)
+            # Entry has no scheme — match against extracted domain
+            return target_domain == entry_lower or target_domain.endswith('.' + entry_lower)
         
         elif self.asset_type == 'ip':
             # IP match
