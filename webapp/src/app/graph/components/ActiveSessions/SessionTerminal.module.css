@@ -1,0 +1,258 @@
+.terminal {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #0d1117;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-default);
+  overflow: hidden;
+}
+
+.terminalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #161b22;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.terminalTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: var(--font-semibold);
+  color: #c9d1d9;
+  font-family: var(--font-mono);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3fb950;
+}
+
+.busyBanner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: rgba(245, 158, 11, 0.1);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+  font-size: 11px;
+  color: #fbbf24;
+  flex-shrink: 0;
+}
+
+.outputArea {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.outputArea::-webkit-scrollbar {
+  width: 6px;
+}
+
+.outputArea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.outputArea::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.outputLine {
+  margin: 0;
+  padding: 0;
+}
+
+.commandLine {
+  color: #58a6ff;
+}
+
+.errorLine {
+  color: #f85149;
+}
+
+.inputArea {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: #161b22;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.prompt {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #3fb950;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #c9d1d9;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  caret-color: #58a6ff;
+}
+
+.input::placeholder {
+  color: rgba(201, 209, 217, 0.3);
+}
+
+.sendBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.sendBtn:hover:not(:disabled) {
+  background: rgba(88, 166, 255, 0.3);
+}
+
+.sendBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.sending {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* Command Whisperer — NLP input bar */
+.nlpArea {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: #161b22;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(139, 92, 246, 0.15);
+  flex-shrink: 0;
+  position: relative;
+}
+
+.nlpIcon {
+  color: #a78bfa;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.nlpInput {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #c9d1d9;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  caret-color: #a78bfa;
+}
+
+.nlpInput::placeholder {
+  color: rgba(167, 139, 250, 0.35);
+  font-style: italic;
+}
+
+.nlpBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.nlpBtn:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.3);
+}
+
+.nlpBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.nlpSpinner {
+  color: #a78bfa;
+  flex-shrink: 0;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.nlpError {
+  position: absolute;
+  right: 14px;
+  top: -20px;
+  font-size: 10px;
+  color: #f85149;
+  background: #161b22;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(248, 81, 73, 0.2);
+  white-space: nowrap;
+}
+
+/* Empty state when no session is selected */
+.emptyTerminal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: var(--text-tertiary);
+  background: var(--bg-primary);
+  border-radius: var(--radius-lg);
+  border: 1px dashed var(--border-default);
+}
+
+.emptyTerminal svg {
+  opacity: 0.3;
+}
+
+.emptyTerminal p {
+  font-size: 12px;
+  margin: 0;
+}

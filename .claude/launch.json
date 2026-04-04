@@ -2,10 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "viper-dashboard",
+      "name": "viper-api",
       "runtimeExecutable": "python",
       "runtimeArgs": ["dashboard/server.py"],
       "port": 8080
+    },
+    {
+      "name": "viper-webapp",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "webapp"],
+      "port": 3000
     }
   ]
 }

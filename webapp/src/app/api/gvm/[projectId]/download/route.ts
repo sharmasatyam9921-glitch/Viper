@@ -1,0 +1,91 @@
+import { NextRequest, NextResponse } from 'next/server'
+import prisma from '@/lib/prisma'
+import { readFile } from 'fs/promises'
+import { existsSync } from 'fs'
+import path from 'path'
+
+// Path to GVM scan output directory (mounted volume or local path)
+const GVM_OUTPUT_PATH = process.env.GVM_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/gvm_scan/output'
+
+interface RouteParams {
+  params: Promise<{ projectId: string }>
+}
+
+export async function GET(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { projectId } = await params
+
+    // Verify project exists
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true, name: true }
+    })
+
+    if (!project) {
+      return NextResponse.json(
+        { error: 'Project not found' },
+        { status: 404 }
+      )
+    }
+
+    // Construct the JSON file path using projectId
+    const jsonFileName = `gvm_${projectId}.json`
+    const jsonFilePath = path.join(GVM_OUTPUT_PATH, jsonFileName)
+
+    // Check if file exists
+    if (!existsSync(jsonFilePath)) {
+      return NextResponse.json(
+        { error: 'GVM scan data not found. Run a GVM vulnerability scan first.' },
+        { status: 404 }
+      )
+    }
+
+    // Read the file
+    const fileContent = await readFile(jsonFilePath, 'utf-8')
+
+    // Return as downloadable JSON
+    return new NextResponse(fileContent, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Disposition': `attachment; filename="${jsonFileName}"`,
+        'Cache-Control': 'no-cache',
+      },
+    })
+
+  } catch (error) {
+    console.error('Error downloading GVM scan data:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+// Also support HEAD request to check if data exists
+export async function HEAD(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { projectId } = await params
+
+    // Verify project exists
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true }
+    })
+
+    if (!project) {
+      return new NextResponse(null, { status: 404 })
+    }
+
+    const jsonFilePath = path.join(GVM_OUTPUT_PATH, `gvm_${projectId}.json`)
+
+    if (!existsSync(jsonFilePath)) {
+      return new NextResponse(null, { status: 404 })
+    }
+
+    return new NextResponse(null, { status: 200 })
+
+  } catch {
+    return new NextResponse(null, { status: 500 })
+  }
+}

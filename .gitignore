@@ -121,6 +121,12 @@ juice-shop-src/
 SANITIZE_REPORT.txt
 data/mitre_db/
 
+# Webapp (Next.js dashboard)
+webapp/node_modules/
+webapp/.next/
+webapp/out/
+webapp/.env.local
+
 # VIPER 5.0 exclusions
 archive/hunt_sessions/
 archive/natas/

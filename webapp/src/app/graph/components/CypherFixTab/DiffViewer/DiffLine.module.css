@@ -1,0 +1,60 @@
+.line {
+  display: flex;
+  align-items: flex-start;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 20px;
+}
+
+.lineNumber {
+  display: inline-block;
+  min-width: 40px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-tertiary);
+  user-select: none;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.prefix {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+  font-weight: 700;
+  user-select: none;
+}
+
+.content {
+  flex: 1;
+  white-space: pre;
+  overflow-x: auto;
+  padding-right: 8px;
+}
+
+/* Line types */
+.addition {
+  background: color-mix(in srgb, var(--diff-addition, #22c55e) 10%, transparent);
+}
+
+.addition .prefix {
+  color: var(--diff-addition, #22c55e);
+}
+
+.deletion {
+  background: color-mix(in srgb, var(--diff-deletion, #ef4444) 10%, transparent);
+}
+
+.deletion .prefix {
+  color: var(--diff-deletion, #ef4444);
+}
+
+.context {
+  background: transparent;
+}
+
+.context .prefix {
+  color: transparent;
+}

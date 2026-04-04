@@ -1,0 +1,49 @@
+.grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  width: 100%;
+  padding: var(--space-1);
+}
+
+.cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: 4px;
+  min-width: 60px;
+  min-height: 32px;
+  cursor: default;
+  transition: opacity 0.15s;
+}
+
+.cell:hover {
+  opacity: 1 !important;
+}
+
+.name {
+  font-size: 10px;
+  font-weight: var(--font-medium);
+  color: var(--color-white);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+.badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: var(--status-error);
+  color: var(--color-white);
+  font-size: 9px;
+  font-weight: var(--font-bold);
+  padding: 1px 4px;
+  border-radius: 8px;
+  min-width: 16px;
+  text-align: center;
+}

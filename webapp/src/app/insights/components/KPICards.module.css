@@ -1,0 +1,96 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: var(--space-3);
+}
+
+@media (max-width: 1199px) {
+  .grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Pipeline status within KPI row */
+.pipelineStatus {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+  text-transform: capitalize;
+  color: var(--text-secondary);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dotIdle { background: var(--color-gray-500); }
+.dotRunning { background: var(--status-info); animation: blink 1.2s ease-in-out infinite; }
+.dotCompleted { background: var(--status-success); }
+.dotError { background: var(--status-error); }
+.dotPaused { background: var(--status-warning); }
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.statusText {
+  font-weight: var(--font-medium);
+}
+
+.phase {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  padding: 1px 6px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+.skeletonLabel {
+  width: 60px;
+  height: 10px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.skeletonValue {
+  width: 40px;
+  height: 24px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+/* Session types breakdown */
+.sessionTypes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: var(--space-1);
+}
+
+.sessionType {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  padding: 1px 5px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  text-transform: capitalize;
+}

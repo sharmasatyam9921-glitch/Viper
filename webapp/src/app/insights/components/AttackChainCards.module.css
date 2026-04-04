@@ -1,0 +1,123 @@
+.wrapper {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+@media (max-width: 767px) {
+  .wrapper {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chainList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.chain {
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-default);
+}
+
+.chainHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.chainTitle {
+  font-weight: var(--font-medium);
+  color: var(--text-primary);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statusBadge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-quaternary);
+  text-transform: capitalize;
+}
+
+.status_completed { color: var(--status-success-text); background: var(--status-success-bg); }
+.status_running { color: var(--status-info-text); background: var(--status-info-bg); }
+.status_failed { color: var(--status-error-text); background: var(--status-error-bg); }
+
+.chainStats {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.chainStats span {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.toolList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+}
+
+.toolHeader {
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.toolRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11px;
+}
+
+.toolName {
+  width: 120px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+.toolBar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-quaternary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.toolBarFill {
+  height: 100%;
+  background: var(--status-success);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.toolCount {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  width: 40px;
+  text-align: right;
+  flex-shrink: 0;
+}
