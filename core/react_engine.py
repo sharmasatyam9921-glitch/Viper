@@ -126,6 +126,9 @@ class ReACTEngine:
         self._deep_think_triggered_at: Optional[int] = None  # Step number of last trigger
         # F5: Rules of Engagement enforcement
         self.roe_engine = roe_engine or RoEEngine()
+        # Failure loop detection: track (pattern, reward) for last N steps
+        self._step_patterns: List[tuple] = []  # (pattern_str, reward)
+        self._failure_loop_warning: Optional[str] = None  # Injected into next LLM prompt
 
     def log(self, msg: str, level: str = "INFO"):
         if self.verbose:
@@ -317,6 +320,13 @@ class ReACTEngine:
             )
             trace.add_step(step)
 
+            # Failure loop detection
+            self._check_failure_loop(
+                action,
+                {"target": target, "context_keys": list(current_context.keys())},
+                reward,
+            )
+
             # Auto-complete todo items matching the executed action
             if reward > 0:
                 self.todo_list.mark_completed_by_tool(action)
@@ -456,6 +466,7 @@ class ReACTEngine:
             f"Available attacks: {available_attacks}\n\n"
             f"{todo_context}\n"
             f"{obj_section}"
+            f"{self._failure_loop_warning + chr(10) + chr(10) if self._failure_loop_warning else ''}"
             "Reason about what to try next. Pick ONE action from the available attacks list.\n"
             "You may also return an 'updated_todo_list' array of "
             '{"id": "...", "description": "...", "status": "pending|in_progress|completed|blocked", '
@@ -599,6 +610,52 @@ class ReACTEngine:
                 return True, f"action_repetition ('{last_3_attacks[0]}' repeated 3x)"
 
         return False, ""
+
+    def _check_failure_loop(self, action: str, args: Dict[str, Any], reward: float) -> None:
+        """
+        Track step patterns and detect failure loops.
+
+        After each step, records the pattern and checks the last 6 steps for
+        3+ consecutive failures with similar tool+args pattern. If detected,
+        sets _failure_loop_warning to be injected into the next LLM prompt.
+        """
+        pattern = f"{action}:{str(args)[:80]}"
+        self._step_patterns.append((pattern, reward))
+
+        # Check last 6 steps for 3+ consecutive failures with similar pattern
+        self._failure_loop_warning = None
+        recent = self._step_patterns[-6:]
+        if len(recent) < 3:
+            return
+
+        # Walk backwards through recent steps to find consecutive failures
+        consecutive_failures = []
+        for pat, rew in reversed(recent):
+            if rew < 0:
+                consecutive_failures.append(pat)
+            else:
+                break
+
+        if len(consecutive_failures) < 3:
+            return
+
+        # Check if patterns are similar (same action prefix)
+        # Extract action part before the first colon
+        actions = [p.split(":")[0] for p in consecutive_failures]
+        # Count most common action
+        from collections import Counter
+        action_counts = Counter(actions)
+        most_common_action, most_common_count = action_counts.most_common(1)[0]
+        if most_common_count >= 3:
+            self.log(
+                f"FAILURE LOOP: {most_common_count} consecutive similar failures "
+                f"(action={most_common_action})",
+                "WARN",
+            )
+            self._failure_loop_warning = (
+                "FAILURE LOOP DETECTED: You have failed 3+ times with similar approach. "
+                "You MUST try a completely different strategy, tool, or attack vector."
+            )
 
     def add_objective(self, objective: str) -> None:
         """Queue a new objective for multi-objective execution (G1)."""

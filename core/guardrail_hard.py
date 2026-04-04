@@ -109,12 +109,22 @@ _BLOCKED_DOMAINS: frozenset = frozenset({
     # === Intergovernmental / International ===
     "un.org", "undp.org", "unicef.org", "unhcr.org", "unep.org",
     "unesco.org", "wfp.org", "iaea.org",
+    "unfpa.org", "unhabitat.org", "unodc.org",
     "nato.int", "europa.eu", "oecd.org",
     "worldbank.org", "imf.org", "wto.org",
     "icrc.org", "ifrc.org",
     "asean.org", "osce.org", "oas.org",
     "bis.org", "adb.org", "afdb.org", "aiib.org",
     "cern.ch", "iso.org",
+    # UN Specialized Agencies
+    "ilo.org", "fao.org", "icao.int", "imo.org", "itu.int",
+    "wipo.int", "wmo.int", "ifad.org", "unido.org", "unwto.org",
+    # International Courts
+    "icj-cij.org", "icc-cpi.int",
+    # Regional Organizations & Development Banks
+    "african-union.org", "caricom.org", "eib.org", "iadb.org",
+    # Science/Research & Arms Control
+    "iter.org", "ctbto.org", "opcw.org",
 })
 
 # ---------------------------------------------------------------------------

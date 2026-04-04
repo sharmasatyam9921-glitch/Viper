@@ -687,6 +687,183 @@ class TriageQueries:
         return []
 
 
+def compute_risk_score(triage_results: Dict[str, Any]) -> tuple:
+    """
+    Compute a weighted risk score from triage query results using 14 signals.
+
+    Args:
+        triage_results: Dict keyed by query name from run_all_triage / run_triage_queries,
+                        e.g. {"vulnerabilities": {records: [...]}, "exploits": {...}, ...}
+
+    Returns:
+        (score: int, breakdown: dict) where breakdown maps signal names to their
+        contribution points.
+    """
+    score = 0
+    breakdown: Dict[str, int] = {}
+
+    # Helper to get records list from triage results
+    def _records(name: str) -> List[Dict]:
+        entry = triage_results.get(name, {})
+        if isinstance(entry, dict):
+            return entry.get("records", [])
+        if isinstance(entry, list):
+            return entry
+        return []
+
+    # 1. CHAIN_EXPLOIT_SUCCESS (1200) — findings with exploit_success type
+    chain_findings = _records("chain_findings")
+    exploit_successes = [f for f in chain_findings if f.get("finding_type") == "exploit_success"]
+    if exploit_successes:
+        pts = 1200
+        score += pts
+        breakdown["CHAIN_EXPLOIT_SUCCESS"] = pts
+
+    # 2. CONFIRMED_EXPLOIT (1000) — public exploit available for CVE
+    exploits = _records("exploits")
+    if exploits:
+        pts = 1000
+        score += pts
+        breakdown["CONFIRMED_EXPLOIT"] = pts
+
+    # 3. CHAIN_ACCESS_GAINED (900) — access_gained or privilege_escalation
+    access_findings = [
+        f for f in chain_findings
+        if f.get("finding_type") in ("access_gained", "privilege_escalation")
+    ]
+    if access_findings:
+        pts = 900
+        score += pts
+        breakdown["CHAIN_ACCESS_GAINED"] = pts
+
+    # 4. CISA_KEV (800) — in CISA Known Exploited Vulnerabilities
+    vulns = _records("vulnerabilities")
+    kev_vulns = [v for v in vulns if v.get("cisa_kev")]
+    if kev_vulns:
+        pts = 800
+        score += pts
+        breakdown["CISA_KEV"] = pts
+
+    # 5. CHAIN_CREDENTIAL (700) — credential_found in findings
+    cred_findings = [f for f in chain_findings if f.get("finding_type") == "credential_found"]
+    if cred_findings:
+        pts = 700
+        score += pts
+        breakdown["CHAIN_CREDENTIAL"] = pts
+
+    # 6. SECRET_EXPOSED (500) — GitHub secrets or sensitive files
+    secrets = _records("secrets")
+    has_secrets = any(
+        r.get("secrets") or r.get("sensitive_files")
+        for r in secrets
+    )
+    if has_secrets:
+        pts = 500
+        score += pts
+        breakdown["SECRET_EXPOSED"] = pts
+
+    # 7. CHAIN_REACHABILITY (200) — internet-facing (< 3 hops to vuln)
+    assets = _records("assets")
+    if assets:
+        # Assets with services/urls imply internet-facing reachability
+        reachable = any(a.get("services") or a.get("urls") for a in assets)
+        if reachable:
+            pts = 200
+            score += pts
+            breakdown["CHAIN_REACHABILITY"] = pts
+
+    # 8. DAST_CONFIRMED (150) — Nuclei DAST finding
+    nuclei_vulns = [v for v in vulns if v.get("source") == "nuclei"]
+    if nuclei_vulns:
+        pts = 150
+        score += pts
+        breakdown["DAST_CONFIRMED"] = pts
+
+    # 9. INJECTABLE_PARAM (100) — parameter with is_injectable=true
+    injectable = any(
+        p.get("is_injectable")
+        for v in vulns
+        for p in v.get("parameters", [])
+    )
+    if injectable:
+        pts = 100
+        score += pts
+        breakdown["INJECTABLE_PARAM"] = pts
+
+    # 10. CVSS_SCORE (variable) — max CVSS * 10 (0-100 points)
+    max_cvss = 0.0
+    for v in vulns:
+        try:
+            cvss = float(v.get("cvss_score") or 0)
+            if cvss > max_cvss:
+                max_cvss = cvss
+        except (ValueError, TypeError):
+            pass
+    # Also check CVE chains for CVSS
+    cve_chains = _records("cve_chains")
+    for chain in cve_chains:
+        for cve in chain.get("cves", []):
+            try:
+                cvss = float(cve.get("cvss") or 0)
+                if cvss > max_cvss:
+                    max_cvss = cvss
+            except (ValueError, TypeError):
+                pass
+    if max_cvss > 0:
+        pts = int(max_cvss * 10)
+        score += pts
+        breakdown["CVSS_SCORE"] = pts
+
+    # 11. CERT_EXPIRED (80) — expired TLS certificate
+    certs = _records("certificates")
+    expired_certs = [c for c in certs if c.get("cert_status") == "expired"]
+    if expired_certs:
+        pts = 80
+        score += pts
+        breakdown["CERT_EXPIRED"] = pts
+
+    # 12. CERT_WEAK (40) — self-signed or weak key
+    weak_certs = [
+        c for c in certs
+        if c.get("self_signed") or (c.get("key_bits") and int(c.get("key_bits", 4096)) < 2048)
+    ]
+    if weak_certs:
+        pts = 40
+        score += pts
+        breakdown["CERT_WEAK"] = pts
+
+    # 13. GVM_QOD (30) — Quality of Detection >= 70
+    high_qod = any(
+        (v.get("qod") or 0) >= 70
+        for v in vulns
+        if v.get("qod") is not None
+    )
+    if high_qod:
+        pts = 30
+        score += pts
+        breakdown["GVM_QOD"] = pts
+
+    # 14. SEVERITY_WEIGHT (variable) — critical=50, high=40, medium=20, low=10
+    severity_map = {"critical": 50, "high": 40, "medium": 20, "low": 10}
+    max_sev_pts = 0
+    for v in vulns:
+        sev = (v.get("severity") or "").lower()
+        pts_sev = severity_map.get(sev, 0)
+        if pts_sev > max_sev_pts:
+            max_sev_pts = pts_sev
+    # Also check chain findings severity
+    for f in chain_findings:
+        sev = (f.get("severity") or "").lower()
+        pts_sev = severity_map.get(sev, 0)
+        if pts_sev > max_sev_pts:
+            max_sev_pts = pts_sev
+    if max_sev_pts > 0:
+        score += max_sev_pts
+        breakdown["SEVERITY_WEIGHT"] = max_sev_pts
+
+    return (score, breakdown)
+
+
 def _run_cypher(graph_engine, query: str) -> List[Dict]:
     """Execute a Cypher query against Neo4j backend."""
     backend = graph_engine.backend

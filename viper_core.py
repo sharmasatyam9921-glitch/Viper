@@ -1843,12 +1843,34 @@ class ViperCore:
             except Exception as e:
                 self.log(f"[PostExploit] Error: {e}", "WARN")
 
-        # VIPER 3.0: Code remediation (post-hunt option)
-        if enable_codefix and self.codefix_agent and findings:
+        # CypherFix: Automated code remediation for discovered findings
+        if enable_codefix and findings:
             try:
-                self.log("[CodeFix] Generating remediation suggestions...", "INFO")
+                from core.codefix_engine import CodeFixEngine
+                codefix = CodeFixEngine()
+                self.log(f"[CypherFix] Analyzing {len(findings)} findings for remediation...", "INFO")
+                for finding in findings:
+                    vuln_type = finding.get("vuln_type", finding.get("attack", ""))
+                    severity = finding.get("severity", "medium")
+                    if severity not in ("high", "critical"):
+                        continue  # Only auto-fix high/critical
+                    try:
+                        fix = await codefix.analyze_and_fix(
+                            vuln_type=vuln_type,
+                            evidence=finding.get("evidence", finding.get("marker", "")),
+                            url=finding.get("url", target_url),
+                            payload=finding.get("payload", ""),
+                        )
+                        if fix:
+                            finding["remediation_code"] = fix.get("fix", "")
+                            finding["remediation_diff"] = fix.get("diff", "")
+                            self.log(f"  [CypherFix] Fix generated for {vuln_type}", "INFO")
+                    except Exception as fix_err:
+                        self.log(f"  [CypherFix] {vuln_type}: {fix_err}", "DEBUG")
+            except ImportError:
+                self.log("[CypherFix] CodeFixEngine not available", "DEBUG")
             except Exception as e:
-                self.log(f"[CodeFix] Error: {e}", "WARN")
+                self.log(f"[CypherFix] Error: {e}", "WARN")
 
         result = {
             "success": len(findings) > 0,

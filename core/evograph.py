@@ -102,12 +102,75 @@ class EvoGraph:
                 ON q_snapshots(session_id);
             CREATE INDEX IF NOT EXISTS idx_reasoning_traces_session
                 ON reasoning_traces(session_id);
+
+            CREATE TABLE IF NOT EXISTS chain_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id INTEGER NOT NULL,
+                step_num INTEGER NOT NULL,
+                phase TEXT DEFAULT 'RECON',
+                tool_name TEXT NOT NULL,
+                tool_args_summary TEXT DEFAULT '',
+                thought TEXT DEFAULT '',
+                output_summary TEXT DEFAULT '',
+                success BOOLEAN DEFAULT 0,
+                error_message TEXT DEFAULT '',
+                duration_ms INTEGER DEFAULT 0,
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (chain_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS chain_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id INTEGER NOT NULL,
+                finding_type TEXT NOT NULL,
+                severity TEXT DEFAULT 'medium',
+                title TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                evidence TEXT DEFAULT '',
+                confidence REAL DEFAULT 0.0,
+                attack_type TEXT DEFAULT '',
+                cve_ids TEXT DEFAULT '',
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (chain_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS chain_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id INTEGER NOT NULL,
+                decision_type TEXT NOT NULL,
+                from_state TEXT DEFAULT '',
+                to_state TEXT DEFAULT '',
+                reason TEXT DEFAULT '',
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (chain_id) REFERENCES sessions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS chain_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id INTEGER NOT NULL,
+                failure_type TEXT DEFAULT 'tool_error',
+                attempted_tool TEXT DEFAULT '',
+                error_message TEXT DEFAULT '',
+                root_cause TEXT DEFAULT '',
+                lesson_learned TEXT DEFAULT '',
+                timestamp TEXT NOT NULL,
+                FOREIGN KEY (chain_id) REFERENCES sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chain_steps_chain
+                ON chain_steps(chain_id);
+            CREATE INDEX IF NOT EXISTS idx_chain_findings_chain
+                ON chain_findings(chain_id);
+            CREATE INDEX IF NOT EXISTS idx_chain_decisions_chain
+                ON chain_decisions(chain_id);
+            CREATE INDEX IF NOT EXISTS idx_chain_failures_chain
+                ON chain_failures(chain_id);
         """)
         self.conn.commit()
 
     # ── Schema validation ──
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     EXPECTED_TABLES = {
         "sessions": {"id", "target", "tech_stack", "start_time", "end_time", "findings_count", "total_reward"},
@@ -115,6 +178,10 @@ class EvoGraph:
         "tech_attack_map": {"id", "tech_signature", "attack_type", "attempts", "successes", "total_reward", "avg_reward"},
         "q_snapshots": {"id", "session_id", "state_key", "action", "q_value"},
         "reasoning_traces": {"id", "session_id", "step_num", "thought", "action", "observation", "reward", "timestamp"},
+        "chain_steps": {"id", "chain_id", "step_num", "phase", "tool_name", "tool_args_summary", "thought", "output_summary", "success", "error_message", "duration_ms", "timestamp"},
+        "chain_findings": {"id", "chain_id", "finding_type", "severity", "title", "description", "evidence", "confidence", "attack_type", "cve_ids", "timestamp"},
+        "chain_decisions": {"id", "chain_id", "decision_type", "from_state", "to_state", "reason", "timestamp"},
+        "chain_failures": {"id", "chain_id", "failure_type", "attempted_tool", "error_message", "root_cause", "lesson_learned", "timestamp"},
     }
 
     def _init_schema_meta(self):
@@ -651,6 +718,144 @@ class EvoGraph:
             logger.debug("export_attack_evolution error: %s", exc)
 
         return {"nodes": nodes, "edges": edges}
+
+    # ── Chain recording ──
+
+    def record_chain_step(
+        self,
+        session_id: int,
+        step_num: int,
+        phase: str = "RECON",
+        tool_name: str = "",
+        tool_args_summary: str = "",
+        thought: str = "",
+        output_summary: str = "",
+        success: bool = False,
+        error_message: str = "",
+        duration_ms: int = 0,
+    ):
+        """Record a single step in an attack chain."""
+        self.conn.execute(
+            "INSERT INTO chain_steps "
+            "(chain_id, step_num, phase, tool_name, tool_args_summary, thought, "
+            "output_summary, success, error_message, duration_ms, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, step_num, phase, tool_name, tool_args_summary,
+             thought[:2000], output_summary[:2000], int(success), error_message,
+             duration_ms, datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def record_chain_finding(
+        self,
+        session_id: int,
+        finding_type: str,
+        severity: str = "medium",
+        title: str = "",
+        description: str = "",
+        evidence: str = "",
+        confidence: float = 0.0,
+        attack_type: str = "",
+        cve_ids: str = "",
+    ):
+        """Record a finding discovered during an attack chain."""
+        self.conn.execute(
+            "INSERT INTO chain_findings "
+            "(chain_id, finding_type, severity, title, description, evidence, "
+            "confidence, attack_type, cve_ids, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, finding_type, severity, title, description[:4000],
+             evidence[:4000], confidence, attack_type, cve_ids,
+             datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def record_chain_decision(
+        self,
+        session_id: int,
+        decision_type: str,
+        from_state: str = "",
+        to_state: str = "",
+        reason: str = "",
+    ):
+        """Record a decision point in an attack chain (phase transition, tool selection, etc.)."""
+        self.conn.execute(
+            "INSERT INTO chain_decisions "
+            "(chain_id, decision_type, from_state, to_state, reason, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, decision_type, from_state, to_state, reason,
+             datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def record_chain_failure(
+        self,
+        session_id: int,
+        failure_type: str = "tool_error",
+        attempted_tool: str = "",
+        error_message: str = "",
+        root_cause: str = "",
+        lesson_learned: str = "",
+    ):
+        """Record a failure during an attack chain for future avoidance."""
+        self.conn.execute(
+            "INSERT INTO chain_failures "
+            "(chain_id, failure_type, attempted_tool, error_message, root_cause, "
+            "lesson_learned, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, failure_type, attempted_tool, error_message,
+             root_cause, lesson_learned, datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def query_prior_chains(self, target_tech: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Return the most successful historical chains for similar tech stacks.
+
+        Joins sessions with chain_steps and chain_findings to rank chains by
+        findings count and total reward.
+        """
+        tech_key = f"%{target_tech.strip().lower()}%"
+        rows = self.conn.execute(
+            "SELECT s.id, s.target, s.tech_stack, s.findings_count, s.total_reward, "
+            "  (SELECT COUNT(*) FROM chain_steps WHERE chain_id = s.id AND success = 1) as successful_steps, "
+            "  (SELECT COUNT(*) FROM chain_findings WHERE chain_id = s.id) as chain_findings_count, "
+            "  (SELECT GROUP_CONCAT(DISTINCT tool_name) FROM chain_steps WHERE chain_id = s.id) as tools_used "
+            "FROM sessions s "
+            "WHERE s.tech_stack LIKE ? AND s.total_reward > 0 "
+            "ORDER BY s.total_reward DESC, s.findings_count DESC "
+            "LIMIT ?",
+            (tech_key, limit),
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            chain_id = row["id"]
+            # Fetch the steps for this chain
+            steps = self.conn.execute(
+                "SELECT step_num, phase, tool_name, success, duration_ms "
+                "FROM chain_steps WHERE chain_id = ? ORDER BY step_num",
+                (chain_id,),
+            ).fetchall()
+            # Fetch findings
+            findings = self.conn.execute(
+                "SELECT finding_type, severity, confidence "
+                "FROM chain_findings WHERE chain_id = ?",
+                (chain_id,),
+            ).fetchall()
+
+            results.append({
+                "session_id": chain_id,
+                "target": row["target"],
+                "tech_stack": row["tech_stack"],
+                "findings_count": row["findings_count"],
+                "total_reward": row["total_reward"],
+                "successful_steps": row["successful_steps"],
+                "tools_used": row["tools_used"] or "",
+                "steps": [dict(s) for s in steps],
+                "findings": [dict(f) for f in findings],
+            })
+
+        return results
 
     # ── Helpers ──
 

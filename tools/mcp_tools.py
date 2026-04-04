@@ -234,14 +234,47 @@ class MCPToolInterface:
     def mode(self) -> str:
         return self._mode
 
-    async def execute(self, tool_name: str, args: dict) -> dict:
-        """Execute a tool. Returns {output, success, error?}."""
+    async def execute(self, tool_name: str, args: dict, max_retries: int = 3, timeout: int = 60) -> dict:
+        """Execute a tool with retry logic. Returns {output, success, error?}."""
         if tool_name not in self._tools:
             return {"output": "", "success": False, "error": f"Unknown tool: {tool_name}"}
 
         if self._mode == "mcp":
-            return await self._execute_mcp(tool_name, args)
+            return await self._call_with_retry(tool_name, args, max_retries=max_retries, timeout=timeout)
         return await self._execute_local(tool_name, args)
+
+    async def _call_with_retry(self, tool_name: str, args: dict, max_retries: int = 3, timeout: int = 60) -> dict:
+        """Execute MCP call with exponential backoff retry on connection/timeout errors."""
+        for attempt in range(max_retries):
+            try:
+                result = await asyncio.wait_for(
+                    self._execute_mcp(tool_name, args), timeout=timeout
+                )
+                # If the result indicates a connection-level failure, treat it as retryable
+                if not result.get("success") and result.get("error", "").startswith("MCP server unreachable"):
+                    raise ConnectionError(result["error"])
+                return result
+            except (ConnectionError, asyncio.TimeoutError, OSError) as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "MCP %s attempt %d/%d failed: %s, retrying in %ds",
+                        tool_name, attempt + 1, max_retries, e, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        "MCP %s failed after %d attempts: %s",
+                        tool_name, max_retries, e,
+                    )
+                    return {
+                        "output": "",
+                        "success": False,
+                        "error": f"MCP {tool_name} failed after {max_retries} attempts: {e}",
+                        "tool": tool_name,
+                    }
+        # Should not reach here, but safety fallback
+        return {"output": "", "success": False, "error": f"MCP {tool_name}: retry loop exhausted"}
 
     async def _execute_local(self, tool_name: str, args: dict) -> dict:
         """Execute tool as local subprocess via registered function."""
