@@ -247,7 +247,8 @@ Disallow: /.git/
                 <a href="/login">Login</a> |
                 <a href="/files/">Files</a> |
                 <a href="/template?name=World">Template</a> |
-                <a href="/view?file=readme.txt">View File</a>
+                <a href="/view?file=readme.txt">View File</a> |
+                <a href="/redirect?url=https://example.com">Redirect</a>
             </nav>
             <form action="/search" method="GET">
                 <input name="q" placeholder="Search...">

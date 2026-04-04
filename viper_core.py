@@ -1368,8 +1368,12 @@ class ViperCore:
                   enable_post_exploit: bool = False,
                   enable_graph: bool = True) -> Dict:
         """Hunt a target with manual attacks."""
-        target = Target(url=target_url)
-        self.current_target = target
+        # Reuse existing target if already populated by full_hunt (preserves surface mapping data)
+        if self.current_target and self.current_target.url.rstrip('/') == target_url.rstrip('/'):
+            target = self.current_target
+        else:
+            target = Target(url=target_url)
+            self.current_target = target
         start_time = datetime.now()
         end_time = start_time + timedelta(minutes=max_minutes)
         # Session start ISO timestamp — used to scope duplicate detection to this session only
@@ -1618,12 +1622,20 @@ class ViperCore:
         if not self._react_engine or datetime.now() < end_time:
             if self._react_engine:
                 self.log("  [Fallback] Running standard attacks for remaining time")
-                # Prioritize quick wins (header checks, CORS) before heavy fuzzing
-                _quick_wins = ["clickjacking", "security_headers_missing", "cors_misconfiguration",
-                               "csrf_token_leak", "dom_xss"]
-                for qw in _quick_wins:
-                    if qw not in tried_attacks and qw in self.knowledge.attacks:
-                        attack_queue.insert(0, qw)
+                # Prioritize: quick wins first, then injection attacks on discovered endpoints
+                _priority_attacks = [
+                    # Quick wins (header/config checks — fast, high confidence)
+                    "clickjacking", "security_headers_missing", "cors_misconfiguration",
+                    "csrf_token_leak",
+                    # Recon file exposure (fast, high confidence)
+                    "git_exposure", "env_file", "dir_listing", "debug_endpoints",
+                    # Injection attacks (test discovered endpoints with payloads)
+                    "sqli_error", "xss_reflected", "dom_xss", "lfi_basic",
+                    "ssti_basic", "cmdi_basic", "open_redirect_basic",
+                ]
+                for atk in reversed(_priority_attacks):
+                    if atk not in tried_attacks and atk in self.knowledge.attacks:
+                        attack_queue.insert(0, atk)
 
             while datetime.now() < end_time:
                 if not attack_queue:
