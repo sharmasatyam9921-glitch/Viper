@@ -85,6 +85,18 @@ class FindingValidator:
             "prototype_pollution": self._validate_generic,
             "insecure_deserialization": self._validate_generic,
             "request_smuggling": self._validate_generic,
+            # Recon findings — static file/path exposure
+            "robots_txt": self._validate_recon_file,
+            "git_exposure": self._validate_recon_file,
+            "env_file": self._validate_recon_file,
+            "backup_files": self._validate_recon_file,
+            "dir_listing": self._validate_recon_file,
+            "directory_listing": self._validate_recon_file,
+            "clickjacking": self._validate_header_absence,
+            "security_headers_missing": self._validate_header_absence,
+            "csrf_token_leak": self._validate_recon_file,
+            "dom_xss": self._validate_xss,
+            "cors_misconfiguration": self._validate_cors,
         }
 
         validator = validators.get(vuln_type, self._validate_generic)
@@ -465,6 +477,56 @@ class FindingValidator:
     async def _validate_info(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
         """Info-level findings pass but with low confidence."""
         return True, 0.1, "Informational finding"
+
+    async def _validate_recon_file(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
+        """Validate recon file exposure (.env, .git, dir listing, etc.).
+
+        Re-requests the exact URL and checks if it returns 200 with the marker.
+        More lenient than generic — static files don't change between requests.
+        """
+        url = finding.get("url", target_url)
+        marker = finding.get("marker", "")
+
+        if not self.http:
+            return True, 0.5, "No HTTP client — accepting recon finding"
+
+        result = await self.http.get(url)
+        if result.status == 0:
+            return False, 0.0, "Request failed"
+
+        # 200 OK with content is enough for static file exposure
+        if result.status == 200 and len(result.body) > 10:
+            if marker and marker.lower() in result.body.lower():
+                return True, 0.8, "File exposure confirmed — marker present on re-request"
+            # Even without exact marker match, 200 on sensitive path is a finding
+            return True, 0.6, "File exposure confirmed — 200 OK on sensitive path"
+
+        if result.status in (403, 401):
+            return True, 0.4, "Sensitive path exists but restricted"
+
+        return False, 0.15, f"Path returned HTTP {result.status}"
+
+    async def _validate_header_absence(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
+        """Validate missing security headers (clickjacking, CSP, etc.).
+
+        These are always valid if the header is genuinely absent.
+        """
+        url = finding.get("url", target_url)
+        marker = finding.get("marker", "")
+
+        if not self.http:
+            return True, 0.5, "No HTTP client — accepting header finding"
+
+        result = await self.http.get(url)
+        if result.status == 0:
+            return False, 0.0, "Request failed"
+
+        # Check if the missing headers are still missing
+        resp_headers_lower = {k.lower() for k in result.headers} if result.headers else set()
+        if "x-frame-options" not in resp_headers_lower and "content-security-policy" not in resp_headers_lower:
+            return True, 0.7, "Security headers confirmed missing on re-request"
+
+        return False, 0.2, "Security headers now present"
 
     async def _validate_generic(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
         """Generic validator: re-send and check if marker still present."""

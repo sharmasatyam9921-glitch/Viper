@@ -1042,6 +1042,15 @@ class ViperCore:
         _attack_start = time.time()
         _max_attack_secs = 30  # Per-attack time limit to avoid one attack hogging the budget
 
+        # Build attack surface: discovered endpoints with their parameters
+        # This ensures we test /search?q=, /users?id=, etc. — not just the root URL
+        _attack_urls = [base_url]
+        if target.endpoints:
+            for ep in list(target.endpoints)[:5]:
+                ep_clean = ep.rstrip('/').split('?')[0]
+                if ep_clean != base_url and ep_clean not in _attack_urls:
+                    _attack_urls.append(ep_clean)
+
         for payload in attack.payloads:
             if time.time() - _attack_start > _max_attack_secs:
                 self.log(f"  [{attack_name}] Time limit ({_max_attack_secs}s), moving on", "WARN")
@@ -1187,11 +1196,15 @@ class ViperCore:
             elif attack.category == "misc":
                 if "cors" in attack_name and ": " in payload:
                     hdr_name, hdr_val = payload.split(": ", 1)
-                    # Replace {target} placeholder with actual target
                     hdr_val = hdr_val.replace("{target}", self._extract_domain(target.url))
-                    status, body, headers = await self.request(
-                        base_url, headers={hdr_name: hdr_val}
-                    )
+                    # Test CORS on all discovered endpoints (API endpoints are most likely)
+                    status, body, headers = 0, "", {}
+                    for cors_url in _attack_urls:
+                        status, body, headers = await self.request(
+                            cors_url, headers={hdr_name: hdr_val}
+                        )
+                        if status != 0:
+                            break
                     # CORS: check response headers for misconfiguration
                     if status != 0:
                         resp_headers_str = str(headers).lower()
@@ -1582,7 +1595,9 @@ class ViperCore:
                 # Fall through to standard loop below
 
         # ── Standard attack loop (Q-learning fallback or remaining time) ──
-        if not self._react_engine or (datetime.now() < end_time and not findings):
+        # Always run fallback if time remains — even if ReACT found something,
+        # there may be more vulnerabilities to discover
+        if not self._react_engine or datetime.now() < end_time:
             if self._react_engine:
                 self.log("  [Fallback] Running standard attacks for remaining time")
                 # Prioritize quick wins (header checks, CORS) before heavy fuzzing
