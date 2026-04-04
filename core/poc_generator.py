@@ -29,7 +29,7 @@ import sys
 
 URL = "{url}"
 PAYLOAD = """{payload}"""
-MARKER = """{marker}"""
+MARKER = r"""{marker}"""
 
 def test():
     print("[*] Testing SQL Injection...")
@@ -307,7 +307,7 @@ import sys
 
 URL = "{url}"
 PAYLOAD = """{payload}"""
-MARKER = """{marker}"""
+MARKER = r"""{marker}"""
 
 def test():
     print("[*] Testing {vuln_type}...")
