@@ -1130,14 +1130,29 @@ class ViperCore:
                         base_url, method="POST", data=payload
                     )
                 else:
-                    # Test ALL discovered parameters (not just first)
-                    params_to_test = list(target.parameters)[:5] if target.parameters else ["id"]
-                    urls_to_test = [base_url] + [e for e in list(target.endpoints)[:3] if e != base_url]
+                    # Use URL→parameter mapping for targeted injection fuzzing
+                    # This ensures /search gets tested with ?q=, /users with ?id=, etc.
                     found_hit = False
-                    for test_base in urls_to_test:
-                        if found_hit:
-                            break
-                        parsed = urllib.parse.urlparse(test_base)
+
+                    # Priority 1: test known URL→param pairs from surface mapping
+                    if target.url_parameters:
+                        for ep_url, ep_params in target.url_parameters.items():
+                            if found_hit:
+                                break
+                            parsed = urllib.parse.urlparse(ep_url)
+                            for param in ep_params:
+                                test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={urllib.parse.quote(payload)}"
+                                status, body, headers = await self.request(test_url)
+                                if status != 0:
+                                    match_result = self._check_markers(attack.success_markers, body, headers)
+                                    if match_result:
+                                        found_hit = True
+                                        break
+
+                    # Priority 2: fallback to root URL + all params
+                    if not found_hit:
+                        params_to_test = list(target.parameters)[:3] if target.parameters else ["id", "q", "search"]
+                        parsed = urllib.parse.urlparse(base_url)
                         for param in params_to_test:
                             test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={urllib.parse.quote(payload)}"
                             status, body, headers = await self.request(test_url)
@@ -1146,9 +1161,6 @@ class ViperCore:
                                 if match_result:
                                     found_hit = True
                                     break
-                    if not found_hit:
-                        # Use last response for marker check below
-                        pass
             
             elif attack.category == "auth":
                 if "jwt" in attack_name:
@@ -1156,12 +1168,18 @@ class ViperCore:
                     hdrs = {"Authorization": f"Bearer {payload}"}
                     status, body, headers = await self.request(base_url, headers=hdrs)
                 elif "idor" in attack_name:
-                    # Try substituting IDs in ALL discovered parameters
-                    id_params = [p for p in (target.parameters or set()) if any(k in p.lower() for k in ("id", "user", "account", "uid", "pid"))]
-                    if not id_params:
-                        id_params = list(target.parameters)[:3] if target.parameters else ["id"]
-                    parsed = urllib.parse.urlparse(base_url)
-                    for param in id_params[:3]:
+                    # Use URL→param mapping for IDOR, prioritize ID-like params
+                    idor_targets = []
+                    if target.url_parameters:
+                        for ep, params in target.url_parameters.items():
+                            for p in params:
+                                if any(k in p.lower() for k in ("id", "user", "account", "uid", "pid")):
+                                    idor_targets.append((ep, p))
+                    if not idor_targets:
+                        fallback_params = list(target.parameters)[:3] if target.parameters else ["id"]
+                        idor_targets = [(base_url, p) for p in fallback_params]
+                    for ep, param in idor_targets[:5]:
+                        parsed = urllib.parse.urlparse(ep)
                         test_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{param}={urllib.parse.quote(payload)}"
                         status, body, headers = await self.request(test_url)
                         if status != 0:

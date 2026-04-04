@@ -521,6 +521,10 @@ class ViperKnowledge:
                     r"actuator", r"configprops", r"beans",
                     r"debug.*vars", r"memstats",
                     r"graphiql", r"GraphQL",
+                    # Generic debug info markers
+                    r"secret_key", r"api_key", r"database.*://",
+                    r"\"debug\".*true", r"\"environment\"",
+                    r"stack.trace", r"Traceback",
                 ],
                 failure_markers=["404", "Not Found", "403"],
                 followups=["env_file", "source_maps"]
@@ -817,7 +821,7 @@ class ViperKnowledge:
                 category="misc",
                 payloads=["GET /"],
                 indicators=["http", "html"],
-                success_markers=[],  # Checked via header absence
+                success_markers=["CLICKJACKING"],  # Set by handler when headers missing
                 failure_markers=["X-Frame-Options", "frame-ancestors"],
                 followups=[]
             ),
@@ -891,7 +895,7 @@ class ViperKnowledge:
                 category="misc",
                 payloads=["GET /"],
                 indicators=["http"],
-                success_markers=[],  # Checked via header absence
+                success_markers=["MISSING SECURITY HEADERS"],  # Set by handler
                 failure_markers=[
                     "Strict-Transport-Security",
                     "Content-Security-Policy",

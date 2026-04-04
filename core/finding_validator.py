@@ -111,9 +111,25 @@ class FindingValidator:
             return False, 0.0, f"Validation error: {e}"
 
     async def _validate_sqli(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
-        """Boolean blind comparison: true condition vs false condition should differ."""
+        """Validate SQL injection: error-based first, then boolean blind comparison."""
         url = finding.get("url", target_url)
         payload = finding.get("payload", "")
+        marker = finding.get("marker", "")
+
+        # Error-based SQLi: if marker is a SQL error pattern, re-request and confirm
+        if marker:
+            result = await self.http.get(url)
+            if result.status != 0:
+                import re as _re
+                _sql_errors = [
+                    r"SQL[\s\S]{0,40}syntax", r"mysql", r"ORA-\d{4,5}",
+                    r"PostgreSQL.*ERROR", r"sqlite3", r"ODBC",
+                    r"You have an error in your SQL", r"Unclosed quotation",
+                    r"supplied argument is not a valid MySQL",
+                ]
+                for pat in _sql_errors:
+                    if _re.search(pat, result.body, _re.IGNORECASE):
+                        return True, 0.85, f"Error-based SQLi confirmed: {pat}"
 
         # Parse the URL to find injection point
         parsed = urlparse(url)

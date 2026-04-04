@@ -96,6 +96,9 @@ class Target:
     endpoints: Set[str] = field(default_factory=set)
     parameters: Set[str] = field(default_factory=set)
     vulns_found: List[Dict] = field(default_factory=list)
+    # URL → parameter mapping from surface mapping (preserves which param belongs to which URL)
+    # e.g., {"http://host/search": ["q"], "http://host/users": ["id"]}
+    url_parameters: Dict[str, List[str]] = field(default_factory=dict)
 
     # Recon data
     subdomains: Set[str] = field(default_factory=set)

@@ -269,12 +269,12 @@ async def phase_surface(
         target.js_endpoints = surface_result.js_endpoints
         target.api_endpoints = surface_result.api_endpoints
         target.endpoints.update(surface_result.api_endpoints)
-        # Also add discovered parameterized URL paths as endpoints
-        # e.g., http://host/search?q=test → add http://host/search
-        for url in surface_result.url_parameters:
+        # Preserve URL→parameter mapping for targeted fuzzing
+        for url, params in surface_result.url_parameters.items():
             clean = url.split("?")[0].rstrip("/")
             if clean:
                 target.endpoints.add(clean)
+                target.url_parameters[clean] = list(params)
         result["phase"] = surface_result.to_dict()
 
         # Deduplicate JS secrets
