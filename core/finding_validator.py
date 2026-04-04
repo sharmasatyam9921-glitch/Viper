@@ -510,25 +510,28 @@ class FindingValidator:
         if result.status == 0:
             return False, 0.0, "Request failed"
 
-        # 200 OK with content is enough for static file exposure
+        # Only 200 OK with actual content is a real file exposure
         if result.status == 200 and len(result.body) > 10:
+            # Check it's not a generic error/redirect page
+            if "access denied" in result.body.lower() or "not found" in result.body.lower():
+                return False, 0.1, "200 but generic error page content"
             if marker and marker.lower() in result.body.lower():
                 return True, 0.8, "File exposure confirmed — marker present on re-request"
-            # Even without exact marker match, 200 on sensitive path is a finding
             return True, 0.6, "File exposure confirmed — 200 OK on sensitive path"
 
+        # 403/401 means WAF/CDN is blocking — NOT a confirmed exposure
         if result.status in (403, 401):
-            return True, 0.4, "Sensitive path exists but restricted"
+            return False, 0.15, f"HTTP {result.status} — WAF/CDN blocking, not confirmed exposure"
 
         return False, 0.15, f"Path returned HTTP {result.status}"
 
     async def _validate_header_absence(self, finding: Dict, target_url: str) -> Tuple[bool, float, str]:
         """Validate missing security headers (clickjacking, CSP, etc.).
 
-        These are always valid if the header is genuinely absent.
+        These are only valid on actual application pages (200 OK),
+        NOT on error pages (403/404) which naturally lack security headers.
         """
         url = finding.get("url", target_url)
-        marker = finding.get("marker", "")
 
         if not self.http:
             return True, 0.5, "No HTTP client — accepting header finding"
@@ -537,10 +540,15 @@ class FindingValidator:
         if result.status == 0:
             return False, 0.0, "Request failed"
 
-        # Check if the missing headers are still missing
+        # CRITICAL: Reject if response is an error page (403, 404, 5xx)
+        # Error pages from CDN/WAF naturally lack security headers — not a finding
+        if result.status != 200:
+            return False, 0.1, f"Response is HTTP {result.status} (error/block page), not the actual application"
+
+        # Check if the missing headers are still missing on the REAL page
         resp_headers_lower = {k.lower() for k in result.headers} if result.headers else set()
         if "x-frame-options" not in resp_headers_lower and "content-security-policy" not in resp_headers_lower:
-            return True, 0.7, "Security headers confirmed missing on re-request"
+            return True, 0.7, "Security headers confirmed missing on real application page"
 
         return False, 0.2, "Security headers now present"
 

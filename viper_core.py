@@ -1401,6 +1401,9 @@ class ViperCore:
         status, body, headers = await self.request(target_url)
         if status == 0:
             return {"success": False, "error": "Connection failed"}
+        if status == 403 and ("access denied" in body.lower() or "forbidden" in body.lower()):
+            self.log(f"[WARN] Target returns 403 Forbidden — likely WAF/CDN blocking non-browser requests")
+            self.log(f"[WARN] Findings on 403 pages are unreliable. Consider using --stealth 3 or a browser proxy.")
 
         target.technologies = self.knowledge.detect_technologies(body, headers)
 
