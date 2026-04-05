@@ -99,12 +99,17 @@ class AutoSubmitPipeline:
         self._tracker = self._load_tracker()
 
     def _load_tracker(self) -> dict:
+        default = {"submissions": [], "pending": [], "rejected": []}
         if self._tracker_path.exists():
             try:
-                return json.loads(self._tracker_path.read_text())
+                data = json.loads(self._tracker_path.read_text())
+                # Ensure all required keys exist
+                for key in default:
+                    data.setdefault(key, [])
+                return data
             except (json.JSONDecodeError, OSError):
                 pass
-        return {"submissions": [], "pending": [], "rejected": []}
+        return default
 
     def _save_tracker(self):
         self._tracker_path.write_text(json.dumps(self._tracker, indent=2, default=str))
