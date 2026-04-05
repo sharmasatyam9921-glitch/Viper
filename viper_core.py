@@ -1149,6 +1149,11 @@ class ViperCore:
             if attack.category == "recon":
                 test_url = f"{base_url}{payload}"
                 status, body, headers = await self.request(test_url)
+                # SPA check: if response size matches baseline, it's a soft-404
+                if self._is_spa and self._spa_baseline and status == 200 and body:
+                    _ratio = len(body) / max(self._spa_baseline, 1)
+                    if 0.85 < _ratio < 1.15:
+                        continue  # Skip — SPA returned homepage, not the actual file
             
             elif attack.category == "injection":
                 if "graphql" in attack_name:
@@ -1519,6 +1524,24 @@ class ViperCore:
         status, body, headers = await self.request(target_url)
         if status == 0:
             return {"success": False, "error": "Connection failed"}
+
+        # SPA / soft-404 detection: request a known-nonexistent path
+        # If it returns 200 with same content as homepage, it's an SPA
+        self._spa_baseline = None
+        self._is_spa = False
+        try:
+            _canary = f"{target_url.rstrip('/')}/viper_nonexistent_path_404_check_{int(time.time())}"
+            _s404, _b404, _ = await self.request(_canary)
+            if _s404 == 200 and _b404 and len(_b404) > 100:
+                # Compare with homepage — if >90% same size, it's an SPA
+                _size_ratio = len(_b404) / max(len(body), 1)
+                if 0.85 < _size_ratio < 1.15:
+                    self._is_spa = True
+                    self._spa_baseline = len(_b404)
+                    self.log(f"[SPA] Soft-404 detected: all paths return ~{self._spa_baseline} bytes. "
+                             f"Recon file checks will verify content differs from baseline.")
+        except Exception:
+            pass
         if status == 403 and ("access denied" in body.lower() or "forbidden" in body.lower() or "cloudflare" in body.lower() or "attention required" in body.lower()):
             _waf_type = "Cloudflare" if "cloudflare" in body.lower() else "WAF/CDN"
             self.log(f"[WARN] Target returns 403 — {_waf_type} blocking requests. Findings on block pages will be filtered.")

@@ -527,6 +527,17 @@ class FindingValidator:
 
         # Only 200 OK with actual content is a real file exposure
         if result.status == 200 and len(result.body) > 10:
+            # SPA soft-404 check: compare with a known-nonexistent path
+            try:
+                import hashlib, time as _t
+                _canary_url = url.rsplit("/", 1)[0] + f"/viper_spa_check_{int(_t.time())}"
+                _canary = await self.http.get(_canary_url)
+                if _canary.status == 200 and _canary.body:
+                    _ratio = len(result.body) / max(len(_canary.body), 1)
+                    if 0.85 < _ratio < 1.15:
+                        return False, 0.05, "SPA soft-404: response identical to nonexistent path"
+            except Exception:
+                pass
             # Check it's not a generic error/redirect page
             if "access denied" in result.body.lower() or "not found" in result.body.lower():
                 return False, 0.1, "200 but generic error page content"
