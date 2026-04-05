@@ -24,7 +24,7 @@ export function GlobalHeader() {
       <div className={styles.logo}>
         <Image src="/logo.png" alt="VIPER" width={28} height={28} className={styles.logoImg} />
         <span className={styles.logoText}>
-          <span className={styles.logoAccent}>Red</span>Amon
+          <span className={styles.logoAccent}>VI</span>PER
         </span>
       </div>
 

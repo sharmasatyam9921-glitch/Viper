@@ -22,18 +22,18 @@
   --color-gray-950: #0a0a0a;
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     CRIMSON (Primary / Brand - VIPER)
+     EMERALD (Primary / Brand - VIPER: Green + Cyan + Black)
      ═══════════════════════════════════════════════════════════════════════════ */
-  --color-crimson-50: #fef2f2;
-  --color-crimson-100: #fee2e2;
-  --color-crimson-200: #ffcdd2;
-  --color-crimson-300: #ef9a9a;
-  --color-crimson-400: #ef5350;
-  --color-crimson-500: #e53935;
-  --color-crimson-600: #d32f2f;
-  --color-crimson-700: #c62828;
-  --color-crimson-800: #b71c1c;
-  --color-crimson-900: #7f1d1d;
+  --color-crimson-50: #ecfdf5;
+  --color-crimson-100: #d1fae5;
+  --color-crimson-200: #a7f3d0;
+  --color-crimson-300: #6ee7b7;
+  --color-crimson-400: #34d399;
+  --color-crimson-500: #10b981;
+  --color-crimson-600: #059669;
+  --color-crimson-700: #047857;
+  --color-crimson-800: #065f46;
+  --color-crimson-900: #064e3b;
 
   /* ═══════════════════════════════════════════════════════════════════════════
      BLUE (Secondary / Info)

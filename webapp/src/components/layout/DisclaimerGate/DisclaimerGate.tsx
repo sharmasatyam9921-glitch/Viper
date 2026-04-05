@@ -120,7 +120,7 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
           <div className={styles.welcomeHeader}>
             <Image src="/logo.png" alt="VIPER" width={36} height={36} style={{ objectFit: 'contain' }} />
             <h1 className={styles.welcomeTitle}>
-              Welcome to <span className={styles.logoAccent}>Red</span>Amon
+              Welcome to <span className={styles.logoAccent}>VIPER</span>
             </h1>
           </div>
 
