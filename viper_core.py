@@ -802,6 +802,17 @@ class ViperCore:
                 if result.waf_detected and self.db:
                     domain = urllib.parse.urlparse(url).netloc
                     self.db.set_waf(domain, result.waf_detected)
+                # Cloudflare bypass: if WAF blocks, retry via Playwright
+                if result.status in (403, 503) and result.body:
+                    _bl = result.body.lower()
+                    if any(s in _bl for s in ("cloudflare", "attention required", "challenge-platform")):
+                        if hasattr(self, 'playwright_tool') and self.playwright_tool:
+                            try:
+                                pw_result = await self.playwright_tool.navigate(url)
+                                if pw_result.success and len(pw_result.content or "") > 100:
+                                    return 200, pw_result.content, {}
+                            except Exception:
+                                pass
                 return result.status, result.body, result.headers
             except Exception as e:
                 return 0, str(e), {}
