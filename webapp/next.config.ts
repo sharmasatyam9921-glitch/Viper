@@ -3,6 +3,10 @@ import type { NextConfig } from 'next'
 const nextConfig: NextConfig = {
   output: 'standalone',
 
+  turbopack: {
+    root: __dirname,
+  },
+
   serverExternalPackages: ['neo4j-driver', 'pdfjs-dist', 'pdf-parse'],
 
   images: {

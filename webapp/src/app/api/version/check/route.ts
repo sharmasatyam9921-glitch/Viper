@@ -2,7 +2,7 @@ import { parseChangelog, filterChangelog } from '@/lib/parseChangelog'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 
-const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/samugit83/redamon/master'
+const GITHUB_RAW_BASE = 'https://raw.githubusercontent.com/sharmasatyam9921-glitch/Viper/master'
 const FETCH_TIMEOUT = 5000
 
 function readLocalVersion(): string {

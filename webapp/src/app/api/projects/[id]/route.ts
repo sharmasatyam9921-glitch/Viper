@@ -7,9 +7,9 @@ import path from 'path'
 import { getSession } from '@/app/api/graph/neo4j'
 
 // Path to output directories (fallback for local deletion)
-const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/recon/output'
-const GVM_OUTPUT_PATH = process.env.GVM_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/gvm_scan/output'
-const GITHUB_HUNT_OUTPUT_PATH = process.env.GITHUB_HUNT_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/github_secret_hunt/output'
+const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/home/samuele/Progetti didattici/VIPER/recon/output'
+const GVM_OUTPUT_PATH = process.env.GVM_OUTPUT_PATH || '/home/samuele/Progetti didattici/VIPER/gvm_scan/output'
+const GITHUB_HUNT_OUTPUT_PATH = process.env.GITHUB_HUNT_OUTPUT_PATH || '/home/samuele/Progetti didattici/VIPER/github_secret_hunt/output'
 
 // Recon orchestrator URL for file deletion
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'

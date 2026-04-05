@@ -32,8 +32,8 @@ interface ProjectContextValue {
 
 const ProjectContext = createContext<ProjectContextValue | null>(null)
 
-const STORAGE_KEY_PROJECT = 'redamon-current-project'
-const STORAGE_KEY_USER = 'redamon-current-user'
+const STORAGE_KEY_PROJECT = 'viper-current-project'
+const STORAGE_KEY_USER = 'viper-current-user'
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const [currentProject, setCurrentProjectState] = useState<ProjectSummary | null>(null)

@@ -323,7 +323,7 @@ export function GraphToolbar({
                 disabled={!gvmAvailable || isGvmRunning || (!hasReconData && !isGvmPaused) || (stealthMode && !isGvmPaused)}
                 title={
                   !gvmAvailable
-                    ? 'GVM is not installed. Run ./redamon.sh install --gvm to enable vulnerability scanning'
+                    ? 'GVM is not installed. Run ./viper.sh install --gvm to enable vulnerability scanning'
                     : stealthMode && !isGvmPaused
                     ? 'GVM scanning is disabled in Stealth Mode (generates ~50,000 active probes per target)'
                     : !hasReconData && !isGvmPaused

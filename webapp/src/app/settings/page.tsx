@@ -825,7 +825,7 @@ export default function SettingsPage() {
         </div>
         <p className={styles.sectionHint}>
           Upload .md files defining custom attack skill workflows. Skills become available as toggles in all project settings.
-          {' '}Browse <a href="https://github.com/samugit83/redamon/wiki/Agent-Skills#community-skills" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-primary)', textDecoration: 'underline' }}>community skills</a> for ready-to-use templates.
+          {' '}Browse <a href="https://github.com/sharmasatyam9921-glitch/Viper/wiki/Agent-Skills#community-skills" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-primary)', textDecoration: 'underline' }}>community skills</a> for ready-to-use templates.
         </p>
 
         {skillsLoading ? (
@@ -1614,7 +1614,7 @@ function SystemSection() {
   const [expandedVersions, setExpandedVersions] = useState<Set<string>>(new Set())
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText('./redamon.sh update').then(() => {
+    navigator.clipboard.writeText('./viper.sh update').then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
@@ -1677,7 +1677,7 @@ function SystemSection() {
               fontFamily: 'var(--font-mono)',
             }}>
               <code style={{ flex: 1, fontSize: '13px', color: 'var(--color-success)' }}>
-                ./redamon.sh update
+                ./viper.sh update
               </code>
               <button
                 onClick={handleCopy}
@@ -1749,7 +1749,7 @@ function SystemSection() {
         {/* Links */}
         <div style={{ display: 'flex', gap: '12px', fontSize: '11px' }}>
           <a
-            href="https://github.com/samugit83/redamon/blob/master/CHANGELOG.md"
+            href="https://github.com/sharmasatyam9921-glitch/Viper/blob/master/CHANGELOG.md"
             target="_blank"
             rel="noopener noreferrer"
             style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-tertiary)', textDecoration: 'none' }}

@@ -110,7 +110,7 @@ export function UpdateNotification() {
       footer={
         <div className={styles.footer}>
           <a
-            href="https://github.com/samugit83/redamon/blob/master/CHANGELOG.md"
+            href="https://github.com/sharmasatyam9921-glitch/Viper/blob/master/CHANGELOG.md"
             target="_blank"
             rel="noopener noreferrer"
             className={styles.releasesLink}
@@ -129,7 +129,7 @@ export function UpdateNotification() {
           <Download size={20} className={styles.downloadIcon} />
           <div>
             <p className={styles.versionText}>
-              RedAmon <strong>v{latestVersion}</strong> is available.
+              VIPER <strong>v{latestVersion}</strong> is available.
               You are running <strong>v{currentVersion}</strong>.
             </p>
           </div>
@@ -139,7 +139,7 @@ export function UpdateNotification() {
 
         <div className={styles.updateSection}>
           <p className={styles.updateLabel}>Run this command in your terminal to update:</p>
-          <CopyCommand command="./redamon.sh update" />
+          <CopyCommand command="./viper.sh update" />
         </div>
       </div>
     </Modal>

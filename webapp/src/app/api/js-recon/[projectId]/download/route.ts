@@ -4,7 +4,7 @@ import { readFile, stat, open } from 'fs/promises'
 import { existsSync } from 'fs'
 import path from 'path'
 
-const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/recon/output'
+const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/home/samuele/Progetti didattici/VIPER/recon/output'
 const PROJECT_ID_RE = /^[a-zA-Z0-9_-]+$/
 
 interface RouteParams {

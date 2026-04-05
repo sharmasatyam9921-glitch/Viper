@@ -22,7 +22,7 @@ export function GlobalHeader() {
   return (
     <header className={styles.header}>
       <div className={styles.logo}>
-        <Image src="/logo.png" alt="RedAmon" width={28} height={28} className={styles.logoImg} />
+        <Image src="/logo.png" alt="VIPER" width={28} height={28} className={styles.logoImg} />
         <span className={styles.logoText}>
           <span className={styles.logoAccent}>Red</span>Amon
         </span>
@@ -66,7 +66,7 @@ export function GlobalHeader() {
         <div className={styles.divider} />
 
         <a
-          href="https://github.com/samugit83/redamon/wiki"
+          href="https://github.com/sharmasatyam9921-glitch/Viper/wiki"
           target="_blank"
           rel="noopener noreferrer"
           className={styles.helpLink}

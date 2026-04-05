@@ -11,7 +11,7 @@ import {
   DISCLAIMER_VERSION,
   DISCLAIMER_STORAGE_KEY,
   DISCLAIMER_GITHUB_URL,
-  REDAMON_GITHUB_URL,
+  VIPER_GITHUB_URL,
   WIKI_URL,
 } from '@/lib/disclaimerVersion'
 import styles from './DisclaimerGate.module.css'
@@ -118,7 +118,7 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
         <div className={styles.card}>
           <Image src="/logo.png" alt="" aria-hidden width={520} height={520} className={styles.eyeBg} />
           <div className={styles.welcomeHeader}>
-            <Image src="/logo.png" alt="RedAmon" width={36} height={36} style={{ objectFit: 'contain' }} />
+            <Image src="/logo.png" alt="VIPER" width={36} height={36} style={{ objectFit: 'contain' }} />
             <h1 className={styles.welcomeTitle}>
               Welcome to <span className={styles.logoAccent}>Red</span>Amon
             </h1>
@@ -126,11 +126,11 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
 
           <div className={styles.body}>
             <p className={styles.welcomeThank}>
-              Thank you for downloading and installing <strong>RedAmon</strong>!
+              Thank you for downloading and installing <strong>VIPER</strong>!
             </p>
 
             <p className={styles.welcomeDesc}>
-              <strong>RedAmon</strong> is an open-source, AI-powered
+              <strong>VIPER</strong> is an open-source, AI-powered
               penetration testing platform that combines autonomous
               reconnaissance, graph-based attack surface mapping, and an
               intelligent agent to help security professionals work faster and
@@ -139,7 +139,7 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
 
             <div className={styles.missionBox}>
               <p className={styles.missionText}>
-                Our commitment is to keep RedAmon always up-to-date and make it
+                Our commitment is to keep VIPER always up-to-date and make it
                 the <strong>#1 open-source pentesting platform</strong> in the
                 world. To get there, we need the community&apos;s help.
               </p>
@@ -152,14 +152,14 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
             </div>
 
             <a
-              href={REDAMON_GITHUB_URL}
+              href={VIPER_GITHUB_URL}
               target="_blank"
               rel="noopener noreferrer"
               className={styles.starLink}
             >
               <Github size={20} />
               <Star size={18} className={styles.starIcon} />
-              <span>Star RedAmon on GitHub</span>
+              <span>Star VIPER on GitHub</span>
               <ExternalLink size={13} className={styles.starExternal} />
             </a>
           </div>
@@ -282,7 +282,7 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
 
         <div className={styles.body}>
           <p className={styles.intro}>
-            <strong>RedAmon</strong> is an AI-powered penetration testing
+            <strong>VIPER</strong> is an AI-powered penetration testing
             platform intended exclusively for{' '}
             <strong>authorized security testing</strong>,{' '}
             <strong>educational purposes</strong>, and{' '}

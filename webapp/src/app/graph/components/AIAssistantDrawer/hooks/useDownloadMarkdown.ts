@@ -266,7 +266,7 @@ export function useDownloadMarkdown(deps: DownloadMarkdownDeps) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `redamon-session-${timestamp}.md`
+    a.download = `viper-session-${timestamp}.md`
     a.click()
     URL.revokeObjectURL(url)
   }, [chatItems, currentPhase, iterationCount, modelName, todoList])

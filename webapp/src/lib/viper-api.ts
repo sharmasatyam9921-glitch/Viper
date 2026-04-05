@@ -1,8 +1,8 @@
 /**
  * VIPER API Adapter
  *
- * Maps Redamon's frontend API calls to VIPER's Python backend at localhost:8080.
- * This is the bridge between Redamon's Next.js frontend and VIPER's Python server.
+ * Maps VIPER's frontend API calls to VIPER's Python backend at localhost:8080.
+ * This is the bridge between VIPER's Next.js frontend and VIPER's Python server.
  */
 
 const VIPER_API = process.env.NEXT_PUBLIC_VIPER_API || 'http://localhost:8080';

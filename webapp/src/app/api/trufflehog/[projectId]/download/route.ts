@@ -5,7 +5,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 
 // Path to TruffleHog output directory (mounted volume or local path)
-const TRUFFLEHOG_OUTPUT_PATH = process.env.TRUFFLEHOG_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/trufflehog_scan/output'
+const TRUFFLEHOG_OUTPUT_PATH = process.env.TRUFFLEHOG_OUTPUT_PATH || '/home/samuele/Progetti didattici/VIPER/trufflehog_scan/output'
 
 interface RouteParams {
   params: Promise<{ projectId: string }>

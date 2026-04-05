@@ -267,7 +267,7 @@ export const ViewTabs = memo(function ViewTabs({
           onClick={() => onViewChange('terminal')}
         >
           <SquareTerminal size={14} />
-          <span>RedAmon Terminal</span>
+          <span>VIPER Terminal</span>
         </button>
         <button
           role="tab"

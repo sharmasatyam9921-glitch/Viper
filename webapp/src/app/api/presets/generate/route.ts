@@ -8,7 +8,7 @@ import { reconPresetSchema, extractJson, RECON_PARAMETER_CATALOG } from '@/lib/r
 // language description.  Validates the output with Zod before returning.
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are a recon pipeline configuration expert for RedAmon, an AI-powered red-team reconnaissance platform.
+const SYSTEM_PROMPT = `You are a recon pipeline configuration expert for VIPER, an AI-powered red-team reconnaissance platform.
 
 Given a user's natural-language description, produce a JSON object whose keys are recon pipeline parameters and whose values configure the scan strategy.
 

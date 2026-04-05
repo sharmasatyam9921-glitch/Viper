@@ -5,7 +5,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 
 // Path to GitHub hunt output directory (mounted volume or local path)
-const GITHUB_HUNT_OUTPUT_PATH = process.env.GITHUB_HUNT_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/github_secret_hunt/output'
+const GITHUB_HUNT_OUTPUT_PATH = process.env.GITHUB_HUNT_OUTPUT_PATH || '/home/samuele/Progetti didattici/VIPER/github_secret_hunt/output'
 
 interface RouteParams {
   params: Promise<{ projectId: string }>

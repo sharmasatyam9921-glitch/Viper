@@ -401,7 +401,7 @@ export function AgentBehaviourSection({ data, updateField }: AgentBehaviourSecti
                   The AI agent may perform exploitation, post-exploitation, dangerous tool executions, or out-of-scope actions without human approval.
                   This significantly increases the risk of unintended damage to target systems.
                   You assume full responsibility for all autonomous agent actions.
-                  See <a href="https://github.com/samugit83/redamon/blob/master/DISCLAIMER.md" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>DISCLAIMER.md</a> for details.
+                  See <a href="https://github.com/sharmasatyam9921-glitch/Viper/blob/master/DISCLAIMER.md" target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'underline' }}>DISCLAIMER.md</a> for details.
                 </span>
               </div>
             )}

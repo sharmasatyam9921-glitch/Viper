@@ -1,28 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 
-const RECON_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://recon-orchestrator:8010'
+const VIPER_API = process.env.NEXT_PUBLIC_VIPER_API || 'http://localhost:8080'
 
-async function fetchStatus(url: string) {
+export async function GET() {
   try {
-    const res = await fetch(url, { cache: 'no-store' })
-    if (!res.ok) return null
-    return await res.json()
-  } catch {
-    return null
-  }
-}
-
-export async function GET(request: NextRequest) {
-  const projectId = request.nextUrl.searchParams.get('projectId')
-  if (!projectId) {
-    return NextResponse.json({ error: 'projectId is required' }, { status: 400 })
-  }
-
-  const [recon, gvm, githubHunt] = await Promise.all([
-    fetchStatus(`${RECON_URL}/recon/${projectId}/status`),
-    fetchStatus(`${RECON_URL}/gvm/${projectId}/status`),
-    fetchStatus(`${RECON_URL}/github-hunt/${projectId}/status`),
-  ])
-
-  return NextResponse.json({ recon, gvm, githubHunt })
+    const res = await fetch(`${VIPER_API}/api/scan/status`, { cache: 'no-store' })
+    if (res.ok) {
+      const data = await res.json()
+      return NextResponse.json({
+        recon: data.recon || null,
+        gvm: data.gvm || null,
+        githubHunt: data.githubHunt || data.github_hunt || null,
+      })
+    }
+  } catch { /* VIPER backend unreachable */ }
+  return NextResponse.json({ recon: null, gvm: null, githubHunt: null })
 }

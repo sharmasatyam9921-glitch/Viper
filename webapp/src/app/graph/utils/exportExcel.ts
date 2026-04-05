@@ -44,5 +44,5 @@ export async function exportToExcel(rows: TableRow[], filename?: string) {
   XLSX.utils.book_append_sheet(wb, ws, 'Nodes')
 
   const ts = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')
-  XLSX.writeFile(wb, `${filename || 'redamon-data'}-${ts}.xlsx`)
+  XLSX.writeFile(wb, `${filename || 'viper-data'}-${ts}.xlsx`)
 }

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 
-const SESSION_STORAGE_KEY = 'redamon-session-id'
+const SESSION_STORAGE_KEY = 'viper-session-id'
 
 function generateSessionId(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'

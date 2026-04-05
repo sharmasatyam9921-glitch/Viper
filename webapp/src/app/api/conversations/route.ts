@@ -1,71 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
-import prisma from '@/lib/prisma'
 
-// GET /api/conversations?projectId=X&userId=Y
-export async function GET(request: NextRequest) {
+const VIPER_API = process.env.NEXT_PUBLIC_VIPER_API || 'http://localhost:8080'
+
+// GET /api/conversations - Proxy to VIPER chat history
+export async function GET() {
   try {
-    const { searchParams } = new URL(request.url)
-    const projectId = searchParams.get('projectId')
-    const userId = searchParams.get('userId')
-
-    if (!projectId || !userId) {
-      return NextResponse.json(
-        { error: 'projectId and userId are required' },
-        { status: 400 }
-      )
+    const res = await fetch(`${VIPER_API}/api/chat/history`, { cache: 'no-store' })
+    if (res.ok) {
+      const data = await res.json()
+      return NextResponse.json(data.conversations || [])
     }
-
-    const conversations = await prisma.conversation.findMany({
-      where: { projectId, userId },
-      orderBy: { updatedAt: 'desc' },
-      select: {
-        id: true,
-        sessionId: true,
-        title: true,
-        status: true,
-        agentRunning: true,
-        currentPhase: true,
-        iterationCount: true,
-        activeSkillId: true,
-        createdAt: true,
-        updatedAt: true,
-        _count: { select: { messages: true } },
-      },
-    })
-
-    return NextResponse.json(conversations)
-  } catch (error) {
-    console.error('Failed to fetch conversations:', error)
-    return NextResponse.json(
-      { error: 'Failed to fetch conversations' },
-      { status: 500 }
-    )
-  }
+  } catch {}
+  return NextResponse.json([])
 }
 
-// POST /api/conversations - Create a new conversation
+// POST /api/conversations - Create conversation (proxy to VIPER)
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { projectId, userId, sessionId } = body
-
-    if (!projectId || !userId || !sessionId) {
-      return NextResponse.json(
-        { error: 'projectId, userId, and sessionId are required' },
-        { status: 400 }
-      )
-    }
-
-    const conversation = await prisma.conversation.create({
-      data: { projectId, userId, sessionId },
+    const res = await fetch(`${VIPER_API}/api/chat/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     })
-
-    return NextResponse.json(conversation, { status: 201 })
-  } catch (error) {
-    console.error('Failed to create conversation:', error)
-    return NextResponse.json(
-      { error: 'Failed to create conversation' },
-      { status: 500 }
-    )
-  }
+    if (res.ok) return NextResponse.json(await res.json(), { status: 201 })
+  } catch {}
+  return NextResponse.json({ id: Date.now().toString(), messages: [] }, { status: 201 })
 }
