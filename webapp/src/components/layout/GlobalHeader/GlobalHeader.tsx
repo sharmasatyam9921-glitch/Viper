@@ -22,7 +22,6 @@ export function GlobalHeader() {
   return (
     <header className={styles.header}>
       <div className={styles.logo}>
-        <Image src="/logo.png" alt="VIPER" width={28} height={28} className={styles.logoImg} />
         <span className={styles.logoText}>
           <span className={styles.logoAccent}>VI</span>PER
         </span>

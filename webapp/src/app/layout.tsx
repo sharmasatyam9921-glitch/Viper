@@ -9,10 +9,7 @@ import { AppLayout } from '@/components/layout'
 export const metadata: Metadata = {
   title: 'VIPER',
   description: 'Security reconnaissance and vulnerability assessment dashboard',
-  icons: {
-    icon: '/favicon.ico',
-    apple: '/favicon.png',
-  },
+  // No custom favicon — uses browser default
 }
 
 export default function RootLayout({
