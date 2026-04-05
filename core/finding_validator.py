@@ -100,6 +100,21 @@ class FindingValidator:
         }
 
         validator = validators.get(vuln_type, self._validate_generic)
+
+        # Pre-check: if the finding URL returns a WAF block page, reject immediately
+        if self.http:
+            try:
+                url = finding.get("url", target_url)
+                pre = await self.http.get(url)
+                if pre.status in (403, 503) and pre.body:
+                    _bl = pre.body.lower()
+                    if any(s in _bl for s in ("cloudflare", "attention required", "access denied",
+                                               "incapsula", "akamai", "ddos protection",
+                                               "checking your browser", "challenge-platform")):
+                        return False, 0.0, f"WAF block page (HTTP {pre.status}) — not a real finding"
+            except Exception:
+                pass
+
         try:
             return await asyncio.wait_for(
                 validator(finding, target_url),

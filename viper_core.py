@@ -122,6 +122,10 @@ _ml.register("tools.metasploit", "MetasploitClient")
 _ml.register("agents.codefix_agent", "CodeFixAgent")
 _ml.register("agents.post_exploit", "PostExploitAgent")
 
+# Template generation & chain escalation
+_ml.register("core.template_generator", "NucleiTemplateGenerator")
+_ml.register("core.chain_escalator", "ChainEscalator")
+
 # Knowledge graph & orchestrator
 _ml.register("core.graph_engine", "GraphEngine")
 _ml.register("core.chain_writer", "ChainWriter")
@@ -156,6 +160,15 @@ _ml.register("recon.pipeline", "ReconPipeline")
 # MCP & tools
 _ml.register("tools.mcp_tools", "MCPToolInterface")
 _ml.register("tools.msf_persistent", "PersistentMsfConsole")
+
+# Playwright browser tool
+_ml.register("tools.playwright_tool", "PlaywrightTool", "BrowserResult")
+
+# Authenticated scanner
+_ml.register("core.auth_scanner", "AuthScanner")
+
+# JS Secret Scanner
+_ml.register("recon.js_scanner", "JSSecretScanner")
 
 # Attack modules (v5.0)
 _ml.register("core.agent_bus", "AgentBus", "Priority")
@@ -220,6 +233,9 @@ CVSS4_AVAILABLE = _ml.available("CvssV4Score")
 FINDING_STREAM_AVAILABLE = _ml.available("FindingStream")
 LLM_OBSERVER_AVAILABLE = _ml.available("LLMObserver")
 TOOL_REGISTRY_AVAILABLE = _ml.available("ToolRegistry")
+PLAYWRIGHT_AVAILABLE = _ml.available("PlaywrightTool")
+AUTH_SCANNER_AVAILABLE = _ml.available("AuthScanner")
+JS_SCANNER_AVAILABLE = _ml.available("JSSecretScanner")
 
 # ── Convenience accessors for loaded modules ──
 # These replace the direct imports (e.g., `ReconEngine` → `_ml.get("ReconEngine")`)
@@ -321,6 +337,9 @@ LLMObserver = _ml.get("LLMObserver")
 get_observer = _ml.get("get_observer")
 ToolRegistry = _ml.get("ToolRegistry")
 ToolType = _ml.get("ToolType")
+PlaywrightTool = _ml.get("PlaywrightTool")
+AuthScanner = _ml.get("AuthScanner")
+JSSecretScanner = _ml.get("JSSecretScanner")
 
 
 class ViperCore:
@@ -669,6 +688,36 @@ class ViperCore:
             except Exception as e:
                 self.log(f"[HumanTiming] Init failed: {e}", "WARN")
 
+        # Playwright browser tool (WAF bypass)
+        self.playwright_tool = None
+        if PLAYWRIGHT_AVAILABLE:
+            try:
+                if PlaywrightTool.is_available():
+                    self.playwright_tool = PlaywrightTool()
+                    self.log("[Playwright] Browser tool loaded (WAF bypass ready)", "INFO")
+                else:
+                    self.log("[Playwright] Package not installed (pip install playwright)", "DEBUG")
+            except Exception as e:
+                self.log(f"[Playwright] Init failed: {e}", "WARN")
+
+        # Authenticated scanner
+        self.auth_scanner = None
+        if AUTH_SCANNER_AVAILABLE:
+            try:
+                self.auth_scanner = AuthScanner(http_client=self.http_client)
+                self.log("[AuthScanner] Authenticated scanning ready", "INFO")
+            except Exception as e:
+                self.log(f"[AuthScanner] Init failed: {e}", "WARN")
+
+        # JS Secret Scanner
+        self.js_scanner = None
+        if JS_SCANNER_AVAILABLE:
+            try:
+                self.js_scanner = JSSecretScanner()
+                self.log("[JSScanner] JavaScript secret scanner loaded", "INFO")
+            except Exception as e:
+                self.log(f"[JSScanner] Init failed: {e}", "WARN")
+
         self.log("VIPER 5.0 initialization complete", "INFO")
 
         # Metrics
@@ -724,6 +773,17 @@ class ViperCore:
                       cookies: dict = None) -> Tuple[int, str, Dict]:
         """Make HTTP request with scope enforcement, rate limiting, and WAF detection."""
         self.metrics["total_requests"] += 1
+
+        # Inject auth cookies/headers if authenticated
+        if self.auth_scanner and self.auth_scanner.is_authenticated():
+            auth_hdrs = self.auth_scanner.get_auth_headers()
+            if auth_hdrs:
+                headers = dict(headers or {})
+                headers.update(auth_hdrs)
+            auth_cookies = self.auth_scanner.get_auth_cookies()
+            if auth_cookies:
+                cookies = dict(cookies or {})
+                cookies.update(auth_cookies)
 
         # Scope enforcement
         if self.scope_manager and self.scope_manager.active_scope:
@@ -884,6 +944,15 @@ class ViperCore:
                 if surf_res.get("phase"):
                     results["phases"]["surface"] = surf_res["phase"]
 
+            # Phase 3.5: Auto-generate custom Nuclei templates
+            from core.hunt_phases import phase_generate_templates
+            gen_tpl_res = await phase_generate_templates(
+                target_url=target_url, target=target,
+                nuclei_scanner=self.nuclei_scanner, log_fn=self.log,
+            )
+            if gen_tpl_res.get("phase"):
+                results["phases"]["template_gen"] = gen_tpl_res["phase"]
+
             # Phase 4: Nuclei Scanning
             if self.nuclei_scanner and getattr(self.nuclei_scanner, 'nuclei_path', None) and datetime.now() < end_time:
                 nuc_res = await phase_nuclei(
@@ -931,6 +1000,15 @@ class ViperCore:
             )
             if "llm_recommended_attacks" in llm_res:
                 results["llm_recommended_attacks"] = llm_res["llm_recommended_attacks"]
+
+        # Post-hunt: Chain escalation — detect combinable vulns
+        from core.hunt_phases import phase_chain_escalation
+        chain_res = await phase_chain_escalation(
+            findings=results["findings"], log_fn=self.log,
+        )
+        results["findings"].extend(chain_res.get("findings", []))
+        if chain_res.get("chains"):
+            results["chains"] = chain_res["chains"]
 
         # Post-hunt: compliance, graph, reports, cleanup
         await phase_finalize(
@@ -1261,6 +1339,35 @@ class ViperCore:
             if status == 0:
                 continue
 
+            # WAF/CDN block page detection — reject findings on error pages
+            # Cloudflare, Akamai, AWS WAF, Imperva all return block pages
+            # that contain generic HTML which can false-match attack markers
+            _is_waf_page = False
+            if status in (403, 503, 429):
+                _body_lower = body.lower() if body else ""
+                _waf_signatures = [
+                    "cloudflare",
+                    "attention required",
+                    "access denied",
+                    "akamai",
+                    "incapsula",
+                    "imperva",
+                    "aws waf",
+                    "ddos protection",
+                    "challenge-platform",
+                    "cf-ray",
+                    "just a moment",
+                    "checking your browser",
+                    "please wait while we verify",
+                    "bot detection",
+                ]
+                if any(sig in _body_lower for sig in _waf_signatures):
+                    _is_waf_page = True
+                    if not hasattr(self, '_waf_warned'):
+                        self.log(f"  [WAF] Block page detected (HTTP {status}), skipping marker checks", "WARN")
+                        self._waf_warned = True
+                    continue
+
             # SSRF FP guard: if marker appears in the payload URL itself (URL reflection),
             # strip the payload from the body before checking success markers
             _body_for_check = body
@@ -1401,9 +1508,25 @@ class ViperCore:
         status, body, headers = await self.request(target_url)
         if status == 0:
             return {"success": False, "error": "Connection failed"}
-        if status == 403 and ("access denied" in body.lower() or "forbidden" in body.lower()):
-            self.log(f"[WARN] Target returns 403 Forbidden — likely WAF/CDN blocking non-browser requests")
-            self.log(f"[WARN] Findings on 403 pages are unreliable. Consider using --stealth 3 or a browser proxy.")
+        if status == 403 and ("access denied" in body.lower() or "forbidden" in body.lower() or "cloudflare" in body.lower() or "attention required" in body.lower()):
+            _waf_type = "Cloudflare" if "cloudflare" in body.lower() else "WAF/CDN"
+            self.log(f"[WARN] Target returns 403 — {_waf_type} blocking requests. Findings on block pages will be filtered.")
+            # Playwright WAF bypass: retry with headless browser
+            if self.playwright_tool and PlaywrightTool and PlaywrightTool.is_available():
+                self.log("[WAF] 403 detected, retrying via Playwright browser...")
+                try:
+                    result = await self.playwright_tool.bypass_waf(target_url)
+                    if result.success and result.status == 200:
+                        body = result.content
+                        status = 200
+                        headers = result.headers
+                        self.log(f"[WAF] Browser bypass successful ({len(body)} chars)")
+                    else:
+                        self.log(f"[WAF] Browser bypass failed (status={result.status})", "WARN")
+                except Exception as e:
+                    self.log(f"[WAF] Browser bypass error: {e}", "WARN")
+            else:
+                self.log(f"[WARN] Findings on 403 pages are unreliable. Consider using --stealth 3 or a browser proxy.")
 
         target.technologies = self.knowledge.detect_technologies(body, headers)
 
