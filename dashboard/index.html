@@ -1326,10 +1326,13 @@ async function api(path) {
    SVG Icons (inline, small)
    ══════════════════════════════════════════════════════════════ */
 const Icon = {
-  viper: () => html`<svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-    <path d="M14 2L2 8v12l12 6 12-6V8L14 2z" fill="none" stroke="var(--neon-cyan)" stroke-width="1.5"/>
-    <path d="M14 8l-6 3v6l6 3 6-3v-6l-6-3z" fill="var(--accent)" opacity="0.3"/>
-    <circle cx="14" cy="14" r="3" fill="var(--neon-cyan)"/>
+  viper: () => html`<svg width="28" height="28" viewBox="0 0 120 120" fill="none">
+    <path d="M60 18 C80 18, 95 30, 95 45 C95 55, 85 62, 75 58 C65 54, 60 60, 60 68 C60 76, 65 82, 75 82 C85 82, 92 75, 92 65" stroke="var(--neon-cyan)" stroke-width="5" stroke-linecap="round" fill="none"/>
+    <path d="M88 60 L100 65 L88 70 Z" fill="var(--neon-green)"/>
+    <circle cx="94" cy="63" r="2.5" fill="var(--neon-cyan)"/>
+    <line x1="100" y1="65" x2="108" y2="62" stroke="var(--neon-red)" stroke-width="1.5" stroke-linecap="round"/>
+    <line x1="100" y1="65" x2="108" y2="68" stroke="var(--neon-red)" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M60 18 C45 18, 30 28, 28 40 C26 50, 32 55, 38 50" stroke="var(--neon-cyan)" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.6"/>
   </svg>`,
   sun: () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>`,
   moon: () => html`<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M13.36 10.06A6 6 0 015.94 2.64 7 7 0 1013.36 10.06z"/></svg>`,

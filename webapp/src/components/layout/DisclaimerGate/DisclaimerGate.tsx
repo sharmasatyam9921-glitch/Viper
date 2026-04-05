@@ -117,6 +117,7 @@ export function DisclaimerGate({ children }: DisclaimerGateProps) {
       <div className={styles.overlay}>
         <div className={styles.card}>
           <div className={styles.welcomeHeader}>
+            <Image src="/viper-logo.svg" alt="VIPER" width={64} height={64} style={{ objectFit: 'contain' }} />
             <h1 className={styles.welcomeTitle}>
               Welcome to <span className={styles.logoAccent}>VIPER</span>
             </h1>

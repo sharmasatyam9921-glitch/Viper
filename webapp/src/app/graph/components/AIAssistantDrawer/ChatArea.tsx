@@ -224,7 +224,7 @@ export function ChatArea({
         {chatItems.length === 0 && (
           <div className={styles.emptyState}>
             <div className={styles.emptyIcon}>
-              <span style={{ fontSize: '2rem', fontWeight: 700, color: 'var(--accent-primary)' }}>VIPER</span>
+              <img src="/viper-logo.svg" alt="VIPER" width={64} height={64} style={{ objectFit: 'contain' }} />
             </div>
             <h3 className={styles.emptyTitle}>How can I help you?</h3>
             <p className={styles.emptyDescription}>
