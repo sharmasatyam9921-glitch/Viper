@@ -92,6 +92,7 @@ def main():
     parser.add_argument("--max-concurrent", type=int, default=3, help="Max concurrent targets for --targets mode (default: 3)")
     parser.add_argument("--preflight-only", action="store_true", help="Run preflight checks and exit")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip preflight checks")
+    parser.add_argument("--proxy", type=str, default=None, help="HTTP proxy (e.g., http://127.0.0.1:8081 for Burp Suite)")
     # Training mode
     parser.add_argument("--train", action="store_true", help="Run training mode against local vuln server")
     parser.add_argument("--train-iterations", type=int, default=3, help="Training iterations (default: 3)")
@@ -244,7 +245,8 @@ def main():
                          shodan=args.shodan, kali=args.kali, skill=args.skill,
                          no_guardrail=args.no_guardrail, project=args.project,
                          auth_url=args.auth_url, auth_user=args.auth_user,
-                         auth_pass=args.auth_pass, auth_token=args.auth_token))
+                         auth_pass=args.auth_pass, auth_token=args.auth_token,
+                         proxy=args.proxy))
 
 
 async def run_hunt(target, full, minutes, scope, output_file, secrets=False, waves=1,
@@ -257,7 +259,8 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
                    shodan=False, kali=False, skill=None, no_guardrail=False,
                    project="default",
                    # VIPER 5.0 auth params
-                   auth_url=None, auth_user=None, auth_pass=None, auth_token=None):
+                   auth_url=None, auth_user=None, auth_pass=None, auth_token=None,
+                   proxy=None):
     # ── VIPER 4.0: Initialize new engines ──
     from core.graph_engine import GraphEngine
     from core.chain_writer import ChainWriter
@@ -311,6 +314,12 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
         from viper_core import ViperCore
 
         viper = ViperCore()
+
+        # Set proxy (e.g., Burp Suite at 127.0.0.1:8081)
+        if proxy:
+            if hasattr(viper, 'http_client') and viper.http_client:
+                viper.http_client.proxy = proxy
+            viper.log(f"[Proxy] Routing traffic through {proxy}")
 
         # Disable secret scanner unless --secrets flag is set
         if not secrets:
