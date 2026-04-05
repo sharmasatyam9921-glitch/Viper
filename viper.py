@@ -319,7 +319,8 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
         if proxy:
             if hasattr(viper, 'http_client') and viper.http_client:
                 viper.http_client.proxy = proxy
-            viper.log(f"[Proxy] Routing traffic through {proxy}")
+                viper.http_client.verify_ssl = False
+            viper.log(f"[Proxy] Routing traffic through {proxy} (SSL verify disabled)")
 
         # Disable secret scanner unless --secrets flag is set
         if not secrets:
