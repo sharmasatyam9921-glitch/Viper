@@ -725,3 +725,125 @@ async def phase_finalize(
     save_state_fn()
 
     return out
+
+
+# =========================================================================
+# Phase 3.5: Custom Nuclei Template Generation
+# =========================================================================
+
+async def phase_generate_templates(
+    target_url: str,
+    target: Any,
+    nuclei_scanner: Any,
+    log_fn: LogFn,
+) -> dict:
+    """Generate custom Nuclei templates based on discovered surface.
+
+    Uses NucleiTemplateGenerator to create templates tailored to the
+    target's tech stack and discovered parameters. Saves them to disk
+    and registers them with the Nuclei scanner for Phase 4.
+
+    Returns:
+        Dict with ``phase`` info (template count, directory).
+    """
+    result: dict = {"phase": {}}
+
+    # Need both tech data and nuclei scanner to be useful
+    if nuclei_scanner is None:
+        return result
+
+    technologies = list(getattr(target, "technologies", []))
+    endpoints = list(getattr(target, "endpoints", set()))
+    url_parameters = getattr(target, "url_parameters", {})
+
+    # Skip if no surface data to work with
+    if not technologies and not url_parameters:
+        log_fn("  Template gen: skipped (no tech/param data from surface mapping)")
+        return result
+
+    log_fn("\n=== Phase 3.5: Custom Template Generation ===")
+    try:
+        from core.template_generator import NucleiTemplateGenerator
+
+        generator = NucleiTemplateGenerator()
+        templates = await generator.generate_for_target(
+            target_url=target_url,
+            technologies=technologies,
+            endpoints=endpoints,
+            parameters=url_parameters,
+        )
+
+        if templates:
+            saved_paths = generator.save_templates(templates)
+            output_dir = str(generator.output_dir)
+
+            # Register the generated template directory with nuclei scanner
+            if hasattr(nuclei_scanner, "_custom_template_dirs"):
+                gen_dir = Path(output_dir)
+                if gen_dir not in nuclei_scanner._custom_template_dirs:
+                    nuclei_scanner._custom_template_dirs.append(gen_dir)
+                    # Re-discover templates so they appear in the catalog
+                    if hasattr(nuclei_scanner, "_discover_and_log_templates"):
+                        nuclei_scanner._discover_and_log_templates()
+
+            result["phase"] = {
+                "templates_generated": len(templates),
+                "templates_dir": output_dir,
+                "saved_files": [str(p) for p in saved_paths],
+            }
+            log_fn(
+                f"  Generated {len(templates)} custom templates → {output_dir}"
+            )
+        else:
+            log_fn("  Template gen: no templates produced")
+
+    except Exception as e:
+        log_fn(f"  Template generation error: {e}", "WARN")
+
+    return result
+
+
+# =========================================================================
+# Post-hunt: Chain Escalation
+# =========================================================================
+
+async def phase_chain_escalation(
+    findings: List[dict],
+    log_fn: LogFn,
+) -> dict:
+    """Analyze findings for chainable vulnerabilities.
+
+    Detects combinations of low/medium-severity findings that constitute
+    higher-severity attack paths (e.g., CORS + CSRF = Account Takeover).
+
+    Returns:
+        Dict with ``findings`` list (escalated chain findings) and
+        ``chains`` list (chain metadata).
+    """
+    result: dict = {"findings": [], "chains": []}
+
+    if not findings:
+        return result
+
+    try:
+        from core.chain_escalator import ChainEscalator
+
+        escalator = ChainEscalator()
+        chains = escalator.analyze(findings)
+
+        if chains:
+            log_fn(f"\n=== Chain Escalation: {len(chains)} chains detected ===")
+            for chain in chains:
+                log_fn(
+                    f"  [{chain.escalated_severity.upper()}] "
+                    f"{chain.chain_name}: {chain.escalated_impact[:80]}"
+                )
+                result["findings"].append(chain.to_finding())
+                result["chains"].append(chain.to_dict())
+        else:
+            log_fn("  Chain escalation: no combinable vulnerabilities found")
+
+    except Exception as e:
+        log_fn(f"  Chain escalation error: {e}", "WARN")
+
+    return result

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VIPER 4.0 Skill Prompts Package
+VIPER 5.0 Skill Prompts Package
 
 Provides attack-skill-specific system prompts and phase guidance.
 """
@@ -20,7 +20,10 @@ def get_skill_prompt(attack_path_type: str, phase: str = "exploitation") -> str:
         Combined system prompt + phase guidance text for the skill.
     """
     # Import lazily to avoid circular imports
-    from . import cve_exploit, brute_force, phishing, dos, sql_injection, unclassified
+    from . import (
+        cve_exploit, brute_force, phishing, dos, sql_injection,
+        api_security, xss_exploitation, ssrf_exploitation, unclassified,
+    )
 
     _SKILL_MODULES = {
         "cve_exploit": cve_exploit,
@@ -28,6 +31,16 @@ def get_skill_prompt(attack_path_type: str, phase: str = "exploitation") -> str:
         "phishing_social_engineering": phishing,
         "denial_of_service": dos,
         "sql_injection": sql_injection,
+        "api_security": api_security,
+        "jwt_exploitation": api_security,
+        "graphql_exploitation": api_security,
+        "api_testing": api_security,
+        "xss": xss_exploitation,
+        "xss_exploitation": xss_exploitation,
+        "cross_site_scripting": xss_exploitation,
+        "ssrf": ssrf_exploitation,
+        "ssrf_exploitation": ssrf_exploitation,
+        "server_side_request_forgery": ssrf_exploitation,
     }
 
     # Check if it's a known built-in skill
@@ -66,5 +79,8 @@ SKILL_CATEGORIES = [
     "phishing_social_engineering",
     "denial_of_service",
     "sql_injection",
+    "api_security",
+    "xss_exploitation",
+    "ssrf_exploitation",
     "unclassified",
 ]

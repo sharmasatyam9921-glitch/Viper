@@ -81,11 +81,22 @@ def main():
     parser.add_argument("--kali", action="store_true", help="Use Docker Kali sandbox for tool execution")
     parser.add_argument("--skill", help="Force attack classification (cve_exploit, brute_force, phishing, dos)")
     parser.add_argument("--no-guardrail", action="store_true", help="Skip target guardrails (for lab/CTF use)")
+    parser.add_argument("--auth-url", help="Login page URL for authenticated scanning")
+    parser.add_argument("--auth-user", help="Username for authenticated scanning")
+    parser.add_argument("--auth-pass", help="Password for authenticated scanning")
+    parser.add_argument("--auth-token", help="Bearer token for authenticated scanning")
     parser.add_argument("--export", help="Export project data to ZIP file")
     parser.add_argument("--import-zip", dest="import_zip", help="Import project data from ZIP file")
     parser.add_argument("--project", default="default", help="Project ID for multi-project support")
+    parser.add_argument("--targets", help="File with target URLs (one per line) for parallel hunting")
+    parser.add_argument("--max-concurrent", type=int, default=3, help="Max concurrent targets for --targets mode (default: 3)")
     parser.add_argument("--preflight-only", action="store_true", help="Run preflight checks and exit")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip preflight checks")
+    # Training mode
+    parser.add_argument("--train", action="store_true", help="Run training mode against local vuln server")
+    parser.add_argument("--train-iterations", type=int, default=3, help="Training iterations (default: 3)")
+    parser.add_argument("--train-minutes", type=int, default=8, help="Minutes per training iteration (default: 8)")
+    parser.add_argument("--train-port", type=int, default=9999, help="Port for training vuln server (default: 9999)")
     args = parser.parse_args()
 
     # ── Preflight checks ──
@@ -135,6 +146,22 @@ def main():
         g.close()
         return
 
+    # Training mode (no target needed)
+    if args.train:
+        from core.training_mode import TrainingMode
+        trainer = TrainingMode()
+        report = asyncio.run(trainer.train(
+            target_name="local_vuln_server",
+            iterations=args.train_iterations,
+            minutes_per_run=args.train_minutes,
+            port=args.train_port,
+        ))
+        if args.output:
+            with open(args.output, "w") as fh:
+                json.dump(report.to_dict(), fh, indent=2, default=str)
+            print(f"\nTraining results saved to {args.output}")
+        return
+
     # Triage-only mode (no target needed)
     if args.triage and not args.target:
         from core.graph_engine import GraphEngine
@@ -148,6 +175,44 @@ def main():
             title = r.title if hasattr(r, 'title') else r.get('title', '?')
             print(f"  [{sev}] {title}")
         g.close()
+        return
+
+    # ── Parallel multi-target mode ──
+    if args.targets:
+        from core.parallel_hunter import ParallelHunter
+        targets = ParallelHunter.load_targets_file(args.targets)
+        if not targets:
+            print(f"No targets found in {args.targets}")
+            return
+        minutes = args.time or (15 if args.full else 5)
+        hunter = ParallelHunter(max_concurrent=args.max_concurrent)
+        print(f"VIPER 5.0 | Parallel Hunt: {len(targets)} targets | "
+              f"Max concurrent: {args.max_concurrent} | "
+              f"Mode: {'full' if args.full else 'quick'} | Time: {minutes}min/target")
+        print("-" * 60)
+        results = asyncio.run(hunter.hunt_all(
+            targets, minutes_per_target=minutes,
+            scope_file=args.scope, full=args.full,
+            stealth=args.stealth,
+        ))
+        summary = hunter.get_summary()
+        print(f"\n{'='*60}")
+        print(f"Parallel Hunt Complete")
+        print(f"  Targets: {summary['completed']} completed, {summary['failed']} failed")
+        print(f"  Total findings: {summary['total_findings']}")
+        sev = summary['severity_counts']
+        print(f"  Severity: {sev['critical']}C / {sev['high']}H / {sev['medium']}M / {sev['low']}L")
+        print(f"  Elapsed: {summary['elapsed_minutes']:.1f} min")
+        for target_url, res in results.items():
+            status = res.get('status', '?')
+            fc = res.get('findings_count', 0)
+            elapsed = res.get('elapsed_seconds', 0)
+            err = f" — {res['error']}" if res.get('error') else ""
+            print(f"    [{status}] {target_url}: {fc} findings ({elapsed:.0f}s){err}")
+        if args.output:
+            with open(args.output, "w") as fh:
+                json.dump(results, fh, indent=2, default=str)
+            print(f"\nResults saved to {args.output}")
         return
 
     if not args.target:
@@ -177,7 +242,9 @@ def main():
                          triage=args.triage, codefix_repo=args.codefix_repo,
                          report_ciso=args.report_ciso, tor=args.tor,
                          shodan=args.shodan, kali=args.kali, skill=args.skill,
-                         no_guardrail=args.no_guardrail, project=args.project))
+                         no_guardrail=args.no_guardrail, project=args.project,
+                         auth_url=args.auth_url, auth_user=args.auth_user,
+                         auth_pass=args.auth_pass, auth_token=args.auth_token))
 
 
 async def run_hunt(target, full, minutes, scope, output_file, secrets=False, waves=1,
@@ -188,7 +255,9 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
                    interactive=False, deep_think=False, triage=False,
                    codefix_repo=None, report_ciso=False, tor=False,
                    shodan=False, kali=False, skill=None, no_guardrail=False,
-                   project="default"):
+                   project="default",
+                   # VIPER 5.0 auth params
+                   auth_url=None, auth_user=None, auth_pass=None, auth_token=None):
     # ── VIPER 4.0: Initialize new engines ──
     from core.graph_engine import GraphEngine
     from core.chain_writer import ChainWriter
@@ -262,6 +331,17 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
         # Disable metasploit unless --metasploit
         if not metasploit and hasattr(viper, 'metasploit'):
             viper.metasploit = None
+
+        # ── Authenticated scanning ──
+        if auth_token and viper.auth_scanner:
+            await viper.auth_scanner.login_bearer(auth_token)
+            print(f"[AUTH] Bearer token set for authenticated scanning")
+        elif auth_url and auth_user and auth_pass and viper.auth_scanner:
+            ok = await viper.auth_scanner.login_form(auth_url, auth_user, auth_pass)
+            if ok:
+                print(f"[AUTH] Logged in via {auth_url} ({len(viper.auth_scanner.cookies)} cookies)")
+            else:
+                print(f"[AUTH] Login failed at {auth_url} — proceeding without auth")
 
         # ── FLAG 5: --kali → Kali sandbox ──
         if kali:
