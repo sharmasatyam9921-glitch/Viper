@@ -82,9 +82,15 @@ class ScopeEntry:
             target_domain = target_domain.split(':')[0]
         
         if self.asset_type == 'wildcard' or '*' in entry_lower:
-            # Wildcard matching
+            # Wildcard matching: *.example.com matches example.com AND sub.example.com
             pattern = entry_lower.replace('.', r'\.').replace('*', '.*')
-            return bool(re.match(f'^{pattern}$', target_domain))
+            if re.match(f'^{pattern}$', target_domain):
+                return True
+            # Also match base domain: *.stripchat.com should match stripchat.com
+            base = entry_lower.lstrip('*').lstrip('.')
+            if target_domain == base or target_domain.endswith('.' + base):
+                return True
+            return False
         
         elif self.asset_type == 'domain':
             # Exact domain or subdomain match
