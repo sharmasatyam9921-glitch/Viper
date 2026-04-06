@@ -93,6 +93,8 @@ def main():
     parser.add_argument("--preflight-only", action="store_true", help="Run preflight checks and exit")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip preflight checks")
     parser.add_argument("--proxy", type=str, default=None, help="HTTP proxy (e.g., http://127.0.0.1:8081 for Burp Suite)")
+    parser.add_argument("--autopilot", choices=["paranoid", "normal", "yolo"], default=None,
+                        help="Autopilot safety mode: paranoid (approve all), normal (approve dangerous), yolo (auto-approve)")
     # Training mode
     parser.add_argument("--train", action="store_true", help="Run training mode against local vuln server")
     parser.add_argument("--train-iterations", type=int, default=3, help="Training iterations (default: 3)")
@@ -246,7 +248,7 @@ def main():
                          no_guardrail=args.no_guardrail, project=args.project,
                          auth_url=args.auth_url, auth_user=args.auth_user,
                          auth_pass=args.auth_pass, auth_token=args.auth_token,
-                         proxy=args.proxy))
+                         proxy=args.proxy, autopilot=args.autopilot))
 
 
 async def run_hunt(target, full, minutes, scope, output_file, secrets=False, waves=1,
@@ -260,7 +262,7 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
                    project="default",
                    # VIPER 5.0 auth params
                    auth_url=None, auth_user=None, auth_pass=None, auth_token=None,
-                   proxy=None):
+                   proxy=None, autopilot=None):
     # ── VIPER 4.0: Initialize new engines ──
     from core.graph_engine import GraphEngine
     from core.chain_writer import ChainWriter
@@ -279,6 +281,18 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
                 return
         except ImportError:
             pass
+
+    # ── Autopilot safety controller ──
+    autopilot_ctrl = None
+    if autopilot:
+        from core.autopilot import Autopilot, AutopilotMode
+        mode_map = {
+            "paranoid": AutopilotMode.PARANOID,
+            "normal": AutopilotMode.NORMAL,
+            "yolo": AutopilotMode.YOLO,
+        }
+        autopilot_ctrl = Autopilot(mode=mode_map[autopilot])
+        print(f"[AUTOPILOT] Mode: {autopilot.upper()}")
 
     # Tor proxy
     tor_ctx = None
@@ -492,6 +506,8 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
             extras.append("Triage")
         if report_ciso:
             extras.append("CISO-Report")
+        if autopilot:
+            extras.append(f"Autopilot:{autopilot}")
         extra_str = f" | {', '.join(extras)}" if extras else ""
 
         print(f"VIPER 4.0 | Target: {target} | Mode: {'full' if full else 'quick'} | Time: {minutes}min | Engine: {react_status}{extra_str}")
@@ -587,6 +603,10 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
             print(f"\nCISO Report: {report_path}")
         except Exception as e:
             print(f"[CISO Report] Failed: {e}")
+
+    # Autopilot summary
+    if autopilot_ctrl:
+        autopilot_ctrl.print_summary()
 
     # Cleanup
     if tor_ctx:

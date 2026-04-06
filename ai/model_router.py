@@ -545,35 +545,128 @@ class ModelRouter:
             logger.warning(f"Model {model} failed: {e}")
             return None
 
+    # ── Per-task model routing ─────────────────────────────────────────
+    # Maps task types to optimal model tiers. Each tier resolves to a
+    # concrete model via environment variables or sensible defaults.
+    # Override any mapping with VIPER_TASK_<TASK>_MODEL env var.
+
+    TASK_MODEL_MAP: Dict[str, str] = {
+        # Fast/cheap — high volume, low complexity
+        "recon": "haiku",
+        "classification": "haiku",
+        "tech_detect": "haiku",
+        "crawl_analysis": "haiku",
+        # Balanced — moderate complexity
+        "reasoning": "sonnet",
+        "triage": "sonnet",
+        "scan_analysis": "sonnet",
+        "attack_planning": "sonnet",
+        "finding_validation": "sonnet",
+        # Best quality — complex analysis, high stakes
+        "deep_analysis": "opus",
+        "report_writing": "opus",
+        "exploit_dev": "opus",
+        "chain_analysis": "opus",
+        "ciso_report": "opus",
+        # Default fallback
+        "default": "sonnet",
+    }
+
+    # Token limits per task type (override with max_tokens param)
+    TASK_TOKEN_LIMITS: Dict[str, int] = {
+        "recon": 512,
+        "classification": 256,
+        "tech_detect": 256,
+        "crawl_analysis": 512,
+        "reasoning": 1024,
+        "triage": 1024,
+        "scan_analysis": 1024,
+        "attack_planning": 2048,
+        "finding_validation": 1024,
+        "deep_analysis": 4096,
+        "report_writing": 4096,
+        "exploit_dev": 2048,
+        "chain_analysis": 2048,
+        "ciso_report": 4096,
+        "default": 1024,
+    }
+
+    def _resolve_task_model(self, task: str) -> str:
+        """Resolve a task type to a concrete model string.
+
+        Resolution order:
+        1. VIPER_TASK_<TASK>_MODEL env var (e.g., VIPER_TASK_RECON_MODEL)
+        2. Existing specific model env vars (VIPER_TRIAGE_MODEL, etc.)
+        3. TASK_MODEL_MAP tier -> concrete model mapping
+        4. Default model
+        """
+        # 1. Task-specific env var override
+        env_key = f"VIPER_TASK_{task.upper()}_MODEL"
+        env_model = os.environ.get(env_key)
+        if env_model:
+            return env_model
+
+        # 2. Legacy env vars for backward compatibility
+        legacy_map = {
+            "triage": self.triage_model,
+            "reasoning": self.reasoning_model,
+        }
+        if task in legacy_map:
+            return legacy_map[task]
+
+        # 3. Tier-based resolution from TASK_MODEL_MAP
+        tier = self.TASK_MODEL_MAP.get(task, self.TASK_MODEL_MAP.get("default", "sonnet"))
+
+        # Map tier names to concrete models
+        tier_to_model = {
+            "haiku": os.environ.get("VIPER_HAIKU_MODEL", "anthropic/claude-haiku-4-5-20251001"),
+            "sonnet": os.environ.get("VIPER_SONNET_MODEL", self.default_model),
+            "opus": os.environ.get("VIPER_OPUS_MODEL", "anthropic/claude-opus-4-20250514"),
+        }
+
+        return tier_to_model.get(tier, self.default_model)
+
     async def complete_for_task(
         self,
         task: str,
         prompt: str,
         system: str = "",
         max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
         json_mode: bool = False,
     ) -> Optional[ModelResponse]:
         """
         Route to the appropriate model based on task type.
 
+        Supports 15 task types across 3 tiers (haiku/sonnet/opus).
+        Override routing with VIPER_TASK_<TASK>_MODEL env vars.
+
         Args:
-            task: One of 'triage', 'reasoning', 'default'.
+            task: Task type — one of: recon, classification, tech_detect,
+                  crawl_analysis, reasoning, triage, scan_analysis,
+                  attack_planning, finding_validation, deep_analysis,
+                  report_writing, exploit_dev, chain_analysis, ciso_report,
+                  default.
             prompt: User message.
             system: System prompt.
-            max_tokens: Override max tokens.
+            max_tokens: Override default max tokens for this task.
+            temperature: Override default temperature.
             json_mode: Request JSON output.
+
+        Returns:
+            ModelResponse on success, None if all models fail.
         """
-        model_map = {
-            "triage": self.triage_model,
-            "reasoning": self.reasoning_model,
-            "default": self.default_model,
-        }
-        model = model_map.get(task, self.default_model)
+        model = self._resolve_task_model(task)
+        effective_max_tokens = max_tokens or self.TASK_TOKEN_LIMITS.get(task, self.max_tokens)
+
+        logger.debug(f"Task '{task}' routed to model '{model}' (max_tokens={effective_max_tokens})")
+
         return await self.complete(
             prompt=prompt,
             system=system,
             model=model,
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
+            temperature=temperature,
             json_mode=json_mode,
         )
 
