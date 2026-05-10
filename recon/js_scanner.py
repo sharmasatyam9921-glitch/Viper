@@ -460,6 +460,266 @@ class JSSecretScanner:
             logger.debug("[JSScanner] Failed to fetch %s: %s", url, e)
             return None
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # Extended JS Analysis — endpoints, frameworks, source maps, DOM sinks,
+    # dependency confusion
+    # ═══════════════════════════════════════════════════════════════════════
+
+    _ENDPOINT_PATTERNS = [
+        # fetch("url") / fetch('url')
+        re.compile(r"""fetch\(\s*["'`]([^"'`]+)["'`]""", re.IGNORECASE),
+        # axios.get/post/put/delete/patch("url")
+        re.compile(r"""axios\.(?P<method>get|post|put|delete|patch)\(\s*["'`]([^"'`]+)["'`]""", re.IGNORECASE),
+        # XMLHttpRequest open
+        re.compile(r"""\.open\(\s*["'](?P<method>GET|POST|PUT|DELETE|PATCH)["']\s*,\s*["'`]([^"'`]+)["'`]""", re.IGNORECASE),
+        # $.ajax({url: "..."})
+        re.compile(r"""\$\.ajax\(\s*\{[^}]*url\s*:\s*["'`]([^"'`]+)["'`]""", re.IGNORECASE | re.DOTALL),
+        # $.get/$.post("url")
+        re.compile(r"""\$\.(?P<method>get|post)\(\s*["'`]([^"'`]+)["'`]""", re.IGNORECASE),
+        # Generic URL-like strings: /api/..., https://...
+        re.compile(r"""["'`]((?:https?://[^\s"'`]+|/api/[^\s"'`]+))["'`]"""),
+    ]
+
+    _FRAMEWORK_SIGNATURES = {
+        "React": [r"React\.createElement", r"ReactDOM\.render", r"__REACT_DEVTOOLS",
+                  r"_reactRootContainer", r"\bReact\b.*\buseState\b"],
+        "Next.js": [r"__NEXT_DATA__", r"__next", r"next/router"],
+        "Angular": [r"ng-app", r"angular\.module", r"ng-controller",
+                    r"@angular/core", r"\bng\.\b"],
+        "Vue": [r"new Vue\(", r"__VUE__", r"Vue\.component", r"createApp\("],
+        "Nuxt": [r"__NUXT__", r"nuxt\.config"],
+        "jQuery": [r"\$\(\s*[\"']", r"jQuery\(", r"\$\.fn\."],
+        "Ember": [r"Ember\.Application", r"ember-cli", r"Ember\.Route"],
+        "Svelte": [r"__svelte", r"svelte/internal", r"SvelteComponent"],
+        "Backbone": [r"Backbone\.Model", r"Backbone\.View", r"Backbone\.Router"],
+    }
+
+    _DOM_SINK_PATTERNS = [
+        ("innerHTML", re.compile(r"\.innerHTML\s*=", re.IGNORECASE)),
+        ("outerHTML", re.compile(r"\.outerHTML\s*=", re.IGNORECASE)),
+        ("document.write", re.compile(r"document\.write(?:ln)?\s*\(", re.IGNORECASE)),
+        ("eval", re.compile(r"\beval\s*\(", re.IGNORECASE)),
+        ("setTimeout_string", re.compile(r"setTimeout\s*\(\s*[\"'`]", re.IGNORECASE)),
+        ("setInterval_string", re.compile(r"setInterval\s*\(\s*[\"'`]", re.IGNORECASE)),
+        ("Function_constructor", re.compile(r"\bFunction\s*\(\s*[\"'`]", re.IGNORECASE)),
+        ("location.href_assign", re.compile(r"location\.href\s*=", re.IGNORECASE)),
+        ("location.assign", re.compile(r"location\.assign\s*\(", re.IGNORECASE)),
+        ("location.replace", re.compile(r"location\.replace\s*\(", re.IGNORECASE)),
+        ("insertAdjacentHTML", re.compile(r"\.insertAdjacentHTML\s*\(", re.IGNORECASE)),
+    ]
+
+    def _extract_endpoints(self, js_content: str) -> List[Dict]:
+        """Extract API endpoint URLs from fetch, axios, XHR, and jQuery patterns.
+
+        Returns:
+            List of dicts with keys: url, method, source_line.
+        """
+        endpoints: List[Dict] = []
+        seen_urls: Set[str] = set()
+
+        for pat in self._ENDPOINT_PATTERNS:
+            for match in pat.finditer(js_content):
+                # Extract method from named group if present
+                method = "GET"
+                try:
+                    method = match.group("method").upper()
+                except (IndexError, AttributeError):
+                    pass
+
+                # URL is the last captured group
+                url = match.group(match.lastindex) if match.lastindex else match.group(0)
+
+                # Skip data URIs, anchors, and very short fragments
+                if not url or url.startswith("data:") or url == "#" or len(url) < 3:
+                    continue
+
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                line_num = js_content[:match.start()].count("\n") + 1
+                endpoints.append({
+                    "url": url,
+                    "method": method,
+                    "source_line": line_num,
+                })
+
+        return endpoints
+
+    def _detect_frameworks(self, js_content: str) -> List[str]:
+        """Detect frontend frameworks/libraries from JS globals and patterns.
+
+        Returns:
+            List of detected framework names.
+        """
+        detected: List[str] = []
+        for framework, signatures in self._FRAMEWORK_SIGNATURES.items():
+            for sig in signatures:
+                if re.search(sig, js_content):
+                    detected.append(framework)
+                    break  # One match per framework is enough
+        return detected
+
+    async def _check_source_maps(self, js_url: str, session) -> Dict:
+        """Check if a .map source map file is accessible for a JS URL.
+
+        Args:
+            js_url: URL of the JavaScript file.
+            session: An aiohttp ClientSession instance.
+
+        Returns:
+            Dict with keys: accessible (bool), map_url (str).
+        """
+        import aiohttp
+
+        map_url = js_url + ".map"
+        result = {"accessible": False, "map_url": map_url}
+        try:
+            async with session.head(
+                map_url,
+                ssl=False,
+                timeout=aiohttp.ClientTimeout(total=10),
+                allow_redirects=True,
+            ) as resp:
+                if resp.status == 200:
+                    ct = resp.headers.get("Content-Type", "")
+                    # Source maps are JSON
+                    if "json" in ct or "octet-stream" in ct or "text/" in ct:
+                        result["accessible"] = True
+        except Exception as e:
+            logger.debug("[JSScanner] Source map check failed for %s: %s", map_url, e)
+        return result
+
+    def _find_dom_sinks(self, js_content: str) -> List[Dict]:
+        """Find dangerous DOM sinks that could enable XSS.
+
+        Returns:
+            List of dicts with keys: sink_type, line_number, context.
+        """
+        sinks: List[Dict] = []
+        for sink_type, pattern in self._DOM_SINK_PATTERNS:
+            for match in pattern.finditer(js_content):
+                pos = match.start()
+                line_num = js_content[:pos].count("\n") + 1
+                # Grab surrounding context (the line containing the sink)
+                line_start = js_content.rfind("\n", 0, pos) + 1
+                line_end = js_content.find("\n", pos)
+                if line_end == -1:
+                    line_end = len(js_content)
+                context_line = js_content[line_start:line_end].strip()[:120]
+                sinks.append({
+                    "sink_type": sink_type,
+                    "line_number": line_num,
+                    "context": context_line,
+                })
+        return sinks
+
+    _DEP_CONFUSION_PATTERNS = [
+        # package.json references
+        re.compile(r"""["'](@[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)["']"""),
+        # require('@scope/pkg')
+        re.compile(r"""require\(\s*["'](@[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)["']\s*\)"""),
+        # import from '@scope/pkg'
+        re.compile(r"""from\s+["'](@[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)["']"""),
+        # npm install commands
+        re.compile(r"""npm\s+install\s+(@?[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+)?)"""),
+    ]
+
+    # Well-known public npm scopes that are NOT internal
+    _PUBLIC_SCOPES = {
+        "@angular", "@babel", "@types", "@vue", "@react", "@svelte",
+        "@emotion", "@mui", "@testing-library", "@storybook", "@ngrx",
+        "@nestjs", "@aws-sdk", "@azure", "@google-cloud", "@graphql",
+        "@reduxjs", "@tanstack", "@vitejs",
+    }
+
+    def _check_dependency_confusion(self, js_content: str) -> List[Dict]:
+        """Find scoped package references that may be vulnerable to dependency confusion.
+
+        Returns:
+            List of dicts with keys: package_name, risk.
+        """
+        issues: List[Dict] = []
+        seen_pkgs: Set[str] = set()
+
+        for pat in self._DEP_CONFUSION_PATTERNS:
+            for match in pat.finditer(js_content):
+                pkg = match.group(1)
+                if pkg in seen_pkgs:
+                    continue
+                seen_pkgs.add(pkg)
+
+                scope = pkg.split("/")[0] if "/" in pkg else None
+                if scope and scope not in self._PUBLIC_SCOPES:
+                    # Internal-looking scope — potential dependency confusion
+                    issues.append({
+                        "package_name": pkg,
+                        "risk": "high" if scope not in self._PUBLIC_SCOPES else "low",
+                    })
+
+        return issues
+
+    async def full_analysis(self, base_url: str, js_urls: List[str],
+                            session=None) -> Dict:
+        """Run comprehensive JS analysis: secrets + endpoints + frameworks + source maps + DOM sinks + dependency confusion.
+
+        Args:
+            base_url: Base URL of the target.
+            js_urls: List of JavaScript file URLs.
+            session: Optional aiohttp ClientSession. Created internally if None.
+
+        Returns:
+            Combined dict with all analysis results.
+        """
+        import aiohttp
+
+        # Run the existing secret scanner
+        secrets_raw = await self.scan_target(base_url, js_urls)
+        secrets = [s.to_dict() for s in secrets_raw]
+
+        # Fetch all JS content for static analysis
+        all_content: List[Tuple[str, str]] = []  # (url, content)
+        for url in js_urls:
+            content = await self._fetch_js(url)
+            if content:
+                all_content.append((url, content))
+
+        # Aggregate results from static analysis methods
+        endpoints: List[Dict] = []
+        frameworks_set: Set[str] = set()
+        dom_sinks: List[Dict] = []
+        dep_issues: List[Dict] = []
+
+        for url, content in all_content:
+            endpoints.extend(self._extract_endpoints(content))
+            frameworks_set.update(self._detect_frameworks(content))
+            dom_sinks.extend(self._find_dom_sinks(content))
+            dep_issues.extend(self._check_dependency_confusion(content))
+
+        # Check source maps (needs HTTP session)
+        source_maps: List[Dict] = []
+        own_session = session is None
+        if own_session:
+            session = aiohttp.ClientSession(
+                headers={"User-Agent": "Mozilla/5.0 (compatible; VIPER/5.0)"}
+            )
+        try:
+            tasks = [self._check_source_maps(url, session) for url, _ in all_content]
+            source_maps = await asyncio.gather(*tasks, return_exceptions=False)
+            source_maps = [m for m in source_maps if isinstance(m, dict)]
+        finally:
+            if own_session:
+                await session.close()
+
+        return {
+            "secrets": secrets,
+            "endpoints": endpoints,
+            "frameworks": sorted(frameworks_set),
+            "source_maps": source_maps,
+            "dom_sinks": dom_sinks,
+            "dependency_issues": dep_issues,
+        }
+
     def reset(self):
         """Clear dedup state between targets."""
         self._seen_values.clear()

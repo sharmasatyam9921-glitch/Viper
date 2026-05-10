@@ -34,6 +34,16 @@ class NmapService:
     scripts: Dict[str, str] = field(default_factory=dict)
 
 
+NSE_CATEGORIES = {
+    "vuln": "vulners,vulscan/vulscan.nse,http-vuln-*,ssl-*",
+    "auth": "http-auth,http-auth-finder,ssh-auth-methods,ftp-anon",
+    "discovery": "http-headers,http-title,ssl-cert,dns-brute",
+    "default": "default",
+}
+
+_CVE_RE = re.compile(r"CVE-\d{4}-\d+")
+
+
 class NmapScanner:
     """Nmap subprocess wrapper for service detection.
 
@@ -114,6 +124,116 @@ class NmapScanner:
         self.scripts = old_scripts
         return results
 
+    async def nse_scan(self, targets: List[str], scripts: str = "vuln",
+                       ports: str = None, timeout: int = 600) -> List[Dict]:
+        """Run NSE script scan and parse results with CVE extraction.
+
+        Args:
+            targets: List of IPs or hostnames.
+            scripts: Script category key from NSE_CATEGORIES or a raw nmap
+                     script string (e.g. "http-vuln-cve2017-5638,ssl-heartbleed").
+            ports: Specific ports (e.g. "80,443"). Scans all open if None.
+            timeout: Max seconds to wait for nmap (default 600).
+
+        Returns:
+            List of dicts: [{host, port, script_id, output, cves, status}]
+        """
+        if not self.available:
+            logger.warning("nmap not installed, skipping NSE scan")
+            return []
+
+        # Resolve category name to actual script list
+        resolved_scripts = NSE_CATEGORIES.get(scripts, scripts)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+            tf.write("\n".join(targets))
+            target_file = tf.name
+
+        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as of:
+            output_file = of.name
+
+        try:
+            cmd = [
+                self.binary, "-sV",
+                f"-T{self.timing}",
+                "--script", resolved_scripts,
+                "-iL", target_file,
+                "-oX", output_file,
+                "--open",
+                "--host-timeout", "120s",
+            ]
+            if ports:
+                cmd.extend(["-p", ports])
+
+            logger.info("Running NSE scan: scripts=%s targets=%d", resolved_scripts, len(targets))
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
+            return self._parse_nse_xml(output_file)
+
+        finally:
+            Path(target_file).unlink(missing_ok=True)
+            Path(output_file).unlink(missing_ok=True)
+
+    def _parse_nse_xml(self, xml_path: str) -> List[Dict]:
+        """Parse nmap XML output for NSE script results with CVE extraction."""
+        results: List[Dict] = []
+        try:
+            tree = ElementTree.parse(xml_path)
+            root = tree.getroot()
+
+            for host in root.findall(".//host"):
+                addr_elem = host.find("address")
+                if addr_elem is None:
+                    continue
+                ip = addr_elem.get("addr", "")
+
+                ports_elem = host.find("ports")
+                if ports_elem is None:
+                    continue
+
+                for port_elem in ports_elem.findall("port"):
+                    state_elem = port_elem.find("state")
+                    if state_elem is None or state_elem.get("state") != "open":
+                        continue
+
+                    port_id = int(port_elem.get("portid", 0))
+
+                    for script in port_elem.findall("script"):
+                        script_id = script.get("id", "")
+                        output = script.get("output", "")
+                        cves = sorted(set(_CVE_RE.findall(output)))
+
+                        # Determine status from output keywords
+                        output_lower = output.lower()
+                        if any(kw in output_lower for kw in ("vulnerable", "exploitable", "state: vulnerable")):
+                            status = "VULNERABLE"
+                        elif any(kw in output_lower for kw in ("not vulnerable", "safe", "patched")):
+                            status = "NOT_VULNERABLE"
+                        else:
+                            status = "VULNERABLE" if cves else "NOT_VULNERABLE"
+
+                        results.append({
+                            "host": ip,
+                            "port": port_id,
+                            "script_id": script_id,
+                            "output": output[:1000],
+                            "cves": cves,
+                            "status": status,
+                        })
+
+        except (ElementTree.ParseError, FileNotFoundError) as e:
+            logger.warning("Failed to parse NSE XML: %s", e)
+
+        logger.info("NSE scan: %d script results, %d vulnerable",
+                    len(results), sum(1 for r in results if r["status"] == "VULNERABLE"))
+        return results
+
     async def quick_scan(self, targets: List[str]) -> List[NmapService]:
         """Fast top-100 port scan with service detection."""
         if not self.available:
@@ -191,4 +311,4 @@ class NmapScanner:
         return results
 
 
-__all__ = ["NmapScanner", "NmapService"]
+__all__ = ["NmapScanner", "NmapService", "NSE_CATEGORIES"]

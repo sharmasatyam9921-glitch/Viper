@@ -78,6 +78,47 @@ def _import_whois():
     from recon.whois_lookup import lookup as whois_lookup
     return whois_lookup
 
+def _import_otx():
+    from recon.otx_enricher import enrich as otx_enrich
+    return otx_enrich
+
+def _import_virustotal():
+    from recon.virustotal_enricher import enrich as vt_enrich
+    return vt_enrich
+
+def _import_censys():
+    from recon.censys_enricher import enrich_ips as censys_enrich_ips
+    return censys_enrich_ips
+
+def _import_masscan():
+    from recon.masscan_scanner import (
+        scan as masscan_scan,
+        masscan_available,
+        is_cidr,
+        expand_cidr,
+    )
+    return masscan_scan, masscan_available, is_cidr, expand_cidr
+
+def _import_fofa():
+    from recon.fofa_enricher import enrich as fofa_enrich
+    return fofa_enrich
+
+def _import_netlas():
+    from recon.netlas_enricher import enrich as netlas_enrich
+    return netlas_enrich
+
+def _import_criminalip():
+    from recon.criminalip_enricher import enrich as cip_enrich
+    return cip_enrich
+
+def _import_zoomeye():
+    from recon.zoomeye_enricher import enrich as ze_enrich
+    return ze_enrich
+
+def _import_wpscan():
+    from recon.wpscan_scanner import scan as wpscan_scan, is_wordpress
+    return wpscan_scan, is_wordpress
+
 def _import_cve_lookup():
     from recon.cve_lookup import lookup_cves, lookup_cves_for_cpes
     return lookup_cves, lookup_cves_for_cpes
@@ -118,7 +159,24 @@ class ReconResults:
     passive_ips: List[str] = field(default_factory=list)
     whois_data: Dict = field(default_factory=dict)
     urlscan_data: Dict = field(default_factory=dict)
+    otx_data: Dict = field(default_factory=dict)
+    virustotal_data: Dict = field(default_factory=dict)
+    censys_data: List[Dict] = field(default_factory=list)
+    fofa_data: Dict = field(default_factory=dict)
+    netlas_data: Dict = field(default_factory=dict)
+    criminalip_data: Dict = field(default_factory=dict)
+    zoomeye_data: Dict = field(default_factory=dict)
+    wpscan_data: Dict = field(default_factory=dict)
+    js_analysis: Dict = field(default_factory=dict)
     passive_cves: List[Dict] = field(default_factory=list)
+
+    # IP-mode metadata (when target is a CIDR or raw IP)
+    ip_mode: bool = False
+    cidr_targets: List[str] = field(default_factory=list)
+
+    # Per-phase wall-clock timings (seconds) for parallel-group analytics
+    phase_timings: Dict[str, float] = field(default_factory=dict)
+    parallel_groups: List[Dict] = field(default_factory=list)
 
     # Phase 2 — Port Scanning
     open_ports: Dict[str, List[int]] = field(default_factory=dict)  # host -> [ports]
@@ -181,34 +239,60 @@ def _tool_available(name: str) -> bool:
 
 
 async def _run_tool(cmd: List[str], timeout: int = 300) -> Optional[str]:
-    """Run an external CLI tool via asyncio subprocess. Returns stdout or None."""
+    """Run an external CLI tool. Returns stdout or None.
+
+    Uses synchronous subprocess.run() in a dedicated thread (not the
+    default asyncio executor) so it works reliably from any thread.
+    ``asyncio.create_subprocess_exec`` hangs in non-main threads on
+    Windows ProactorEventLoop, and the default asyncio executor can be
+    saturated when multiple background pipelines run concurrently.
+    """
     tool = cmd[0]
     if not _tool_available(tool):
         logger.warning("Tool '%s' not found on PATH -- skipping", tool)
         return None
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        if proc.returncode != 0:
-            logger.warning("%s exited %d: %s", tool, proc.returncode,
-                           stderr.decode(errors="replace")[:200])
-        return stdout.decode(errors="replace")
-    except asyncio.TimeoutError:
-        logger.warning("%s timed out after %ds", tool, timeout)
-        if proc:
-            proc.kill()
-        return None
-    except FileNotFoundError:
-        logger.warning("Tool '%s' not found", tool)
-        return None
-    except Exception as exc:
-        logger.warning("%s failed: %s", tool, exc)
-        return None
+
+    import subprocess
+    import concurrent.futures
+
+    def _blocking_run():
+        try:
+            # Explicit stdin=DEVNULL so tools like naabu don't hang
+            # waiting on inherited/undefined stdin from a parent that
+            # has no terminal (happens when the whole chain runs via
+            # the dashboard's spawned Python process).
+            result = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "%s exited %d: %s", tool, result.returncode,
+                    result.stderr.decode(errors="replace")[:200],
+                )
+            return result.stdout.decode(errors="replace")
+        except subprocess.TimeoutExpired:
+            logger.warning("%s timed out after %ds", tool, timeout)
+            return None
+        except FileNotFoundError:
+            logger.warning("Tool '%s' not found", tool)
+            return None
+        except Exception as exc:
+            logger.warning("%s failed: %s", tool, exc)
+            return None
+
+    # Use a dedicated single-shot executor so we don't share the
+    # (possibly saturated) default asyncio thread pool.
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        try:
+            return await loop.run_in_executor(ex, _blocking_run)
+        except Exception as exc:
+            logger.warning("%s executor failed: %s", tool, exc)
+            return None
 
 
 def _write_targets_file(targets) -> str:
@@ -310,12 +394,83 @@ class ReconPipeline:
     # Main entry point
     # ══════════════════════════════════════════════════════════════════════
 
+    # ── RoE time-window enforcement ───────────────────────────────────────
+
+    def _check_roe_time_window(self) -> tuple:
+        """
+        Pre-phase check (redamon-style): block recon if outside the
+        approved time window. Returns ``(allowed, reason)``.
+
+        Honors two settings keys:
+            - ``roe_window_start``: "HH:MM" local time (inclusive)
+            - ``roe_window_end``:   "HH:MM" local time (exclusive)
+
+        If neither is set, recon runs unrestricted.
+        """
+        start = self.settings.get("roe_window_start")
+        end = self.settings.get("roe_window_end")
+        if not (start and end):
+            return True, ""
+
+        try:
+            now = datetime.now().time()
+            sh, sm = map(int, start.split(":"))
+            eh, em = map(int, end.split(":"))
+            from datetime import time as dtime
+            t_start, t_end = dtime(sh, sm), dtime(eh, em)
+            if t_start <= now < t_end:
+                return True, ""
+            return False, (
+                f"Outside RoE time window {start}-{end} (now={now.strftime('%H:%M')})"
+            )
+        except (ValueError, AttributeError) as exc:
+            logger.warning("RoE time-window parse error: %s", exc)
+            return True, ""
+
+    # ── IP-mode detection ─────────────────────────────────────────────────
+
+    def _detect_ip_mode(self, target: str) -> tuple:
+        """
+        Detect whether the target is a CIDR range or a bare IP.
+
+        Returns ``(is_ip_mode, cidr_list, primary_label)`` where the
+        primary_label is what to use as the domain key in the context
+        dict (the first IP, for IP mode; the actual domain otherwise).
+        """
+        try:
+            from recon.masscan_scanner import is_cidr, expand_cidr
+            import ipaddress
+
+            # Strip URL scheme but PRESERVE CIDR prefix.
+            # Only split off a path if a scheme is present (http://host/path).
+            if "://" in target:
+                rest = target.split("://", 1)[1]
+                cleaned = rest.split("/", 1)[0]  # strips path
+            else:
+                cleaned = target  # raw IP, CIDR, or domain
+
+            # CIDR? Expand and use as primary host list
+            if is_cidr(cleaned):
+                hosts = expand_cidr(cleaned, max_hosts=256)
+                if hosts:
+                    return True, [cleaned], hosts[0]
+
+            # Bare IPv4/IPv6?
+            try:
+                ipaddress.ip_address(cleaned)
+                return True, [cleaned], cleaned
+            except ValueError:
+                pass
+        except ImportError:
+            pass
+        return False, [], ""
+
     async def run(self, target, phases: List[str] = None,
                   timeout_minutes: float = 30) -> ReconResults:
         """Run full or partial recon pipeline.
 
         Args:
-            target: Domain, URL string, or Target dataclass with ``.url``.
+            target: Domain, URL string, CIDR range, or Target dataclass.
             phases: Phase names to run (default: all 6).
             timeout_minutes: Hard timeout for the entire pipeline.
 
@@ -323,10 +478,35 @@ class ReconPipeline:
             ReconResults with all discovered data.
         """
         url = target.url if hasattr(target, "url") else str(target)
-        domain = self._extract_domain(url)
+
+        # ── RoE time-window check (pre-phase) ────────────────────────
+        allowed, reason = self._check_roe_time_window()
+        if not allowed:
+            results = ReconResults(target=url)
+            results.errors.append({"phase": "roe_check", "error": reason})
+            results.end_time = datetime.now().isoformat()
+            logger.warning("[RoE] BLOCKED: %s", reason)
+            return results
+
+        # ── IP-mode detection ────────────────────────────────────────
+        is_ip_mode, cidr_targets, primary_ip = self._detect_ip_mode(url)
+        if is_ip_mode:
+            domain = primary_ip
+            logger.info("=== IP-MODE recon: target=%s (%d hosts)",
+                        cidr_targets[0], len(cidr_targets))
+        else:
+            domain = self._extract_domain(url)
+
         phases = phases or list(ALL_PHASES)
 
+        # In IP-mode, skip domain_discovery (no DNS to enumerate)
+        if is_ip_mode and "domain_discovery" in phases:
+            phases = [p for p in phases if p != "domain_discovery"]
+            logger.info("IP-mode: skipping domain_discovery phase")
+
         results = ReconResults(target=url)
+        results.ip_mode = is_ip_mode
+        results.cidr_targets = cidr_targets
         logger.info("=== VIPER Recon Pipeline starting for: %s ===", domain)
         logger.info("Phases: %s", phases)
 
@@ -355,11 +535,15 @@ class ReconPipeline:
         ctx: Dict[str, Any] = {
             "domain": domain,
             "url": url,
-            "subdomains": [],
-            "resolved_ips": {},
+            "subdomains": list(cidr_targets) if is_ip_mode else [],
+            "resolved_ips": (
+                {ip: ip for ip in cidr_targets} if is_ip_mode else {}
+            ),
             "alive_hosts": [],
             "endpoints": [],
             "findings": [],
+            "ip_mode": is_ip_mode,
+            "cidr_targets": cidr_targets,
         }
 
         for phase_name in phases:
@@ -373,8 +557,10 @@ class ReconPipeline:
                 phase_out = await fn(ctx, results)
                 ctx.update(phase_out or {})
                 results.phases_run.append(phase_name)
+                phase_dur = time.time() - t0
+                results.phase_timings[phase_name] = round(phase_dur, 2)
                 _emit(num, f"Completed {phase_name}", 1.0,
-                      f"({time.time() - t0:.1f}s)")
+                      f"({phase_dur:.1f}s)")
             except Exception as exc:
                 logger.error("Phase %s failed: %s", phase_name, exc, exc_info=True)
                 results.errors.append({"phase": phase_name, "error": str(exc)})
@@ -482,9 +668,11 @@ class ReconPipeline:
 
     async def _phase2_passive_intel(self, ctx: dict, results: ReconResults) -> dict:
         """
-        Passive OSINT that never touches the target. Runs three sources
-        concurrently: URLScan.io, WHOIS, and Shodan InternetDB for IPs
-        discovered in Phase 1. Feeds new subdomains/IPs into ctx for Phase 3.
+        Passive OSINT that never touches the target. Implements the GROUP-1
+        fan-out/fan-in pattern: URLScan.io, WHOIS, and Shodan InternetDB run
+        CONCURRENTLY via ``asyncio.gather`` (independent — no shared state),
+        then results are merged sequentially. Feeds new subdomains/IPs into
+        ctx for Phase 3.
         """
         domain = ctx["domain"]
         subdomains = set(ctx.get("subdomains", []))
@@ -494,97 +682,270 @@ class ReconPipeline:
         new_subs: set = set()
         new_ips: set = set()
 
-        # --- 2a. URLScan.io ---
-        _emit(2, "URLScan.io passive search", 0.1)
-        try:
-            urlscan_search = _import_urlscan()
-            urlscan_data = await loop.run_in_executor(
-                None, lambda: urlscan_search(domain)
-            )
-            results.urlscan_data = urlscan_data
+        # ── Inner async tasks (each returns its own slice of state) ──
+        async def _task_urlscan():
+            try:
+                urlscan_search = _import_urlscan()
+                data = await loop.run_in_executor(
+                    None, lambda: urlscan_search(domain)
+                )
+                return ("urlscan", data, None)
+            except Exception as exc:
+                return ("urlscan", {}, exc)
 
-            # Merge discovered subdomains
-            for sub in urlscan_data.get("subdomains", []):
-                if sub not in subdomains:
-                    new_subs.add(sub)
-                    subdomains.add(sub)
+        async def _task_whois():
+            try:
+                whois_lookup = _import_whois()
+                data = await loop.run_in_executor(
+                    None, lambda: whois_lookup(domain)
+                )
+                return ("whois", data, None)
+            except Exception as exc:
+                return ("whois", {}, exc)
 
-            # Merge discovered IPs
-            for ip in urlscan_data.get("ips", []):
-                if ip not in resolved_ips.values():
-                    new_ips.add(ip)
-
-            us_subs = len(urlscan_data.get("subdomains", []))
-            us_ips = len(urlscan_data.get("ips", []))
-            _emit(2, "URLScan done", 0.3,
-                  f"{urlscan_data.get('results_count', 0)} results, "
-                  f"{us_subs} subdomains, {us_ips} IPs")
-        except Exception as exc:
-            logger.warning("URLScan enrichment failed: %s", exc)
-            results.urlscan_data = {}
-
-        # --- 2b. WHOIS ---
-        _emit(2, "WHOIS lookup", 0.4)
-        try:
-            whois_lookup = _import_whois()
-            whois_data = await loop.run_in_executor(
-                None, lambda: whois_lookup(domain)
-            )
-            results.whois_data = whois_data
-
-            # Extract nameserver domains for additional recon surface
-            for ns in whois_data.get("nameservers", []):
-                ns_domain = ns.rstrip(".")
-                if ns_domain.endswith("." + domain):
-                    new_subs.add(ns_domain)
-                    subdomains.add(ns_domain)
-
-            registrar = whois_data.get("registrar", "unknown")
-            _emit(2, "WHOIS done", 0.55,
-                  f"registrar={registrar}, "
-                  f"ns={len(whois_data.get('nameservers', []))}")
-        except Exception as exc:
-            logger.warning("WHOIS lookup failed: %s", exc)
-            results.whois_data = {}
-
-        # --- 2c. Shodan InternetDB for known IPs ---
-        unique_ips = list(set(resolved_ips.values()) | new_ips)
-        if unique_ips:
-            _emit(2, "Shodan InternetDB (passive IPs)", 0.6)
+        async def _task_shodan(ip_list):
+            if not ip_list:
+                return ("shodan", [], None)
             try:
                 enrich_ips_fn = _import_shodan()
                 enrichments = await enrich_ips_fn(
-                    unique_ips[:100], concurrency=5, delay=0.3
+                    ip_list[:100], concurrency=5, delay=0.3
                 )
-                for entry in enrichments:
+                return ("shodan", enrichments, None)
+            except Exception as exc:
+                return ("shodan", [], exc)
+
+        async def _task_otx(ip_list):
+            try:
+                otx_enrich = _import_otx()
+                data = await loop.run_in_executor(
+                    None, lambda: otx_enrich(domain, ip_list[:5])
+                )
+                return ("otx", data, None)
+            except Exception as exc:
+                return ("otx", {}, exc)
+
+        async def _task_virustotal(ip_list):
+            try:
+                vt_enrich = _import_virustotal()
+                data = await loop.run_in_executor(
+                    None, lambda: vt_enrich(domain, ip_list[:5])
+                )
+                return ("virustotal", data, None)
+            except Exception as exc:
+                return ("virustotal", {}, exc)
+
+        async def _task_censys(ip_list):
+            if not ip_list:
+                return ("censys", [], None)
+            try:
+                censys_enrich_ips = _import_censys()
+                data = await censys_enrich_ips(ip_list[:10])
+                return ("censys", data, None)
+            except Exception as exc:
+                return ("censys", [], exc)
+
+        async def _task_fofa(ip_list):
+            try:
+                fofa_enrich = _import_fofa()
+                data = await loop.run_in_executor(
+                    None, lambda: fofa_enrich(domain, ip_list[:5])
+                )
+                return ("fofa", data, None)
+            except Exception as exc:
+                return ("fofa", {}, exc)
+
+        async def _task_netlas(ip_list):
+            try:
+                netlas_enrich = _import_netlas()
+                data = await loop.run_in_executor(
+                    None, lambda: netlas_enrich(domain, ip_list[:5])
+                )
+                return ("netlas", data, None)
+            except Exception as exc:
+                return ("netlas", {}, exc)
+
+        async def _task_criminalip(ip_list):
+            try:
+                cip_enrich = _import_criminalip()
+                data = await loop.run_in_executor(
+                    None, lambda: cip_enrich(domain, ip_list[:5])
+                )
+                return ("criminalip", data, None)
+            except Exception as exc:
+                return ("criminalip", {}, exc)
+
+        async def _task_zoomeye(ip_list):
+            try:
+                ze_enrich = _import_zoomeye()
+                data = await loop.run_in_executor(
+                    None, lambda: ze_enrich(domain, ip_list[:5])
+                )
+                return ("zoomeye", data, None)
+            except Exception as exc:
+                return ("zoomeye", {}, exc)
+
+        # ── GROUP-1: launch all sources in parallel (fan-out) ────────
+        initial_ips = list(set(resolved_ips.values()))
+        enabled_osint = self.settings.get("osint_sources", [
+            "urlscan", "whois", "shodan", "otx", "virustotal", "censys",
+            "fofa", "netlas", "criminalip", "zoomeye",
+        ])
+        tasks = []
+        if "urlscan" in enabled_osint:
+            tasks.append(_task_urlscan())
+        if "whois" in enabled_osint:
+            tasks.append(_task_whois())
+        if "shodan" in enabled_osint:
+            tasks.append(_task_shodan(initial_ips))
+        if "otx" in enabled_osint:
+            tasks.append(_task_otx(initial_ips))
+        if "virustotal" in enabled_osint:
+            tasks.append(_task_virustotal(initial_ips))
+        if "censys" in enabled_osint:
+            tasks.append(_task_censys(initial_ips))
+        if "fofa" in enabled_osint:
+            tasks.append(_task_fofa(initial_ips))
+        if "netlas" in enabled_osint:
+            tasks.append(_task_netlas(initial_ips))
+        if "criminalip" in enabled_osint:
+            tasks.append(_task_criminalip(initial_ips))
+        if "zoomeye" in enabled_osint:
+            tasks.append(_task_zoomeye(initial_ips))
+
+        _emit(2, f"Parallel passive intel ({len(tasks)} sources)", 0.1)
+        t_group = time.time()
+        group_results = await asyncio.gather(*tasks, return_exceptions=False)
+        group_dur = time.time() - t_group
+        results.parallel_groups.append({
+            "phase": 2,
+            "name": "passive_intel",
+            "tasks": len(tasks),
+            "duration_sec": round(group_dur, 2),
+            "sources": enabled_osint,
+        })
+        _emit(2, "GROUP-1 fan-in", 0.7,
+              f"{len(tasks)} sources in {group_dur:.1f}s")
+
+        # ── Fan-in: merge results sequentially (no race conditions) ──
+        for tag, payload, exc in group_results:
+            if exc is not None:
+                logger.warning("Passive task '%s' failed: %s", tag, exc)
+
+            if tag == "urlscan":
+                results.urlscan_data = payload
+                for sub in payload.get("subdomains", []):
+                    if sub not in subdomains:
+                        new_subs.add(sub)
+                        subdomains.add(sub)
+                for ip in payload.get("ips", []):
+                    if ip not in resolved_ips.values():
+                        new_ips.add(ip)
+                logger.info("URLScan: %d results, %d subs, %d IPs",
+                            payload.get("results_count", 0),
+                            len(payload.get("subdomains", [])),
+                            len(payload.get("ips", [])))
+
+            elif tag == "whois":
+                results.whois_data = payload
+                for ns in payload.get("nameservers", []):
+                    ns_domain = ns.rstrip(".")
+                    if ns_domain.endswith("." + domain):
+                        new_subs.add(ns_domain)
+                        subdomains.add(ns_domain)
+                logger.info("WHOIS: registrar=%s ns=%d",
+                            payload.get("registrar", "unknown"),
+                            len(payload.get("nameservers", [])))
+
+            elif tag == "shodan":
+                for entry in payload:
                     ip = entry.get("ip", "")
                     if not ip:
                         continue
                     results.shodan_data[ip] = entry
-
-                    # Merge hostnames as new subdomains
                     for hostname in entry.get("hostnames", []):
                         hn = hostname.lower()
                         if hn.endswith("." + domain) or hn == domain:
                             if hn not in subdomains:
                                 new_subs.add(hn)
                                 subdomains.add(hn)
-
-                    # Collect passive CVEs
                     for vuln_id in entry.get("vulns", []):
                         results.passive_cves.append({
                             "id": vuln_id,
                             "source": "shodan_internetdb",
                             "ip": ip,
                         })
+                enriched_count = sum(1 for e in payload if e.get("ports"))
+                logger.info("Shodan InternetDB: %d/%d IPs with data",
+                            enriched_count, len(payload))
 
-                enriched_count = sum(
-                    1 for e in enrichments if e.get("ports")
-                )
-                _emit(2, "Shodan InternetDB done", 0.85,
-                      f"{enriched_count}/{len(unique_ips)} IPs with data")
-            except Exception as exc:
-                logger.warning("Shodan InternetDB enrichment failed: %s", exc)
+            elif tag == "otx":
+                results.otx_data = payload
+                domain_report = payload.get("domain_report", {})
+                pulse_count = domain_report.get("pulse_count", 0)
+                # Harvest passive DNS hostnames as new subdomains
+                for entry in domain_report.get("passive_dns", []):
+                    hostname = entry.get("hostname", "").lower().strip()
+                    if hostname.endswith("." + domain) and hostname not in subdomains:
+                        new_subs.add(hostname)
+                        subdomains.add(hostname)
+                logger.info("OTX: %d pulses, %d passive DNS records",
+                            pulse_count,
+                            len(domain_report.get("passive_dns", [])))
+
+            elif tag == "virustotal":
+                results.virustotal_data = payload
+                domain_report = payload.get("domain_report", {})
+                stats = domain_report.get("last_analysis_stats", {})
+                malicious = stats.get("malicious", 0)
+                logger.info("VirusTotal: reputation=%d, malicious_engines=%d",
+                            domain_report.get("reputation", 0), malicious)
+
+            elif tag == "censys":
+                results.censys_data = payload
+                for entry in payload:
+                    ip = entry.get("ip", "")
+                    ports = entry.get("ports", [])
+                    if ip and ports:
+                        pass  # Ports merged in Phase 3 via results.censys_data
+                logger.info("Censys: %d hosts enriched", len(payload))
+
+            elif tag == "fofa":
+                results.fofa_data = payload
+                domain_report = payload.get("domain_report", {})
+                # Harvest new IPs from FOFA
+                for ip in domain_report.get("ips", []):
+                    if ip not in resolved_ips.values():
+                        new_ips.add(ip)
+                logger.info("FOFA: %d hosts, %d IPs",
+                            len(domain_report.get("hosts", [])),
+                            len(domain_report.get("ips", [])))
+
+            elif tag == "netlas":
+                results.netlas_data = payload
+                logger.info("Netlas: %d hosts",
+                            len(payload.get("domain_report", {}).get("hosts", [])))
+
+            elif tag == "criminalip":
+                results.criminalip_data = payload
+                domain_report = payload.get("domain_report", {})
+                # Harvest connected IPs
+                for ip in domain_report.get("connected_ips", []):
+                    if ip and ip not in resolved_ips.values():
+                        new_ips.add(ip)
+                logger.info("CriminalIP: %d connected IPs, %d technologies",
+                            len(domain_report.get("connected_ips", [])),
+                            len(domain_report.get("technologies", [])))
+
+            elif tag == "zoomeye":
+                results.zoomeye_data = payload
+                domain_report = payload.get("domain_report", {})
+                for ip in domain_report.get("ips", []):
+                    if ip not in resolved_ips.values():
+                        new_ips.add(ip)
+                logger.info("ZoomEye: %d hosts, total=%d",
+                            len(domain_report.get("hosts", [])),
+                            domain_report.get("total", 0))
 
         # --- 2d. DNS-resolve newly discovered subdomains ---
         if new_subs:
@@ -640,24 +1001,129 @@ class ReconPipeline:
     # ══════════════════════════════════════════════════════════════════════
 
     async def _phase3_port_scan(self, ctx: dict, results: ReconResults) -> dict:
+        """
+        GROUP-3 fan-out: active port scan (ReconEngine), masscan (high-speed
+        SYN), and passive Shodan enrichment run CONCURRENTLY since they're
+        independent. Results merge by host with port deduplication. naabu
+        fallback runs sequentially only if all three returned nothing.
+
+        In IP-mode, masscan is the primary scanner. Censys port hints from
+        Phase 2 are also merged in.
+        """
         subdomains = ctx.get("subdomains", [ctx["domain"]])
         resolved_ips = ctx.get("resolved_ips", {})
         unique_ips = list(set(resolved_ips.values()))
+        is_ip_mode = ctx.get("ip_mode", False)
+        cidr_targets = ctx.get("cidr_targets", [])
         open_ports: Dict[str, List[int]] = {}
 
-        # 3a. Active scan via ReconEngine (naabu → nmap → python fallback)
-        if self._recon_engine and subdomains:
-            _emit(3, "Port scanning via ReconEngine", 0.2)
-            try:
-                open_ports.update(
-                    await self._recon_engine.scan_ports(set(subdomains[:50]))
-                )
-            except Exception as exc:
-                logger.warning("ReconEngine port scan failed: %s", exc)
+        # ── Seed from Censys port data harvested in Phase 2 ──────────
+        for entry in results.censys_data:
+            ip = entry.get("ip", "")
+            ports = entry.get("ports", [])
+            if ip and ports:
+                open_ports[ip] = sorted(set(ports))
 
-        # 3b. Direct naabu fallback
+        # ── Inner async tasks (independent) ──────────────────────────
+        async def _task_active_scan():
+            if not (self._recon_engine and subdomains) or is_ip_mode:
+                return ("active", {}, None)
+            try:
+                data = await self._recon_engine.scan_ports(set(subdomains[:50]))
+                return ("active", data, None)
+            except Exception as exc:
+                return ("active", {}, exc)
+
+        async def _task_masscan():
+            try:
+                masscan_scan, masscan_available, _, _ = _import_masscan()
+                if not masscan_available():
+                    return ("masscan", {}, None)
+
+                # Pick targets: CIDR ranges in IP-mode, else resolved IPs
+                if is_ip_mode and cidr_targets:
+                    targets = cidr_targets
+                else:
+                    targets = unique_ips[:100]
+
+                if not targets:
+                    return ("masscan", {}, None)
+
+                rate = self.settings.get("masscan_rate", 1000)
+                ports = self.settings.get("masscan_ports", None)
+
+                kwargs = {"targets": targets, "rate": rate, "timeout": 600}
+                if ports:
+                    kwargs["ports"] = ports
+                data = await masscan_scan(**kwargs)
+                return ("masscan", data, None)
+            except Exception as exc:
+                return ("masscan", {}, exc)
+
+        async def _task_shodan_enrich():
+            if not unique_ips:
+                return ("shodan", [], None)
+            try:
+                enrich_ips = _import_shodan()
+                data = await enrich_ips(unique_ips[:100], concurrency=5)
+                return ("shodan", data, None)
+            except Exception as exc:
+                return ("shodan", [], exc)
+
+        # ── GROUP-3: launch all three in parallel (fan-out) ──────────
+        _emit(3, "Parallel port scan (ReconEngine + masscan + Shodan)", 0.2)
+        t_group = time.time()
+        group_results = await asyncio.gather(
+            _task_active_scan(),
+            _task_masscan(),
+            _task_shodan_enrich(),
+            return_exceptions=True,
+        )
+        group_dur = time.time() - t_group
+        results.parallel_groups.append({
+            "phase": 3,
+            "name": "port_scan",
+            "tasks": 3,
+            "duration_sec": round(group_dur, 2),
+            "sources": ["recon_engine", "masscan", "shodan_internetdb"],
+        })
+        _emit(3, "GROUP-3 fan-in", 0.6,
+              f"3 sources in {group_dur:.1f}s")
+
+        # ── Fan-in: merge with port deduplication ────────────────────
+        for tag, payload, exc in group_results:
+            if exc is not None:
+                logger.warning("Port scan task '%s' failed: %s", tag, exc)
+
+            if tag == "active":
+                for host, ports in payload.items():
+                    merged = set(open_ports.get(host, []))
+                    merged.update(ports)
+                    open_ports[host] = sorted(merged)
+            elif tag == "masscan":
+                for host, ports in payload.items():
+                    merged = set(open_ports.get(host, []))
+                    merged.update(ports)
+                    open_ports[host] = sorted(merged)
+                if payload:
+                    logger.info("masscan: %d hosts, %d total open ports",
+                                len(payload),
+                                sum(len(p) for p in payload.values()))
+            elif tag == "shodan":
+                for entry in payload:
+                    ip = entry.get("ip", "")
+                    if not ip:
+                        continue
+                    results.shodan_data[ip] = entry
+                    passive = entry.get("ports", [])
+                    if passive:
+                        merged = set(open_ports.get(ip, []))
+                        merged.update(passive)
+                        open_ports[ip] = sorted(merged)
+
+        # ── Sequential naabu fallback if active scan returned nothing ─
         if not open_ports and _tool_available("naabu"):
-            _emit(3, "naabu direct scan", 0.4)
+            _emit(3, "naabu direct fallback", 0.8)
             out = await _run_tool(
                 ["naabu", "-host", ",".join(subdomains[:50]), "-silent", "-json"],
                 timeout=180,
@@ -672,23 +1138,9 @@ class ReconPipeline:
                             open_ports.setdefault(host, []).append(int(port))
                     except (json.JSONDecodeError, ValueError):
                         pass
-
-        # 3c. Shodan InternetDB passive enrichment (no API key needed)
-        if unique_ips:
-            _emit(3, "Shodan InternetDB enrichment", 0.7)
-            try:
-                enrich_ips = _import_shodan()
-                for entry in await enrich_ips(unique_ips[:100], concurrency=5):
-                    ip = entry.get("ip", "")
-                    if ip:
-                        results.shodan_data[ip] = entry
-                        passive = entry.get("ports", [])
-                        if passive:
-                            merged = set(open_ports.get(ip, []))
-                            merged.update(passive)
-                            open_ports[ip] = sorted(merged)
-            except Exception as exc:
-                logger.warning("Shodan enrichment failed: %s", exc)
+                # Deduplicate naabu results
+                for host in open_ports:
+                    open_ports[host] = sorted(set(open_ports[host]))
 
         results.open_ports = open_ports
 
@@ -792,6 +1244,31 @@ class ReconPipeline:
         results.live_hosts = alive
         results.technologies = tech_map
 
+        # ── WPScan: conditional on WordPress detection ───────────────
+        try:
+            wpscan_scan, is_wordpress = _import_wpscan()
+            if is_wordpress(tech_map) and alive:
+                _emit(4, "WPScan (WordPress detected)", 0.85)
+                wp_target = alive[0]
+                for url in alive:
+                    if any(
+                        t.get("name", "").lower() in ("wordpress", "wp")
+                        for t in tech_map.get(url, [])
+                        if isinstance(t, dict)
+                    ):
+                        wp_target = url
+                        break
+                try:
+                    results.wpscan_data = await wpscan_scan(wp_target)
+                    wp_vulns = results.wpscan_data.get("vulnerabilities", [])
+                    logger.info("WPScan: %d plugins, %d vulns",
+                                len(results.wpscan_data.get("plugins", [])),
+                                len(wp_vulns))
+                except Exception as exc:
+                    logger.warning("WPScan failed: %s", exc)
+        except Exception:
+            pass  # wpscan module not available
+
         if self.graph_engine:
             def _g(ge, tmap, alive_list):
                 for url in alive_list:
@@ -811,10 +1288,29 @@ class ReconPipeline:
     # ══════════════════════════════════════════════════════════════════════
 
     async def _phase5_resource_enum(self, ctx: dict, results: ReconResults) -> dict:
+        """
+        GROUP-5 fan-out: katana crawling, gau/wayback URL retrieval, and
+        Surface Mapping all run CONCURRENTLY (independent — no shared
+        state). JS secret scanning and Arjun param discovery run
+        sequentially after the parallel group since they depend on its
+        outputs (js_files set, all_endpoints list).
+
+        Skip-on-empty guard: if Phase 4 found no live hosts AND skipping
+        is enabled, this phase exits early to avoid wasted active scans.
+        """
         alive_hosts = ctx.get("alive_hosts", [])
         domain = ctx["domain"]
+
+        # ── Skip-on-empty guard (redamon GROUP-5 conditional pattern) ─
         if not alive_hosts:
+            if self.settings.get("skip_active_on_empty", False):
+                _emit(5, "SKIPPED: no live hosts from Phase 4", 1.0)
+                logger.info("Phase 5 skipped — no alive hosts and "
+                            "skip_active_on_empty=True")
+                return {"endpoints": []}
             alive_hosts = [f"https://{domain}"]
+            logger.info("Phase 5: no alive hosts, falling back to %s",
+                        alive_hosts[0])
 
         crawled: Set[str] = set()
         archived: Set[str] = set()
@@ -822,89 +1318,167 @@ class ReconPipeline:
         api_endpoints: List[Dict] = []
         params: Dict[str, List[str]] = {}
 
-        # 4a. katana crawling
-        if _tool_available("katana"):
-            _emit(5, "katana crawling", 0.1)
-            tf = _write_targets_file(alive_hosts[:10])
-            try:
-                out = await _run_tool(
-                    ["katana", "-list", tf, "-silent",
-                     "-depth", "3", "-js-crawl"],
-                    timeout=300,
-                )
-                if out:
-                    for line in out.splitlines():
-                        url = line.strip()
-                        if url and url.startswith("http"):
-                            crawled.add(url)
-                            if url.endswith(".js"):
-                                js_files.add(url)
-            finally:
-                Path(tf).unlink(missing_ok=True)
-        else:
-            # Fallback: VIPER WebCrawler
-            _emit(5, "WebCrawler fallback", 0.1)
-            try:
-                WebCrawler = _import_web_crawler()
-                crawler = WebCrawler()
-                for url in alive_hosts[:5]:
-                    try:
-                        cr = await crawler.crawl(url, max_depth=3, max_pages=100)
-                        crawled.update(getattr(cr, "visited_urls", []))
-                        js_files.update(getattr(cr, "js_files", []))
-                    except Exception as exc:
-                        logger.warning("Crawl failed for %s: %s", url, exc)
-            except Exception as exc:
-                logger.warning("WebCrawler import failed: %s", exc)
-
-        # 4b. gau / wayback archived URLs
-        _emit(5, "Archived URL retrieval", 0.5)
-        if _tool_available("gau"):
-            out = await _run_tool(
-                ["gau", "--subs", domain, "--threads", "5"], timeout=120,
-            )
-            if out:
-                archived.update(l.strip() for l in out.splitlines() if l.strip())
-        else:
-            try:
-                import aiohttp
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as sess:
-                    wb = (f"https://web.archive.org/cdx/search/cdx"
-                          f"?url=*.{domain}/*&output=text&fl=original"
-                          f"&collapse=urlkey&limit=2000")
-                    async with sess.get(wb) as resp:
-                        if resp.status == 200:
-                            archived.update(
-                                l.strip() for l in (await resp.text()).splitlines()
-                                if l.strip()
-                            )
-            except Exception as exc:
-                logger.warning("Wayback fallback failed: %s", exc)
-
-        # 4c. Surface Mapper for params + API endpoints
-        _emit(5, "Surface mapping", 0.7)
-        try:
-            SurfaceMapper = _import_surface_mapper()
-            mapper = SurfaceMapper()
-            # Only map the primary host — viper_core Phase 3 handles full per-port mapping
-            for url in alive_hosts[:1]:
+        # ── Inner async tasks (each returns its own slice of state) ──
+        async def _task_katana():
+            local_crawled: Set[str] = set()
+            local_js: Set[str] = set()
+            if _tool_available("katana"):
+                tf = _write_targets_file(alive_hosts[:10])
                 try:
-                    surface = await mapper.map_surface(url, crawl_depth=2, max_pages=50)
-                    api_endpoints.extend(getattr(surface, "api_endpoints", []))
-                    for u, p_set in getattr(surface, "url_parameters", {}).items():
-                        params[u] = list(p_set) if isinstance(p_set, set) else p_set
+                    out = await _run_tool(
+                        ["katana", "-list", tf, "-silent",
+                         "-depth", "3", "-js-crawl"],
+                        timeout=300,
+                    )
+                    if out:
+                        for line in out.splitlines():
+                            url = line.strip()
+                            if url and url.startswith("http"):
+                                local_crawled.add(url)
+                                if url.endswith(".js"):
+                                    local_js.add(url)
+                finally:
+                    Path(tf).unlink(missing_ok=True)
+            else:
+                # Fallback: VIPER WebCrawler
+                try:
+                    WebCrawler = _import_web_crawler()
+                    crawler = WebCrawler()
+                    for url in alive_hosts[:5]:
+                        try:
+                            cr = await crawler.crawl(url, max_depth=3, max_pages=100)
+                            local_crawled.update(getattr(cr, "visited_urls", []))
+                            local_js.update(getattr(cr, "js_files", []))
+                        except Exception as exc:
+                            logger.warning("Crawl failed for %s: %s", url, exc)
                 except Exception as exc:
-                    logger.warning("Surface map failed for %s: %s", url, exc)
-        except Exception as exc:
-            logger.warning("SurfaceMapper import failed: %s", exc)
+                    logger.warning("WebCrawler import failed: %s", exc)
+            return ("crawl", local_crawled, local_js, None)
+
+        async def _task_archive():
+            local_archived: Set[str] = set()
+            try:
+                if _tool_available("gau"):
+                    out = await _run_tool(
+                        ["gau", "--subs", domain, "--threads", "5"], timeout=120,
+                    )
+                    if out:
+                        local_archived.update(
+                            l.strip() for l in out.splitlines() if l.strip()
+                        )
+                else:
+                    import aiohttp
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as sess:
+                        wb = (f"https://web.archive.org/cdx/search/cdx"
+                              f"?url=*.{domain}/*&output=text&fl=original"
+                              f"&collapse=urlkey&limit=2000")
+                        async with sess.get(wb) as resp:
+                            if resp.status == 200:
+                                local_archived.update(
+                                    l.strip() for l in (await resp.text()).splitlines()
+                                    if l.strip()
+                                )
+            except Exception as exc:
+                return ("archive", local_archived, None, exc)
+            return ("archive", local_archived, None, None)
+
+        async def _task_surface_map():
+            local_endpoints: List[Dict] = []
+            local_params: Dict[str, List[str]] = {}
+            try:
+                SurfaceMapper = _import_surface_mapper()
+                mapper = SurfaceMapper()
+                # Only map primary host — Phase 3 of viper_core handles per-port
+                for url in alive_hosts[:1]:
+                    try:
+                        surface = await mapper.map_surface(
+                            url, crawl_depth=2, max_pages=50
+                        )
+                        local_endpoints.extend(
+                            getattr(surface, "api_endpoints", [])
+                        )
+                        for u, p_set in getattr(
+                            surface, "url_parameters", {}
+                        ).items():
+                            local_params[u] = (
+                                list(p_set) if isinstance(p_set, set) else p_set
+                            )
+                    except Exception as exc:
+                        logger.warning("Surface map failed for %s: %s", url, exc)
+            except Exception as exc:
+                return ("surface", local_endpoints, local_params, exc)
+            return ("surface", local_endpoints, local_params, None)
+
+        # ── GROUP-5: launch crawl + archive + surface map in parallel ─
+        _emit(5, "Parallel resource enum (katana + gau + SurfaceMapper)", 0.1)
+        t_group = time.time()
+        group_results = await asyncio.gather(
+            _task_katana(),
+            _task_archive(),
+            _task_surface_map(),
+            return_exceptions=False,
+        )
+        _emit(5, "GROUP-5 fan-in", 0.6,
+              f"3 sources in {time.time() - t_group:.1f}s")
+
+        # ── Fan-in: merge results ────────────────────────────────────
+        for result in group_results:
+            tag = result[0]
+            if tag == "crawl":
+                _, local_crawled, local_js, exc = result
+                if exc:
+                    logger.warning("Crawl task failed: %s", exc)
+                crawled.update(local_crawled)
+                js_files.update(local_js)
+            elif tag == "archive":
+                _, local_archived, _, exc = result
+                if exc:
+                    logger.warning("Archive task failed: %s", exc)
+                archived.update(local_archived)
+            elif tag == "surface":
+                _, local_endpoints, local_params, exc = result
+                if exc:
+                    logger.warning("Surface map task failed: %s", exc)
+                api_endpoints.extend(local_endpoints)
+                params.update(local_params)
 
         results.crawled_urls = sorted(crawled)
         results.archived_urls = sorted(archived)
         results.js_files = sorted(js_files)
         results.api_endpoints = api_endpoints
         results.parameters = params
+
+        # 4c2. JS Secret Scanner — scan discovered JS files for leaked secrets
+        if js_files:
+            try:
+                from recon.js_scanner import JSSecretScanner
+                _emit(5, "JS secret scanning", 0.75)
+                js_scanner = JSSecretScanner()
+                base_url = alive_hosts[0] if alive_hosts else f"https://{ctx['domain']}"
+                js_secrets = await js_scanner.scan_target(
+                    base_url, list(js_files)[:100],
+                )
+                if js_secrets:
+                    for secret in js_secrets:
+                        results.vulnerabilities.append({
+                            "type": "js_secret_leak",
+                            "subtype": secret.type,
+                            "url": secret.js_url,
+                            "confidence": secret.confidence,
+                            "entropy": secret.entropy,
+                            "line": secret.line_number,
+                            "context": secret.context,
+                            "value_preview": secret.value,
+                            "severity": "high" if secret.confidence == "high" else "medium",
+                        })
+                    logger.info("JS scanner found %d secrets in %d files",
+                                len(js_secrets), len(js_files))
+            except ImportError:
+                logger.debug("JSSecretScanner not available — skipping")
+            except Exception as exc:
+                logger.warning("JS secret scanning failed: %s", exc)
 
         all_endpoints = list(crawled | archived)
 
@@ -975,10 +1549,24 @@ class ReconPipeline:
     # ══════════════════════════════════════════════════════════════════════
 
     async def _phase6_vuln_scan(self, ctx: dict, results: ReconResults) -> dict:
+        """
+        Vuln scan with skip-on-empty guard. If Phase 4 found no live hosts
+        AND skip_active_on_empty is enabled, this phase exits early to
+        avoid running nuclei against synthetic targets.
+        """
         alive_hosts = ctx.get("alive_hosts", [])
         domain = ctx["domain"]
+
+        # ── Skip-on-empty guard (redamon GROUP-5 conditional pattern) ─
         if not alive_hosts:
+            if self.settings.get("skip_active_on_empty", False):
+                _emit(6, "SKIPPED: no live hosts from Phase 4", 1.0)
+                logger.info("Phase 6 skipped — no alive hosts and "
+                            "skip_active_on_empty=True")
+                return {"findings": []}
             alive_hosts = [f"https://{domain}"]
+            logger.info("Phase 6: no alive hosts, falling back to %s",
+                        alive_hosts[0])
 
         findings: List[Dict] = []
 

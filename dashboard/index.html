@@ -1101,6 +1101,7 @@ const TABS = [
   { id: 'graph',     icon: '\u2B2F', label: 'Graph' },
   { id: 'findings',  icon: '\u26A0', label: 'Findings' },
   { id: 'targets',   icon: '\u25CE', label: 'Targets' },
+  { id: 'recon',     icon: '\u29BF', label: 'Recon' },
   { id: 'insights',  icon: '\u2606', label: 'Insights' },
   { id: 'divider1',  divider: true },
   { id: 'terminal',  icon: '\u2588', label: 'Terminal' },
@@ -2218,6 +2219,318 @@ function TargetsTab({ state }) {
 }
 
 /* ══════════════════════════════════════════════════════════════
+   Tab: Recon (redamon-style multi-tool parallel pipeline)
+   ══════════════════════════════════════════════════════════════ */
+function ReconTab({ state }) {
+  const [target, setTarget] = useState('');
+  const [running, setRunning] = useState(false);
+  const [jobs, setJobs] = useState([]);
+  const [activeJob, setActiveJob] = useState(null);
+  const [osintSources, setOsintSources] = useState({
+    urlscan: true, whois: true, shodan: true,
+    otx: true, virustotal: true, censys: true,
+    fofa: true, netlas: true, criminalip: true, zoomeye: true,
+  });
+  const [masscanRate, setMasscanRate] = useState(1000);
+  const [skipEmpty, setSkipEmpty] = useState(false);
+  const [roeStart, setRoeStart] = useState('');
+  const [roeEnd, setRoeEnd] = useState('');
+
+  // Poll job list every 3s
+  useEffect(() => {
+    const refresh = () => {
+      api('/api/recon/pipeline/list').then(d => {
+        if (d?.jobs) setJobs(d.jobs);
+      });
+    };
+    refresh();
+    const iv = setInterval(refresh, 3000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Poll active job detail every 2s
+  useEffect(() => {
+    if (!activeJob) return;
+    const refresh = () => {
+      api(`/api/recon/pipeline/${activeJob.id}`).then(d => {
+        if (d && !d.error) setActiveJob(d);
+      });
+    };
+    const iv = setInterval(refresh, 2000);
+    return () => clearInterval(iv);
+  }, [activeJob?.id]);
+
+  const startPipeline = async () => {
+    if (!target.trim()) {
+      alert('Enter a target (domain, URL, IP, or CIDR)');
+      return;
+    }
+    setRunning(true);
+    const enabled = Object.entries(osintSources)
+      .filter(([_, v]) => v).map(([k]) => k);
+    try {
+      const r = await fetch('/api/recon/pipeline/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target: target.trim(),
+          osint_sources: enabled,
+          masscan_rate: masscanRate,
+          skip_active_on_empty: skipEmpty,
+          roe_window_start: roeStart || null,
+          roe_window_end: roeEnd || null,
+        }),
+      });
+      const data = await r.json();
+      if (data.error) {
+        alert('Error: ' + data.error);
+      } else {
+        setActiveJob({ id: data.job_id, target: data.target, status: 'starting' });
+      }
+    } catch (e) {
+      alert('Failed: ' + e.message);
+    }
+    setRunning(false);
+  };
+
+  const toggleSource = (key) => {
+    setOsintSources({ ...osintSources, [key]: !osintSources[key] });
+  };
+
+  const fmtSec = (s) => s ? `${s.toFixed(1)}s` : '\u2014';
+  const fmtTime = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString() : '\u2014';
+
+  return html`
+    <div class="animate-in" style="display:flex;flex-direction:column;gap:16px;">
+
+      <!-- Launch Card -->
+      <div class="glass-card" style="padding:20px;">
+        <h3 style="margin:0 0 12px 0;font-size:16px;">\u29BF Recon Pipeline</h3>
+        <p style="margin:0 0 16px 0;color:var(--text-muted);font-size:13px;">
+          Multi-tool parallel reconnaissance with fan-out/fan-in execution.
+          Supports domains, URLs, IPs, and CIDR ranges.
+        </p>
+
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+          <input type="text" value=${target} onInput=${e => setTarget(e.target.value)}
+            placeholder="example.com  /  https://example.com  /  192.168.1.0/24"
+            style="flex:1;padding:10px 12px;background:var(--bg-card);
+                   border:1px solid var(--border);border-radius:6px;
+                   color:var(--text);font-family:inherit;font-size:13px;" />
+          <button onClick=${startPipeline} disabled=${running}
+            style="padding:10px 20px;background:var(--accent);
+                   border:none;border-radius:6px;color:#fff;font-weight:600;
+                   cursor:${running?'wait':'pointer'};font-size:13px;">
+            ${running ? 'Starting\u2026' : 'Run Pipeline'}
+          </button>
+        </div>
+
+        <!-- OSINT Source Toggles -->
+        <div style="margin-bottom:14px;">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;
+                      text-transform:uppercase;letter-spacing:0.5px;">
+            Phase 2 OSINT sources (parallel)
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${Object.entries(osintSources).map(([k, v]) => html`
+              <label key=${k} style="display:flex;align-items:center;gap:6px;
+                                     padding:6px 12px;background:var(--bg-card);
+                                     border:1px solid ${v?'var(--accent)':'var(--border)'};
+                                     border-radius:4px;cursor:pointer;font-size:12px;
+                                     color:${v?'var(--text)':'var(--text-muted)'};">
+                <input type="checkbox" checked=${v}
+                  onChange=${() => toggleSource(k)}
+                  style="margin:0;cursor:pointer;" />
+                ${k}
+              </label>
+            `)}
+          </div>
+        </div>
+
+        <!-- Advanced Settings -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);
+                          text-transform:uppercase;letter-spacing:0.5px;">
+              Masscan rate (pps)
+            </label>
+            <input type="number" value=${masscanRate}
+              onInput=${e => setMasscanRate(parseInt(e.target.value) || 1000)}
+              min="100" max="10000"
+              style="width:100%;padding:6px 8px;background:var(--bg-card);
+                     border:1px solid var(--border);border-radius:4px;
+                     color:var(--text);font-size:12px;margin-top:4px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);
+                          text-transform:uppercase;letter-spacing:0.5px;">
+              RoE window start (HH:MM)
+            </label>
+            <input type="text" value=${roeStart} placeholder="e.g. 09:00"
+              onInput=${e => setRoeStart(e.target.value)}
+              style="width:100%;padding:6px 8px;background:var(--bg-card);
+                     border:1px solid var(--border);border-radius:4px;
+                     color:var(--text);font-size:12px;margin-top:4px;" />
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--text-muted);
+                          text-transform:uppercase;letter-spacing:0.5px;">
+              RoE window end (HH:MM)
+            </label>
+            <input type="text" value=${roeEnd} placeholder="e.g. 18:00"
+              onInput=${e => setRoeEnd(e.target.value)}
+              style="width:100%;padding:6px 8px;background:var(--bg-card);
+                     border:1px solid var(--border);border-radius:4px;
+                     color:var(--text);font-size:12px;margin-top:4px;" />
+          </div>
+          <div style="display:flex;align-items:flex-end;">
+            <label style="display:flex;align-items:center;gap:6px;
+                          font-size:12px;cursor:pointer;">
+              <input type="checkbox" checked=${skipEmpty}
+                onChange=${() => setSkipEmpty(!skipEmpty)}
+                style="cursor:pointer;" />
+              Skip active scans if Phase 4 empty
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Job Detail -->
+      ${activeJob ? html`
+        <div class="glass-card" style="padding:20px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;
+                      margin-bottom:12px;">
+            <h3 style="margin:0;font-size:15px;">
+              Active Job \u00b7 ${activeJob.target || ''}
+            </h3>
+            <span style="padding:4px 10px;border-radius:4px;font-size:11px;
+                         text-transform:uppercase;letter-spacing:0.5px;
+                         background:${
+                           activeJob.status === 'completed' ? 'var(--success)' :
+                           activeJob.status === 'error' ? 'var(--danger)' :
+                           activeJob.status === 'cancelled' ? 'var(--text-muted)' :
+                           'var(--accent)'
+                         };color:#fff;">
+              ${activeJob.status || 'unknown'}
+            </span>
+          </div>
+
+          ${activeJob.error ? html`
+            <div style="padding:10px;background:rgba(239,68,68,0.1);
+                        border:1px solid var(--danger);border-radius:4px;
+                        color:var(--danger);font-size:12px;margin-bottom:12px;">
+              ${activeJob.error}
+            </div>
+          ` : null}
+
+          <!-- Phase Timings -->
+          ${activeJob.phase_timings && Object.keys(activeJob.phase_timings).length ? html`
+            <div style="margin-bottom:14px;">
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;
+                          text-transform:uppercase;letter-spacing:0.5px;">
+                Per-phase wall-clock
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                ${Object.entries(activeJob.phase_timings).map(([phase, sec]) => html`
+                  <div key=${phase} style="padding:6px 10px;background:var(--bg-card);
+                                            border:1px solid var(--border);border-radius:4px;
+                                            font-size:11px;font-family:monospace;">
+                    <span style="color:var(--text-muted);">${phase}</span>
+                    <span style="color:var(--accent);margin-left:8px;">${fmtSec(sec)}</span>
+                  </div>
+                `)}
+              </div>
+            </div>
+          ` : null}
+
+          <!-- Parallel Group Timings -->
+          ${activeJob.parallel_groups && activeJob.parallel_groups.length ? html`
+            <div style="margin-bottom:14px;">
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;
+                          text-transform:uppercase;letter-spacing:0.5px;">
+                Parallel groups (fan-out/fan-in)
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                ${activeJob.parallel_groups.map((g, i) => html`
+                  <div key=${i} style="padding:8px 12px;background:var(--bg-card);
+                                        border-left:3px solid var(--accent);
+                                        border-radius:4px;font-size:12px;">
+                    <div style="display:flex;justify-content:space-between;
+                                margin-bottom:4px;">
+                      <strong>Phase ${g.phase} \u00b7 ${g.name}</strong>
+                      <span style="color:var(--accent);font-family:monospace;">
+                        ${g.tasks} tasks in ${fmtSec(g.duration_sec)}
+                      </span>
+                    </div>
+                    <div style="color:var(--text-muted);font-size:11px;">
+                      ${(g.sources || []).join(' \u00b7 ')}
+                    </div>
+                  </div>
+                `)}
+              </div>
+            </div>
+          ` : null}
+
+          <!-- Summary -->
+          ${activeJob.summary && Object.keys(activeJob.summary).length ? html`
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+                        gap:8px;">
+              ${Object.entries(activeJob.summary).map(([k, v]) => html`
+                <div key=${k} style="padding:10px;background:var(--bg-card);
+                                      border:1px solid var(--border);border-radius:4px;
+                                      text-align:center;">
+                  <div style="font-size:18px;font-weight:600;color:var(--accent);">
+                    ${typeof v === 'boolean' ? (v ? 'YES' : 'NO') : v}
+                  </div>
+                  <div style="font-size:10px;color:var(--text-muted);margin-top:2px;
+                              text-transform:uppercase;letter-spacing:0.5px;">
+                    ${k.replace(/_/g, ' ')}
+                  </div>
+                </div>
+              `)}
+            </div>
+          ` : null}
+        </div>
+      ` : null}
+
+      <!-- Job History -->
+      ${jobs.length > 0 ? html`
+        <div class="glass-card" style="padding:20px;">
+          <h3 style="margin:0 0 12px 0;font-size:15px;">Recent Jobs</h3>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            ${jobs.map(j => html`
+              <div key=${j.id}
+                onClick=${() => setActiveJob(j)}
+                style="padding:10px 12px;background:var(--bg-card);
+                       border:1px solid ${activeJob?.id === j.id ? 'var(--accent)' : 'var(--border)'};
+                       border-radius:4px;cursor:pointer;
+                       display:flex;justify-content:space-between;align-items:center;
+                       font-size:12px;">
+                <div style="display:flex;gap:12px;align-items:center;">
+                  <span style="font-family:monospace;color:var(--text-muted);">${j.id}</span>
+                  <span style="font-weight:500;">${j.target}</span>
+                </div>
+                <div style="display:flex;gap:12px;align-items:center;">
+                  <span style="color:var(--text-muted);">${fmtTime(j.started_at)}</span>
+                  <span style="padding:2px 8px;border-radius:3px;font-size:10px;
+                               text-transform:uppercase;letter-spacing:0.5px;
+                               background:${
+                                 j.status === 'completed' ? 'var(--success)' :
+                                 j.status === 'error' ? 'var(--danger)' :
+                                 j.status === 'cancelled' ? 'var(--text-muted)' :
+                                 'var(--accent)'
+                               };color:#fff;">${j.status}</span>
+                </div>
+              </div>
+            `)}
+          </div>
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+/* ══════════════════════════════════════════════════════════════
    Tab: Insights (Attack stats, Kill Chain, ReACT traces)
    ══════════════════════════════════════════════════════════════ */
 function InsightsTab({ state }) {
@@ -2911,6 +3224,7 @@ function App() {
       case 'graph': return html`<${GraphTab} state=${state} />`;
       case 'findings': return html`<${FindingsTab} state=${state} />`;
       case 'targets': return html`<${TargetsTab} state=${state} />`;
+      case 'recon': return html`<${ReconTab} state=${state} />`;
       case 'insights': return html`<${InsightsTab} state=${state} />`;
       case 'terminal': return html`<${TerminalTab} state=${state} />`;
       case 'chat': return html`<${ChatTab} state=${state} />`;

@@ -10,7 +10,7 @@
     {
       "name": "viper-webapp",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "webapp"],
+      "runtimeArgs": ["run", "dev", "--prefix", "dashboard/webapp"],
       "port": 3000
     }
   ]

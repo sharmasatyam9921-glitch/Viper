@@ -1813,6 +1813,7 @@ def get_session_detail(session_id):
 
 _TERMINAL_SESSIONS = {}  # session_id -> {target, method, ...}
 _active_scans = {}  # scan_id -> {id, target, status, phase, findings, log}
+_recon_pipeline_jobs = {}  # job_id -> {id, target, status, started_at, results, parallel_groups}
 
 # Hard blocks — NEVER allowed in any mode
 _HARD_BLOCKED = [
@@ -2840,6 +2841,384 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response({"error": str(e)}, status=400)
 
+        # ── Recon Pipeline endpoints (redamon-style multi-tool parallel) ──
+        elif path == "/api/recon/pipeline/start":
+            try:
+                data = json.loads(body) if body else {}
+                target = data.get("target", "").strip()
+                if not target:
+                    self._json_response({"error": "target required"}, status=400)
+                    return
+
+                phases = data.get("phases")  # None = all
+                osint_sources = data.get("osint_sources")  # None = all enabled
+                masscan_rate = int(data.get("masscan_rate", 1000))
+                skip_active_on_empty = bool(
+                    data.get("skip_active_on_empty", False)
+                )
+                roe_window_start = data.get("roe_window_start") or None
+                roe_window_end = data.get("roe_window_end") or None
+
+                job_id = str(uuid.uuid4())[:8]
+                _recon_pipeline_jobs[job_id] = {
+                    "id": job_id,
+                    "target": target,
+                    "status": "starting",
+                    "started_at": time.time(),
+                    "phases_done": [],
+                    "phase_timings": {},
+                    "parallel_groups": [],
+                    "summary": {},
+                    "error": None,
+                }
+
+                def _run_pipeline():
+                    # Run the recon pipeline in a fresh subprocess so it
+                    # gets its own Python interpreter + event loop — avoids
+                    # all the threading/asyncio/subprocess issues on Windows
+                    # when running inside the multi-threaded HTTP server.
+                    # Critical: stdin=DEVNULL everywhere or child tools
+                    # (naabu etc) hang reading an undefined stdin.
+                    import subprocess, tempfile, os
+                    job = _recon_pipeline_jobs[job_id]
+                    try:
+                        job["status"] = "running"
+                        _ws_broadcast("recon_pipeline_started", {
+                            "job_id": job_id, "target": target,
+                        })
+
+                        settings_dict = {
+                            "masscan_rate": masscan_rate,
+                            "skip_active_on_empty": skip_active_on_empty,
+                        }
+                        if osint_sources:
+                            settings_dict["osint_sources"] = osint_sources
+                        if roe_window_start:
+                            settings_dict["roe_window_start"] = roe_window_start
+                        if roe_window_end:
+                            settings_dict["roe_window_end"] = roe_window_end
+
+                        # Write args to a temp JSON file, have the runner
+                        # script read it and emit JSON results on stdout.
+                        args_file = tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".json", delete=False,
+                            encoding="utf-8",
+                        )
+                        json.dump({
+                            "target": target,
+                            "phases": phases,
+                            "settings": settings_dict,
+                        }, args_file)
+                        args_file.close()
+
+                        runner = PROJECT_ROOT / "recon" / "run_pipeline_cli.py"
+                        result_file = tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".json", delete=False,
+                            encoding="utf-8",
+                        )
+                        result_file.close()
+
+                        # Redirect stdout/stderr to DEVNULL to avoid pipe
+                        # buffer deadlock — subprocess writes can block
+                        # when the OS pipe buffer (~64KB) fills up, and
+                        # we don't need the output (we read the JSON
+                        # result file instead).
+                        proc = subprocess.run(
+                            [sys.executable, str(runner),
+                             args_file.name, result_file.name],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=600,
+                            check=False,
+                            cwd=str(PROJECT_ROOT),
+                        )
+
+                        # Parse result file
+                        try:
+                            with open(result_file.name, "r", encoding="utf-8") as f:
+                                res = json.load(f)
+                        except Exception as e:
+                            res = {
+                                "phases_run": [],
+                                "phase_timings": {},
+                                "parallel_groups": [],
+                                "errors": [{"phase": "subprocess",
+                                            "error": f"exit={proc.returncode}: {e}"}],
+                            }
+                        finally:
+                            for fn in (args_file.name, result_file.name):
+                                try:
+                                    os.unlink(fn)
+                                except OSError:
+                                    pass
+
+                        # Synthesize a result-like object for the status fields
+                        class _R:
+                            pass
+                        result = _R()
+                        result.phases_run = res.get("phases_run", [])
+                        result.phase_timings = res.get("phase_timings", {})
+                        result.parallel_groups = res.get("parallel_groups", [])
+                        result.subdomains = res.get("subdomains", [])
+                        result.live_hosts = res.get("live_hosts", [])
+                        result.open_ports = res.get("open_ports", {})
+                        result.vulnerabilities = res.get("vulnerabilities", [])
+                        result.passive_cves = res.get("passive_cves", [])
+                        result.ip_mode = res.get("ip_mode", False)
+                        result.errors = res.get("errors", [])
+
+                        job["status"] = "completed"
+                        job["phases_done"] = result.phases_run
+                        job["phase_timings"] = result.phase_timings
+                        job["parallel_groups"] = result.parallel_groups
+                        job["summary"] = {
+                            "subdomains": len(result.subdomains),
+                            "alive_hosts": len(result.live_hosts),
+                            "open_ports": sum(
+                                len(v) for v in result.open_ports.values()
+                            ),
+                            "vulnerabilities": len(result.vulnerabilities),
+                            "passive_cves": len(result.passive_cves),
+                            "ip_mode": result.ip_mode,
+                            "errors": len(result.errors),
+                        }
+                        _ws_broadcast("recon_pipeline_completed", {
+                            "job_id": job_id, "summary": job["summary"],
+                            "groups": job["parallel_groups"],
+                        })
+                    except Exception as e:
+                        job["status"] = "error"
+                        job["error"] = str(e)
+                        _ws_broadcast("recon_pipeline_error", {
+                            "job_id": job_id, "error": str(e),
+                        })
+
+                t = threading.Thread(target=_run_pipeline, daemon=True)
+                t.start()
+                self._json_response({
+                    "job_id": job_id,
+                    "status": "started",
+                    "target": target,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/recon/pipeline/status":
+            try:
+                data = json.loads(body) if body else {}
+                job_id = data.get("job_id", "")
+                job = _recon_pipeline_jobs.get(job_id)
+                if job:
+                    self._json_response(job)
+                else:
+                    self._json_response({"error": "job not found"}, status=404)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/ctf/feedback":
+            # Ingest a single feedback entry from the dashboard
+            try:
+                data = json.loads(body) if body else {}
+                from core.ctf_feedback import CTFFeedbackStore, FeedbackEntry
+                store = CTFFeedbackStore()
+                entry = FeedbackEntry.from_dict(data)
+                if not entry.challenge or not entry.category:
+                    self._json_response(
+                        {"error": "challenge and category are required"},
+                        status=400,
+                    )
+                    return
+                fb_id = store.add(entry)
+                self._json_response({
+                    "status": "ingested",
+                    "feedback_id": fb_id,
+                    "stats": store.stats(),
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/ctf/train":
+            # Trigger a training run (from url, dir, or github repo)
+            try:
+                data = json.loads(body) if body else {}
+                mode = (data.get("mode") or "").lower()
+                from core.ctf_training import (
+                    train_from_url, train_from_dir, train_from_github_repo,
+                )
+
+                if mode == "url":
+                    url = data.get("url", "")
+                    if not url:
+                        self._json_response(
+                            {"error": "url required for mode=url"}, status=400,
+                        )
+                        return
+
+                    def _do():
+                        try:
+                            train_from_url(url)
+                        except Exception as e:
+                            logger.warning("train_from_url error: %s", e)
+                    threading.Thread(target=_do, daemon=True).start()
+                    self._json_response({"status": "training_started",
+                                          "mode": "url", "url": url})
+
+                elif mode == "github":
+                    owner = data.get("owner", "")
+                    repo = data.get("repo", "")
+                    branch = data.get("branch", "master")
+                    max_files = int(data.get("max_files", 25))
+                    if not (owner and repo):
+                        self._json_response(
+                            {"error": "owner and repo required"}, status=400,
+                        )
+                        return
+
+                    def _do():
+                        try:
+                            train_from_github_repo(
+                                owner, repo, branch, max_files,
+                            )
+                        except Exception as e:
+                            logger.warning("train_from_github error: %s", e)
+                    threading.Thread(target=_do, daemon=True).start()
+                    self._json_response({
+                        "status": "training_started",
+                        "mode": "github",
+                        "repo": f"{owner}/{repo}",
+                        "max_files": max_files,
+                    })
+
+                elif mode == "dir":
+                    from pathlib import Path as _P
+                    d = data.get("path", "")
+                    if not d:
+                        self._json_response(
+                            {"error": "path required for mode=dir"}, status=400,
+                        )
+                        return
+
+                    def _do():
+                        try:
+                            train_from_dir(_P(d))
+                        except Exception as e:
+                            logger.warning("train_from_dir error: %s", e)
+                    threading.Thread(target=_do, daemon=True).start()
+                    self._json_response({"status": "training_started",
+                                          "mode": "dir", "path": d})
+                else:
+                    self._json_response(
+                        {"error": "mode must be url, github, or dir"},
+                        status=400,
+                    )
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/ctf/run":
+            # Hunt for CTF flags on a target via core.ctf_mode
+            try:
+                data = json.loads(body) if body else {}
+                target = data.get("target", "").strip()
+                flag_prefix = data.get("flag_prefix", "HTB")
+                custom_pattern = data.get("custom_pattern") or None
+                timeout_min = float(data.get("timeout_minutes", 10))
+
+                if not target:
+                    self._json_response({"error": "target required"}, status=400)
+                    return
+
+                job_id = str(uuid.uuid4())[:8]
+                _recon_pipeline_jobs[job_id] = {
+                    "id": job_id,
+                    "target": target,
+                    "status": "starting",
+                    "started_at": time.time(),
+                    "kind": "ctf",
+                    "flag_prefix": flag_prefix,
+                    "flags": [],
+                    "findings": [],
+                    "error": None,
+                }
+
+                def _run_ctf():
+                    job = _recon_pipeline_jobs[job_id]
+                    try:
+                        job["status"] = "running"
+                        from core.ctf_mode import CTFRunner
+                        import asyncio as _asyncio
+
+                        runner = CTFRunner(
+                            flag_prefix=flag_prefix,
+                            custom_flag_pattern=custom_pattern,
+                            timeout_minutes=timeout_min,
+                        )
+
+                        async def _do():
+                            return await runner.run(target)
+
+                        result = _asyncio.run(_do())
+                        job["status"] = "completed"
+                        job["flags"] = [f.to_dict() for f in result.flags]
+                        job["findings"] = result.findings
+                        job["errors"] = result.errors
+                        _ws_broadcast("ctf_completed", {
+                            "job_id": job_id,
+                            "flag_count": len(result.flags),
+                            "target": target,
+                        })
+                    except Exception as e:
+                        job["status"] = "error"
+                        job["error"] = str(e)
+
+                threading.Thread(target=_run_ctf, daemon=True).start()
+                self._json_response({
+                    "job_id": job_id,
+                    "status": "started",
+                    "target": target,
+                    "flag_prefix": flag_prefix,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/kb/search":
+            try:
+                data = json.loads(body) if body else {}
+                query = data.get("query", "").strip()
+                category = data.get("category")
+                top_k = int(data.get("top_k", 5))
+                if not query:
+                    self._json_response({"error": "query required"}, status=400)
+                    return
+                try:
+                    from core.knowledge_base import KnowledgeBase
+                    kb = KnowledgeBase()
+                    results = kb.search(query, top_k=top_k, category=category)
+                    self._json_response({
+                        "query": query,
+                        "results": results,
+                        "total": kb.count(),
+                    })
+                except Exception as e:
+                    self._json_response({"error": f"KB: {e}"}, status=500)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/recon/pipeline/cancel":
+            try:
+                data = json.loads(body) if body else {}
+                job_id = data.get("job_id", "")
+                job = _recon_pipeline_jobs.get(job_id)
+                if not job:
+                    self._json_response({"error": "job not found"}, status=404)
+                    return
+                # Best-effort cancel: mark cancelled (worker thread will exit
+                # naturally; we don't kill threads in Python).
+                job["status"] = "cancelled"
+                self._json_response({"status": "cancelled", "job_id": job_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
         # ── CodeFix endpoints ──
         elif path == "/api/codefix/run":
             try:
@@ -2851,6 +3230,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 job_id = _start_codefix_job(finding_id, repo_path)
                 self._json_response({"status": "started", "job_id": job_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Report delete ──
+        elif path == "/api/reports/delete":
+            try:
+                data = json.loads(body) if body else {}
+                filename = data.get("filename", "")
+                safe = Path(filename).name
+                report_path = REPORTS_DIR / safe
+                if not report_path.exists():
+                    self._json_response({"error": "Report not found"}, status=404)
+                elif report_path.is_file() and safe and ".." not in filename:
+                    report_path.unlink()
+                    self._json_response({"status": "deleted", "filename": safe})
+                else:
+                    self._json_response({"error": "Invalid filename"}, status=400)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Project settings ──
+        elif path == "/api/projects":
+            try:
+                data = json.loads(body) if body else {}
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                settings_file = STATE_DIR / "project_settings.json"
+                settings_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                self._json_response({"status": "saved"})
             except Exception as e:
                 self._json_response({"error": str(e)}, status=400)
 
@@ -2931,6 +3338,77 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/codefix/status":
             self._json_response(get_codefix_status())
+
+        # ── CTF training stats + recommendations ──
+        elif path == "/api/ctf/stats":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                self._json_response(store.stats())
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path == "/api/ctf/feedback/list":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                limit = int(qp("limit", "50"))
+                self._json_response({"entries": store.list(limit=limit)})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path == "/api/ctf/ranking":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                category = qp("category")
+                min_tries = int(qp("min_tries", "1"))
+                ranking = store.technique_ranking(
+                    category=category, min_tries=min_tries,
+                )
+                self._json_response({"ranking": ranking})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path == "/api/ctf/recommend":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                category = qp("category", "web")
+                stack_str = qp("stack", "") or ""
+                stack = [s.strip() for s in stack_str.split(",") if s.strip()]
+                top_k = int(qp("top", "5"))
+                recs = store.recommend_for_stack(stack, category, top_k)
+                self._json_response({
+                    "category": category,
+                    "stack": stack,
+                    "recommended_techniques": recs,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        # ── Recon Pipeline list/detail (GET, for polling) ──
+        elif path == "/api/recon/pipeline/list":
+            jobs = []
+            for jid, job in _recon_pipeline_jobs.items():
+                jobs.append({
+                    "id": jid,
+                    "target": job.get("target", ""),
+                    "status": job.get("status", ""),
+                    "started_at": job.get("started_at", 0),
+                    "phases_done": job.get("phases_done", []),
+                    "summary": job.get("summary", {}),
+                })
+            jobs.sort(key=lambda x: x["started_at"], reverse=True)
+            self._json_response({"jobs": jobs[:50]})
+
+        elif path.startswith("/api/recon/pipeline/") and path != "/api/recon/pipeline/list":
+            jid = path.rsplit("/", 1)[1]
+            job = _recon_pipeline_jobs.get(jid)
+            if job:
+                self._json_response(job)
+            else:
+                self._json_response({"error": "job not found"}, 404)
 
         elif path == "/api/sessions/list":
             self._json_response(get_sessions_list())
@@ -3236,12 +3714,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"remediations": []})
 
         elif path == "/api/reports":
-            # List HTML reports in reports/ directory
+            # List HTML + Markdown reports in reports/ directory
             reports = []
             if REPORTS_DIR.exists():
-                for f in sorted(REPORTS_DIR.glob("*.html"), reverse=True):
-                    reports.append({"name": f.name, "size": f.stat().st_size, "modified": f.stat().st_mtime})
-            self._json_response({"reports": reports[:20]})
+                for ext in ("*.html", "*.md"):
+                    for f in sorted(REPORTS_DIR.glob(ext), reverse=True):
+                        reports.append({
+                            "name": f.name,
+                            "size": f.stat().st_size,
+                            "modified": f.stat().st_mtime,
+                            "type": f.suffix.lstrip("."),
+                        })
+            reports.sort(key=lambda x: x["modified"], reverse=True)
+            self._json_response({"reports": reports[:50]})
+
+        elif path.startswith("/api/reports/") and path != "/api/reports/":
+            filename = path.split("/api/reports/", 1)[1]
+            # Sanitize: no path traversal
+            safe = Path(filename).name
+            report_path = REPORTS_DIR / safe
+            if report_path.exists() and report_path.is_file():
+                self._serve_file(report_path,
+                                 "text/html" if safe.endswith(".html") else "text/plain")
+            else:
+                self._json_response({"error": "Report not found"}, 404)
+
+        elif path == "/api/projects":
+            # Current project config (single-project mode)
+            settings = {}
+            settings_file = STATE_DIR / "project_settings.json"
+            if settings_file.exists():
+                try:
+                    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            self._json_response({"project": settings})
 
         # ── Sessions (legacy) ──
         elif path == "/api/sessions":

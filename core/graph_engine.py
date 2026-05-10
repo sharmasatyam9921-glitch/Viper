@@ -73,6 +73,12 @@ CHAIN_FAILURE = "ChainFailure"
 TRACEROUTE = "Traceroute"
 EXTERNAL_DOMAIN = "ExternalDomain"
 
+# OSINT & Enrichment
+THREAT_PULSE = "ThreatPulse"
+MALWARE = "Malware"
+JS_RECON_FINDING = "JsReconFinding"
+OSINT_ENRICHMENT = "OsintEnrichment"
+
 # Legacy compat (lowercase aliases for existing VIPER code)
 ATTACK = "Attack"
 FINDING = "Finding"
@@ -83,6 +89,7 @@ ALL_NODE_TYPES = [
     CAPEC, EXPLOIT_GVM, SECRET, GITHUB_HUNT, GITHUB_REPOSITORY, GITHUB_PATH,
     GITHUB_SECRET, GITHUB_SENSITIVE_FILE, ATTACK_CHAIN, CHAIN_STEP,
     CHAIN_FINDING, CHAIN_DECISION, CHAIN_FAILURE, TRACEROUTE, EXTERNAL_DOMAIN,
+    THREAT_PULSE, MALWARE, JS_RECON_FINDING, OSINT_ENRICHMENT,
     ATTACK, FINDING,
 ]
 
@@ -124,6 +131,12 @@ USES_TECH = "USES_TECHNOLOGY"
 ATTACKED_WITH = "ATTACKED_WITH"
 FOUND_BY = "FOUND_BY"
 
+# OSINT & Enrichment relationships
+HAS_THREAT_PULSE = "HAS_THREAT_PULSE"
+ASSOCIATED_WITH_MALWARE = "ASSOCIATED_WITH_MALWARE"
+HAS_JS_FINDING = "HAS_JS_FINDING"
+ENRICHED_BY = "ENRICHED_BY"
+
 # Chain relationships
 CHAIN_HAS_STEP = "HAS_STEP"
 CHAIN_NEXT_STEP = "NEXT_STEP"
@@ -152,6 +165,10 @@ NODE_COLORS = {
     ATTACK: {"background": "#ff8c00", "border": "#ea580c"},
     ATTACK_CHAIN: {"background": "#f472b6", "border": "#ec4899"},
     BASE_URL: {"background": "#60a5fa", "border": "#3b82f6"},
+    THREAT_PULSE: {"background": "#f97316", "border": "#ea580c"},
+    MALWARE: {"background": "#ef4444", "border": "#b91c1c"},
+    JS_RECON_FINDING: {"background": "#06b6d4", "border": "#0891b2"},
+    OSINT_ENRICHMENT: {"background": "#8b5cf6", "border": "#7c3aed"},
 }
 
 NODE_SHAPES = {
@@ -171,6 +188,10 @@ NODE_SHAPES = {
     ATTACK: "diamond",
     ATTACK_CHAIN: "triangleDown",
     BASE_URL: "dot",
+    THREAT_PULSE: "diamond",
+    MALWARE: "star",
+    JS_RECON_FINDING: "triangle",
+    OSINT_ENRICHMENT: "square",
 }
 
 
@@ -528,6 +549,8 @@ class Neo4jBackend(GraphBackend):
             (ATTACK_CHAIN, "chain_id"), (CHAIN_STEP, "step_id"),
             (CHAIN_FINDING, "finding_id"), (CHAIN_DECISION, "decision_id"),
             (CHAIN_FAILURE, "failure_id"),
+            (THREAT_PULSE, "pulse_key"), (MALWARE, "hash_value"),
+            (JS_RECON_FINDING, "finding_key"), (OSINT_ENRICHMENT, "enrichment_key"),
         ]
         with self._driver.session() as session:
             for node_type, prop in constraints:
@@ -918,6 +941,64 @@ class GraphEngine:
 
     def add_github_secret(self, secret_id: str, **attrs) -> str:
         return self._backend.add_node(GITHUB_SECRET, secret_id, self._props(id=secret_id, **attrs))
+
+    # ── OSINT & Enrichment nodes ──
+
+    def add_threat_pulse(self, ip_or_domain: str, pulse_name: str, source: str = "otx") -> str:
+        pulse_key = f"{pulse_name}@{ip_or_domain}"
+        pulse_id = self._backend.add_node(
+            THREAT_PULSE, pulse_key,
+            self._props(pulse_key=pulse_key, pulse_name=pulse_name, entity=ip_or_domain, source=source),
+        )
+        # Link to IP or Target/Subdomain
+        host_nodes = self._backend.find_nodes(IP, {"address": ip_or_domain}, limit=1)
+        if not host_nodes:
+            host_nodes = self._backend.find_nodes(TARGET, {"name": ip_or_domain}, limit=1)
+        if not host_nodes:
+            host_nodes = self._backend.find_nodes(SUBDOMAIN, {"name": ip_or_domain}, limit=1)
+        if host_nodes:
+            self._backend.add_relationship(host_nodes[0]["id"], pulse_id, HAS_THREAT_PULSE)
+        return pulse_id
+
+    def add_malware(self, hash_value: str, associated_entity: str, source: str = "otx") -> str:
+        mal_id = self._backend.add_node(
+            MALWARE, hash_value,
+            self._props(hash_value=hash_value, entity=associated_entity, source=source),
+        )
+        # Link to IP or Target/Subdomain
+        host_nodes = self._backend.find_nodes(IP, {"address": associated_entity}, limit=1)
+        if not host_nodes:
+            host_nodes = self._backend.find_nodes(TARGET, {"name": associated_entity}, limit=1)
+        if not host_nodes:
+            host_nodes = self._backend.find_nodes(SUBDOMAIN, {"name": associated_entity}, limit=1)
+        if host_nodes:
+            self._backend.add_relationship(host_nodes[0]["id"], mal_id, ASSOCIATED_WITH_MALWARE)
+        return mal_id
+
+    def add_js_recon_finding(self, url: str, finding_type: str, detail: str) -> str:
+        finding_key = f"{finding_type}:{detail[:60]}@{url}"
+        finding_id = self._backend.add_node(
+            JS_RECON_FINDING, finding_key,
+            self._props(finding_key=finding_key, url=url, finding_type=finding_type, detail=detail),
+        )
+        url_nodes = self._backend.find_nodes(BASE_URL, {"url": url}, limit=1)
+        if not url_nodes:
+            url_nodes = self._backend.find_nodes(ENDPOINT, {"full_url": url}, limit=1)
+        if url_nodes:
+            self._backend.add_relationship(url_nodes[0]["id"], finding_id, HAS_JS_FINDING)
+        return finding_id
+
+    def add_osint_enrichment(self, ip: str, source: str, data: dict) -> str:
+        enrichment_key = f"{source}:{ip}"
+        enrichment_id = self._backend.add_node(
+            OSINT_ENRICHMENT, enrichment_key,
+            self._props(enrichment_key=enrichment_key, ip=ip, source=source,
+                        data_json=json.dumps(data) if data else "{}"),
+        )
+        ip_nodes = self._backend.find_nodes(IP, {"address": ip}, limit=1)
+        if ip_nodes:
+            self._backend.add_relationship(ip_nodes[0]["id"], enrichment_id, ENRICHED_BY)
+        return enrichment_id
 
     # ── Legacy compat (for existing VIPER code) ──
 
