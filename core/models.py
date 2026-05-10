@@ -60,6 +60,7 @@ class Phase(str, Enum):
     SCAN = "SCAN"
     EXPLOIT = "EXPLOIT"
     POST_EXPLOIT = "POST_EXPLOIT"
+    LATERAL = "LATERAL"  # post-foothold: privesc, AD attacks, lateral movement
 
 
 @dataclass

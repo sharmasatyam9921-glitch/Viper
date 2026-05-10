@@ -79,6 +79,17 @@ class PhaseEngine:
             "privilege_escalation", "lateral_movement",
             "persistence", "data_exfil", "credential_dump",
             "webshell", "backdoor", "pivot",
+            "linpeas", "winpeas", "sudo_analyze", "cap_analyze",
+            "service_analyze", "gtfobins_lookup", "kernel_exploit_lookup",
+        ],
+        "LATERAL": [
+            "ad_enum", "bloodhound", "sharphound",
+            "kerberoast", "asreproast", "secretsdump",
+            "psexec", "wmiexec", "smbexec", "atexec",
+            "ticketer", "evil-winrm", "ntlmrelayx",
+            "ligolo", "chisel", "ssh_forward", "proxychains",
+            "impacket", "lookupsid", "addcomputer",
+            "getuserspns", "getnpusers", "getadusers",
         ],
     }
 
