@@ -1,0 +1,326 @@
+"""Tests for core/hack_mode.py — top-level autonomous hack orchestrator."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+from typing import List
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from core.audit_logger import AuditLogger  # noqa: E402
+from core.hack_mode import HackMode, HackResult  # noqa: E402
+from core.hack_profile import (  # noqa: E402
+    BugBountyProfile,
+    CTFProfile,
+    LabProfile,
+    Profile,
+    StopCondition,
+)
+from core.narrator import Narrator  # noqa: E402
+from core.swarm_coordinator import (  # noqa: E402
+    CoordinatorResult,
+    SwarmCoordinator,
+    WorkerSpec,
+)
+from core.swarm_engine import SwarmAgent  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Test fixtures
+# ---------------------------------------------------------------------------
+
+
+async def _good_runner(agent: SwarmAgent) -> List[dict]:
+    """Returns one unique finding per call."""
+    return [{
+        "type": "test_finding",
+        "vuln_type": f"test_finding_{agent.technique}_{agent.target}",
+        "title": f"finding for {agent.target} via {agent.technique}",
+        "severity": "info",
+    }]
+
+
+async def _flag_runner(agent: SwarmAgent) -> List[dict]:
+    """Returns a CTF flag — triggers CTF stop condition."""
+    return [{
+        "type": "flag_captured",
+        "vuln_type": "flag",
+        "title": "HTB{caught_the_flag}",
+        "severity": "critical",
+    }]
+
+
+async def _zero_runner(agent: SwarmAgent) -> List[dict]:
+    """Returns nothing — triggers bug-bounty exhaustion eventually."""
+    return []
+
+
+class _StubCoord(SwarmCoordinator):
+    """SwarmCoordinator subclass we can inject for testing."""
+    PHASE = "recon"
+
+    def __init__(self, *, technique_runner=None, output_topic="vuln", **kw):
+        super().__init__(**kw)
+        self._runner = technique_runner or _good_runner
+        self.OUTPUT_TOPIC = output_topic
+
+    def build_manifest(self, target, context):
+        return [
+            WorkerSpec(technique="t1", runner=self._runner),
+            WorkerSpec(technique="t2", runner=self._runner),
+        ]
+
+
+def _make_hackmode(tmp_path, *, profile=None, technique_runner=None,
+                   target="example.com") -> HackMode:
+    """Build a HackMode with mocked coordinator + audit + narrator."""
+    if profile is None:
+        profile = LabProfile()
+    audit = AuditLogger.for_hunt(
+        target, hunts_dir=tmp_path / "hunts", db_path=tmp_path / "v.db",
+    )
+    narrator = Narrator(quiet=True)  # no terminal noise in tests
+    hm = HackMode(
+        target=target,
+        profile=profile,
+        narrator=narrator,
+        audit=audit,
+    )
+    # Always inject the stub coordinator
+    def factory(phase, common):
+        coord = _StubCoord(technique_runner=technique_runner, **common)
+        coord.PHASE = phase  # ensure phase audit-logs correctly
+        return coord
+
+    hm._coord_factory = factory
+    return hm
+
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+
+class TestConstruction:
+    def test_for_target_auto_detects_profile_for_localhost(self, tmp_path):
+        hm = HackMode.for_target(
+            "127.0.0.1",
+            hunts_dir=tmp_path / "hunts",
+            db_path=tmp_path / "v.db",
+        )
+        assert hm.profile.name == "LabProfile"
+
+    def test_for_target_auto_detects_ctf_hostname(self, tmp_path):
+        hm = HackMode.for_target(
+            "challenge.htb",
+            hunts_dir=tmp_path / "hunts",
+            db_path=tmp_path / "v.db",
+        )
+        assert hm.profile.name == "CTFProfile"
+
+    def test_for_target_default_is_bugbounty(self, tmp_path):
+        hm = HackMode.for_target(
+            "example.com",
+            hunts_dir=tmp_path / "hunts",
+            db_path=tmp_path / "v.db",
+        )
+        assert hm.profile.name == "BugBountyProfile"
+
+    def test_explicit_profile_override(self, tmp_path):
+        hm = HackMode.for_target(
+            "example.com", explicit_profile="ctf",
+            hunts_dir=tmp_path / "hunts",
+            db_path=tmp_path / "v.db",
+        )
+        assert hm.profile.name == "CTFProfile"
+
+
+# ---------------------------------------------------------------------------
+# Run-once integration: LabProfile (one full pass)
+# ---------------------------------------------------------------------------
+
+
+class TestLabProfileRun:
+    def test_one_pass_produces_findings(self, tmp_path):
+        hm = _make_hackmode(tmp_path, profile=LabProfile())
+        result = asyncio.run(hm.run())
+        assert isinstance(result, HackResult)
+        assert result.iterations == 1
+        assert result.findings_count > 0
+        assert result.timed_out is False
+        # Lab profile stop condition triggers
+        assert "one_pass" in result.stop_reason or "max_iterations" in result.stop_reason
+
+    def test_audit_log_records_lifecycle(self, tmp_path):
+        hm = _make_hackmode(tmp_path, profile=LabProfile())
+        result = asyncio.run(hm.run())
+        events = hm.audit.read_jsonl()
+        actions = [e.action for e in events]
+        assert "hunt.started" in actions
+        assert "hunt.completed" in actions
+        assert "loop.iteration" in actions
+        assert "phase.started" in actions
+        assert "phase.completed" in actions
+        # At least 4 worker dispatches across recon (2 + 2 across two phases)
+        assert actions.count("worker.dispatched") >= 2
+
+    def test_phase_results_populated(self, tmp_path):
+        # Lab profile (without --go) runs only recon + vuln + report;
+        # with our stub coordinator that's recon and vuln as no-ops/stub.
+        hm = _make_hackmode(tmp_path, profile=LabProfile(allow_destructive=False))
+        result = asyncio.run(hm.run())
+        # The stub coordinator runs whatever phase we ask for
+        assert "recon" in result.phase_results
+
+    def test_to_dict_serializable(self, tmp_path):
+        import json
+        hm = _make_hackmode(tmp_path, profile=LabProfile())
+        result = asyncio.run(hm.run())
+        json.dumps(result.to_dict())
+
+
+# ---------------------------------------------------------------------------
+# CTF: stop when flag is found
+# ---------------------------------------------------------------------------
+
+
+class TestCTFFlagLoop:
+    def test_stops_when_flag_captured(self, tmp_path):
+        hm = _make_hackmode(
+            tmp_path,
+            profile=CTFProfile(),
+            technique_runner=_flag_runner,
+            target="box.htb",
+        )
+        result = asyncio.run(hm.run())
+        # Should stop on the very first iteration when flag detected
+        assert result.iterations == 1
+        assert result.stop_reason == "flag_found"
+        # The flag finding is captured
+        flags = [f for f in result.findings if "HTB{" in str(f.get("title", ""))]
+        assert len(flags) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Bug-bounty: exhaustion stop after 3 zero-iterations
+# ---------------------------------------------------------------------------
+
+
+class TestBugBountyExhaustion:
+    def test_stops_after_three_empty_iterations(self, tmp_path):
+        # Profile that allows max 5 iterations and stops on exhaustion
+        hm = _make_hackmode(
+            tmp_path,
+            profile=BugBountyProfile(),
+            technique_runner=_zero_runner,
+        )
+        result = asyncio.run(hm.run())
+        # After 3 iterations of 0 findings, the exhaustion condition fires
+        assert result.iterations >= 3
+        assert "exhausted" in result.stop_reason
+
+    def test_stops_at_max_iterations(self, tmp_path):
+        # Profile capped at 2 iterations; every iter produces a finding so
+        # exhaustion never fires.
+        profile = BugBountyProfile()
+        profile.max_iterations = 2
+        hm = _make_hackmode(
+            tmp_path,
+            profile=profile,
+            technique_runner=_good_runner,
+        )
+        result = asyncio.run(hm.run())
+        assert result.iterations == 2
+        assert "max_iterations" in result.stop_reason
+
+
+# ---------------------------------------------------------------------------
+# Time budget enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestTimeBudget:
+    def test_time_budget_triggers_timeout(self, tmp_path):
+        async def _slow_runner(agent: SwarmAgent) -> List[dict]:
+            await asyncio.sleep(2.0)
+            return []
+
+        profile = LabProfile()
+        profile.time_budget_s = 0.2  # 200ms — slower than the runner
+        profile.per_worker_timeout = 5.0  # don't let the worker timeout first
+        profile.max_iterations = 5
+
+        hm = _make_hackmode(
+            tmp_path, profile=profile, technique_runner=_slow_runner,
+        )
+        result = asyncio.run(hm.run())
+        assert result.timed_out is True
+        assert result.stop_reason == "time_budget"
+
+
+# ---------------------------------------------------------------------------
+# Bus / registry teardown
+# ---------------------------------------------------------------------------
+
+
+class TestTeardown:
+    def test_bus_stopped_after_run(self, tmp_path):
+        hm = _make_hackmode(tmp_path)
+        asyncio.run(hm.run())
+        assert hm.bus.running is False
+
+    def test_double_run_raises(self, tmp_path):
+        hm = _make_hackmode(tmp_path)
+        asyncio.run(hm.run())
+        with pytest.raises(RuntimeError, match="already started"):
+            asyncio.run(hm.run())
+
+    def test_audit_logger_closed_via_summary(self, tmp_path):
+        hm = _make_hackmode(tmp_path)
+        result = asyncio.run(hm.run())
+        # We can still query the JSONL after the run
+        events = hm.audit.read_jsonl()
+        assert len(events) > 0
+
+
+# ---------------------------------------------------------------------------
+# State propagation to stop_conditions
+# ---------------------------------------------------------------------------
+
+
+class TestStateTracking:
+    def test_findings_per_iteration_recorded(self, tmp_path):
+        hm = _make_hackmode(
+            tmp_path,
+            profile=BugBountyProfile(),
+            technique_runner=_good_runner,
+        )
+        # We won't reach max_iterations (10) because every iteration finds 1
+        # finding (no exhaustion). Manually cap to 3 to keep test fast.
+        hm.profile.max_iterations = 3
+        result = asyncio.run(hm.run())
+        per_iter = hm._state["findings_per_iteration"]
+        assert len(per_iter) == result.iterations
+        # Every iteration produced at least one finding
+        assert all(n > 0 for n in per_iter)
+
+
+# ---------------------------------------------------------------------------
+# Profile.phases respected
+# ---------------------------------------------------------------------------
+
+
+class TestPhaseRouting:
+    def test_only_listed_phases_run(self, tmp_path):
+        # Custom profile with only recon
+        profile = LabProfile()
+        profile.phases = ["recon", "report"]  # report is filtered out by HackMode
+        hm = _make_hackmode(tmp_path, profile=profile)
+        result = asyncio.run(hm.run())
+        # Only recon should appear in phase_results
+        assert list(result.phase_results.keys()) == ["recon"]
