@@ -10,6 +10,7 @@ import fnmatch
 import logging
 import os
 import re
+import shlex
 import subprocess
 from collections import defaultdict
 from pathlib import Path
@@ -23,6 +24,36 @@ MAX_OUTPUT_CHARS = 50000
 MAX_FILE_SIZE = 500 * 1024  # 500KB
 MAX_RESULTS = 200
 
+# SECURITY (fix #4): allowlist of binaries that bash_tool may invoke.
+# The previous regex blocklist was trivially bypassable (curl|bash, base64
+# decode, env-var splitting, etc.) and risked LLM-controlled RCE because
+# bash_tool is reachable from codefix_agent's ReACT loop. Allowlists are
+# the only safe filter for shell-style invocation.
+#
+# This list covers normal codefix duties: VCS, language toolchains, code
+# search, formatters/linters, test runners. If a fix needs a new binary,
+# add it here intentionally.
+ALLOWED_BINARIES = {
+    # VCS
+    "git",
+    # Language runtimes
+    "python", "python3", "node", "deno", "ruby", "perl",
+    # Package managers (read/install — no destructive flags here, but
+    # caller still controls argv)
+    "pip", "pip3", "npm", "yarn", "pnpm", "cargo", "go", "bundle",
+    # Test runners
+    "pytest", "jest", "mocha", "vitest", "tsc",
+    # Linters / formatters
+    "ruff", "black", "isort", "mypy", "flake8", "pylint",
+    "prettier", "eslint", "rustfmt", "gofmt", "clang-format",
+    # Build / make
+    "make", "cmake", "ninja", "bazel",
+    # Read-only file utilities
+    "ls", "cat", "head", "tail", "wc", "diff", "find",
+    "grep", "rg", "ag",
+}
+
+# Kept for backward-compat callers that still import this name.
 BLOCKED_COMMANDS = [
     r'rm\s+(-rf?\s+)?/',
     r'mkfs\.',
@@ -876,26 +907,62 @@ def _human_size(size: int) -> str:
 
 def bash_tool(command: str, cwd: str = None, timeout: int = 30) -> str:
     """
-    Execute a shell command safely (sandboxed to repo dir).
+    Execute a command safely.
+
+    SECURITY: argv-only execution (no shell). Binary must be in
+    ALLOWED_BINARIES. Pipes, redirections, command substitution, and
+    backgrounding are NOT supported — by design — because this tool is
+    reachable from LLM-driven ReACT loops where prompt injection in
+    untrusted source code could otherwise yield RCE.
 
     Args:
-        command: Shell command to execute.
+        command: Command to execute. Parsed with shlex.split into argv.
+                 Pipes/redirects/etc. are rejected — caller must split
+                 multi-stage workflows into separate calls.
         cwd: Working directory (defaults to current dir).
         timeout: Timeout in seconds (max 120).
 
     Returns:
-        Command output (stdout + stderr).
+        Command output (stdout + stderr) or an error message.
     """
     timeout = min(timeout, 120)
 
-    for pattern in BLOCKED_COMMANDS:
-        if re.search(pattern, command):
-            return f"Error: Command blocked for safety: {command}"
+    if not command or not command.strip():
+        return "Error: empty command"
+
+    # Parse argv. shell-style metas inside quotes are fine (shlex handles
+    # them as literal text). Outside quotes they cause a parse error or
+    # show up as separate tokens — either way they cannot reach a real
+    # shell because we do not pass shell=True.
+    try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        return f"Error: command parse failed: {e}"
+    if not argv:
+        return "Error: empty argv after parse"
+
+    # Reject pipes / redirections / backgrounding even as separate tokens
+    # — these would be operator typos at best and bypass attempts at worst.
+    forbidden_tokens = {"|", "&", "&&", "||", ";", ">", ">>", "<",
+                         "$(", "`", "$()"}
+    bad = [t for t in argv if t in forbidden_tokens]
+    if bad:
+        return (
+            f"Error: shell metacharacter token not allowed: {bad[0]!r}. "
+            "bash_tool runs argv-only. For multi-stage workflows, call "
+            "it once per stage."
+        )
+
+    base = os.path.basename(argv[0])
+    if base not in ALLOWED_BINARIES:
+        return (
+            f"Error: '{base}' not in allowlist. "
+            f"Allowed: {', '.join(sorted(ALLOWED_BINARIES))}"
+        )
 
     try:
         result = subprocess.run(
-            command,
-            shell=True,
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -910,6 +977,8 @@ def bash_tool(command: str, cwd: str = None, timeout: int = 30) -> str:
         return _truncate(output)
     except subprocess.TimeoutExpired:
         return f"Error: Command timed out after {timeout}s"
+    except FileNotFoundError:
+        return f"Error: binary not found: {argv[0]}"
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}"
 

@@ -1,4 +1,45 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(git mv:*)",
+      "Bash(grep -r \"from core\\\\.\\\\\\(smart_viper\\\\|agentic_viper\\\\|autonomous_agent\\\\|learned_capabilities\\\\\\) import\\\\|import \\\\\\(smart_viper\\\\|agentic_viper\\\\|autonomous_agent\\\\|learned_capabilities\\\\\\)\" --include=*.py .)",
+      "Bash(python -c \"from core.viper_knowledge import Attack, ViperKnowledge; print\\(''Import OK''\\); k = ViperKnowledge\\(\\); print\\(f''Attacks loaded: {len\\(k.attacks\\)}''\\)\")",
+      "Bash(python -c \"from viper_core import ViperKnowledge, Attack; print\\(''viper_core import OK''\\)\")",
+      "Bash(python -c \"from viper_core import ViperCore; print\\(''OK''\\)\")",
+      "Bash(python -m pytest tests/ -x --tb=short -q)",
+      "Bash(git add:*)",
+      "Bash(git diff:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(grep -l \"class.*fuzzer\\\\|class.*CORS\\\\|class.*OAuth\\\\|class.*WebSocket\\\\|class.*Race\\\\|class.*SSRF\" /c/Users/sharm/clawd/skills/hackagent/core/*.py)",
+      "Bash(grep -r \"class.*Agent\\\\|def.*attack\\\\|def.*fuzzer\" /c/Users/sharm/clawd/skills/hackagent/core/*.py)",
+      "Bash(wc -l /c/Users/sharm/clawd/skills/hackagent/core/*.py)",
+      "Bash(xargs grep:*)",
+      "Bash(python -c \"from ai.observability import LLMObserver, get_observer; o = get_observer\\(\\); print\\(f''observer OK, langfuse={o._langfuse is not None}''\\)\")",
+      "Bash(python -c \"from core.tool_registry import ToolRegistry, ToolType; r = ToolRegistry\\(\\); r.register\\(''test'', lambda: ''ok'', ToolType.UTILITY, ''test tool''\\); print\\(f''registry OK, {len\\(r\\)} tools''\\)\")",
+      "Bash(python -c \"from tools.web_search import WebSearchTool; t = WebSearchTool\\(\\); print\\(f''search OK, providers={t._providers}''\\)\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 5 https://ginandjuice.shop/)",
+      "Bash(python viper.py https://ginandjuice.shop --full --time 8 --skip-preflight --secrets --graph --deep-think --report-html)",
+      "Bash(python -c \":*)",
+      "Bash(grep -n \"advance_phase\\\\|advance_to_phase\" viper_core.py core/*.py)",
+      "Bash(python -c \"from core.viper_knowledge import ViperKnowledge; vk = ViperKnowledge\\(\\); print\\(f''{len\\(vk.attacks\\)} attacks''\\); new = [a for a in vk.attacks if a in \\(''clickjacking'',''cors_misconfiguration'',''csrf_token_leak'',''dom_xss'',''request_smuggling'',''security_headers_missing''\\)]; print\\(f''New attacks: {new}''\\)\")",
+      "Bash(python viper.py https://ginandjuice.shop --full --time 8 --skip-preflight --secrets --graph --report-html)",
+      "Bash(python -c \"from viper_core import ViperCore; print\\(''''OK''''\\)\")",
+      "Bash(python viper.py https://ginandjuice.shop --time 5 --skip-preflight --graph)",
+      "Bash(docker --version)",
+      "Bash(docker info:*)",
+      "Bash(docker.exe --version)",
+      "Bash(docker.exe ps:*)",
+      "Bash(\"/c/Program Files/Docker/Docker/resources/bin/docker.exe\" --version)",
+      "Bash(\"/c/ProgramData/DockerDesktop/version-bin/docker.exe\" --version)",
+      "Bash(where docker:*)",
+      "Bash(python viper.py http://localhost:9999 --full --time 5 --skip-preflight --graph)",
+      "Bash(python viper.py http://localhost:9999 --time 5 --skip-preflight)"
+    ]
+  },
   "personalSettings": {
     "hunterHandle": "viper-ashborn",
     "preferredPlatforms": [
@@ -85,10 +126,5 @@
     "location": "backups/",
     "includeFindings": true,
     "includeLogs": false
-  },
-  "permissions": {
-    "allow": [
-      "mcp__Claude_Preview__preview_start"
-    ]
   }
 }

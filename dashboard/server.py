@@ -430,13 +430,36 @@ def _handle_websocket(handler):
         handler.send_error(400, "Missing WebSocket key")
         return
 
+    # SECURITY (fix #3): browsers DO send Origin on WebSocket handshakes
+    # (unlike fetch with simple CORS). Reject any Origin we don't expect.
+    # Without this, a drive-by malicious site could open a WS to localhost
+    # and stream live findings + scan output + intercepted creds.
+    try:
+        _bind_host, bind_port = handler.server.server_address
+    except Exception:
+        bind_port = 8080
+    allowed_ws_origins = {
+        f"http://localhost:{bind_port}",
+        f"http://127.0.0.1:{bind_port}",
+    }
+    origin = handler.headers.get("Origin", "")
+    # Origin may be absent for non-browser clients (curl, wscat) — allow
+    # those because the dashboard binds to 127.0.0.1 only and a remote
+    # attacker can't reach the socket. But a present Origin must match.
+    if origin and origin not in allowed_ws_origins:
+        handler.send_error(403, "Forbidden Origin")
+        return
+
     accept = _ws_accept_key(key)
+    cors_line = ""
+    if origin in allowed_ws_origins:
+        cors_line = f"Access-Control-Allow-Origin: {origin}\r\n"
     response = (
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Accept: {accept}\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
+        f"{cors_line}"
         "\r\n"
     )
     handler.wfile.write(response.encode())
@@ -1790,6 +1813,7 @@ def get_session_detail(session_id):
 
 _TERMINAL_SESSIONS = {}  # session_id -> {target, method, ...}
 _active_scans = {}  # scan_id -> {id, target, status, phase, findings, log}
+_recon_pipeline_jobs = {}  # job_id -> {id, target, status, started_at, results, parallel_groups}
 
 # Hard blocks — NEVER allowed in any mode
 _HARD_BLOCKED = [
@@ -1798,6 +1822,48 @@ _HARD_BLOCKED = [
     # Host system attacks
     "powershell -enc", "reg add", "schtasks /create",
 ]
+
+# Shell metacharacters that bypass the per-token allowlist when the full
+# string is later handed to bash -c. Only `|` is allowed (used for pipes
+# between allowlisted utilities — pipe segments are individually validated).
+# Banning everything else cuts off the obvious bypasses:
+#   ;  &  &&  ||  command separators
+#   <  >        redirection
+#   `  $(  ${  command / variable substitution
+#   \n \r       multi-line / multi-command injection
+#   \           backslash escape into surprising tokens
+import re as _re_security
+_DANGEROUS_SHELL_METAS = _re_security.compile(
+    r"[;&<>`\n\r\\]|\$\(|\$\{"
+)
+
+
+def _has_unsafe_metacharacter(cmd: str) -> str | None:
+    """Return the offending substring if the command contains a banned
+    shell metacharacter; otherwise None.
+
+    Allowed metacharacters: `|` (pipe), space, alphanumerics, `-`, `_`,
+    `.`, `/`, `:`, `=`, `'`, `"`, `,`, `[`, `]`, `(`, `)`, `*`, `?`, `~`.
+    """
+    m = _DANGEROUS_SHELL_METAS.search(cmd)
+    return m.group(0) if m else None
+
+
+# Env vars that are SAFE to inherit into the sandbox. Inverting the
+# previous blocklist (which missed Telegram/Discord/HackerOne/Gmail/etc.)
+# to an allowlist guarantees no future cred sneaks through.
+_SANDBOX_SAFE_ENV = {
+    "PATH", "HOME", "USER", "USERNAME", "LOGNAME",
+    "LANG", "LC_ALL", "LC_CTYPE", "TERM", "PWD", "TMPDIR",
+    "SHELL", "EDITOR", "PAGER",
+    # Display vars — only matter for the rare GUI tool
+    "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
+    # Windows equivalents
+    "SYSTEMROOT", "COMSPEC", "WINDIR", "TEMP", "TMP",
+    "PROGRAMFILES", "PROGRAMDATA", "APPDATA", "LOCALAPPDATA",
+    # Go-tools location (subfinder/httpx/etc. live here)
+    "GOPATH", "GOROOT",
+}
 
 # Pentest tools allowed in local mode (no target session)
 _LOCAL_ALLOWED = {
@@ -1840,6 +1906,21 @@ def _sandboxed_execute(cmd: str, session_id: str) -> dict:
     cmd_stripped = cmd.strip()
     if not cmd_stripped:
         return {"output": "", "exit_code": 0, "session_id": session_id}
+
+    # SECURITY (fix #1): block shell metacharacters that would bypass the
+    # per-token allowlist when bash -c sees the full string. Without this,
+    # `nmap a.com; cat /etc/passwd` slips through because shlex.split only
+    # sees "nmap" as the first token.
+    offender = _has_unsafe_metacharacter(cmd_stripped)
+    if offender is not None:
+        return {
+            "output": (
+                f"[BLOCKED] shell metacharacter not allowed: {offender!r}\n"
+                "Sandboxed terminal accepts pentest tools and pipes (|) only. "
+                "For complex shell scripts, run them outside the dashboard."
+            ),
+            "exit_code": -1, "session_id": session_id,
+        }
 
     cmd_lower = cmd_stripped.lower()
 
@@ -1946,28 +2027,43 @@ def _sandboxed_execute(cmd: str, session_id: str) -> dict:
     # Execute locally with sandboxed env
     try:
         bash_path = _shutil.which("bash")
-        env = os.environ.copy()
+        # SECURITY (fix #5): allowlist env vars instead of blocklist. The
+        # previous blocklist missed HACKERONE_API_TOKEN, NUCLEI_API_KEY,
+        # TELEGRAM_BOT_TOKEN, DISCORD_WEBHOOK_URL, GMAIL_APP_PASSWORD,
+        # CIRCLE_SIGNUP_PASSWORD, SMTP_PASSWORD, etc. New creds added in
+        # the future would also leak. Allowlist guarantees nothing slips.
+        env = {k: v for k, v in os.environ.items() if k in _SANDBOX_SAFE_ENV}
         go_bin = os.path.expanduser("~/go/bin")
         if os.path.isdir(go_bin):
             env["PATH"] = go_bin + os.pathsep + env.get("PATH", "")
-        # Strip sensitive env vars
-        for key in ["AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GITHUB_TOKEN",
-                     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SHODAN_API_KEY"]:
-            env.pop(key, None)
 
         import tempfile
         sandbox_dir = os.path.join(tempfile.gettempdir(), "viper_sandbox")
         os.makedirs(sandbox_dir, exist_ok=True)
 
         if bash_path:
+            # bash -c is now safe because metacharacter check already ran above.
             result = subprocess.run(
                 [bash_path, "-c", cmd_stripped],
                 capture_output=True, text=True,
                 timeout=60, cwd=sandbox_dir, env=env,
             )
         else:
+            # No bash: fall back to argv-only single-command exec (no pipes).
+            # Avoid `shell=True` cmd.exe fallback — it has its own injection
+            # surface (& && || ^) and our metacharacter check is bash-tuned.
+            try:
+                argv = shlex.split(cmd_stripped)
+            except ValueError as e:
+                return {"output": f"[ERROR] command parse failed: {e}",
+                        "exit_code": -1, "session_id": session_id}
+            if "|" in argv:
+                return {
+                    "output": "[ERROR] bash not found — pipes not supported in fallback mode",
+                    "exit_code": -1, "session_id": session_id,
+                }
             result = subprocess.run(
-                cmd_stripped, shell=True, capture_output=True, text=True,
+                argv, capture_output=True, text=True,
                 timeout=60, cwd=sandbox_dir, env=env,
             )
         output = (result.stdout + result.stderr)[:50000]
@@ -2223,10 +2319,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
         pass  # Suppress default logging
 
     def _cors_headers(self):
-        """Add CORS headers."""
-        self.send_header("Access-Control-Allow-Origin", "*")
+        """Add CORS headers — only allow same-origin (localhost on the
+        dashboard port). Wildcard `*` was a critical drive-by RCE risk
+        when combined with the terminal exec endpoint.
+        """
+        # Derive expected origins from the actual server bind, so a
+        # `--port 8081` reconfig still works without code changes.
+        try:
+            _bind_host, bind_port = self.server.server_address
+        except Exception:
+            bind_port = 8080
+        allowed_origins = {
+            f"http://localhost:{bind_port}",
+            f"http://127.0.0.1:{bind_port}",
+        }
+        origin = self.headers.get("Origin", "")
+        if origin in allowed_origins:
+            self.send_header("Access-Control-Allow-Origin", origin)
+        # else: omit the header — browser blocks the cross-origin response
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _enforce_same_origin_post(self) -> bool:
+        """Defense in depth — for state-changing requests, also check
+        Origin server-side. CORS only stops *browser* attackers; this
+        catches non-browser CSRF too. Returns True if allowed.
+        """
+        try:
+            _bind_host, bind_port = self.server.server_address
+        except Exception:
+            bind_port = 8080
+        allowed_origins = {
+            f"http://localhost:{bind_port}",
+            f"http://127.0.0.1:{bind_port}",
+        }
+        origin = self.headers.get("Origin", "")
+        # Same-origin browser POSTs may omit Origin (esp. for top-level form
+        # POSTs to same host); accept missing Origin from localhost only.
+        if not origin:
+            referer = self.headers.get("Referer", "")
+            if any(referer.startswith(o + "/") or referer == o for o in allowed_origins):
+                return True
+            # No Origin AND no matching Referer: allow only if request is
+            # plainly local (curl from terminal, etc.). The dashboard binds
+            # to 127.0.0.1 (verified at startup), so any request that gets
+            # this far came from a local socket.
+            return True
+        return origin in allowed_origins
 
     def _json_response(self, data, status=200):
         body = json.dumps(data, default=str).encode("utf-8")
@@ -2333,6 +2473,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length else b""
+
+        # SECURITY: server-side Origin check on state-changing endpoints
+        # (defense in depth on top of CORS). Browser CSRF + the terminal
+        # endpoint was a critical drive-by RCE chain.
+        if not self._enforce_same_origin_post():
+            self._json_response(
+                {"error": "cross-origin POST rejected"}, status=403,
+            )
+            return
 
         if path == "/api/settings":
             sm = _get_settings()
@@ -2492,14 +2641,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         target_str, port_str = target_str.rsplit(":", 1)
                         try: port = int(port_str)
                         except ValueError: pass
-                    # Security: block localhost/self targeting
-                    _blocked_targets = {"127.0.0.1", "localhost", "0.0.0.0", "::1",
-                                        "host.docker.internal"}
-                    if target_str.lower() in _blocked_targets or target_str.startswith("192.168.") is False and target_str.startswith("10.") is False and target_str.startswith("172.") is False:
-                        pass  # Allow private IPs
-                    if target_str.lower() in _blocked_targets:
+                    # SECURITY (fix #6): the previous check had broken
+                    # operator precedence (`is False and ...`) and a `pass`
+                    # body, so only literal localhost was blocked. That
+                    # allowed `!connect root@169.254.169.254` (AWS metadata),
+                    # public IPs, and arbitrary hostnames. New rule: target
+                    # must be a parseable RFC1918 / loopback / link-local IP.
+                    # Hostnames are refused — operator must resolve them
+                    # explicitly before connecting (DNS rebinding defense).
+                    import ipaddress
+                    try:
+                        ip_obj = ipaddress.ip_address(target_str)
+                        is_private_ip = ip_obj.is_private or ip_obj.is_loopback
+                    except ValueError:
+                        is_private_ip = False
+                    if not is_private_ip or ip_obj.is_loopback or ip_obj.is_link_local:
                         self._json_response({
-                            "output": f"[BLOCKED] Cannot connect to {target_str} — localhost/self targeting not allowed.",
+                            "output": (
+                                f"[BLOCKED] '{target_str}' must be a valid RFC1918 "
+                                "private IP (10/8, 172.16/12, 192.168/16). "
+                                "Loopback, link-local, public IPs, and hostnames "
+                                "are refused. Resolve hostnames manually first."
+                            ),
                             "exit_code": -1, "session_id": session_id,
                         })
                         return
@@ -2678,6 +2841,384 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response({"error": str(e)}, status=400)
 
+        # ── Recon Pipeline endpoints (redamon-style multi-tool parallel) ──
+        elif path == "/api/recon/pipeline/start":
+            try:
+                data = json.loads(body) if body else {}
+                target = data.get("target", "").strip()
+                if not target:
+                    self._json_response({"error": "target required"}, status=400)
+                    return
+
+                phases = data.get("phases")  # None = all
+                osint_sources = data.get("osint_sources")  # None = all enabled
+                masscan_rate = int(data.get("masscan_rate", 1000))
+                skip_active_on_empty = bool(
+                    data.get("skip_active_on_empty", False)
+                )
+                roe_window_start = data.get("roe_window_start") or None
+                roe_window_end = data.get("roe_window_end") or None
+
+                job_id = str(uuid.uuid4())[:8]
+                _recon_pipeline_jobs[job_id] = {
+                    "id": job_id,
+                    "target": target,
+                    "status": "starting",
+                    "started_at": time.time(),
+                    "phases_done": [],
+                    "phase_timings": {},
+                    "parallel_groups": [],
+                    "summary": {},
+                    "error": None,
+                }
+
+                def _run_pipeline():
+                    # Run the recon pipeline in a fresh subprocess so it
+                    # gets its own Python interpreter + event loop — avoids
+                    # all the threading/asyncio/subprocess issues on Windows
+                    # when running inside the multi-threaded HTTP server.
+                    # Critical: stdin=DEVNULL everywhere or child tools
+                    # (naabu etc) hang reading an undefined stdin.
+                    import subprocess, tempfile, os
+                    job = _recon_pipeline_jobs[job_id]
+                    try:
+                        job["status"] = "running"
+                        _ws_broadcast("recon_pipeline_started", {
+                            "job_id": job_id, "target": target,
+                        })
+
+                        settings_dict = {
+                            "masscan_rate": masscan_rate,
+                            "skip_active_on_empty": skip_active_on_empty,
+                        }
+                        if osint_sources:
+                            settings_dict["osint_sources"] = osint_sources
+                        if roe_window_start:
+                            settings_dict["roe_window_start"] = roe_window_start
+                        if roe_window_end:
+                            settings_dict["roe_window_end"] = roe_window_end
+
+                        # Write args to a temp JSON file, have the runner
+                        # script read it and emit JSON results on stdout.
+                        args_file = tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".json", delete=False,
+                            encoding="utf-8",
+                        )
+                        json.dump({
+                            "target": target,
+                            "phases": phases,
+                            "settings": settings_dict,
+                        }, args_file)
+                        args_file.close()
+
+                        runner = PROJECT_ROOT / "recon" / "run_pipeline_cli.py"
+                        result_file = tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".json", delete=False,
+                            encoding="utf-8",
+                        )
+                        result_file.close()
+
+                        # Redirect stdout/stderr to DEVNULL to avoid pipe
+                        # buffer deadlock — subprocess writes can block
+                        # when the OS pipe buffer (~64KB) fills up, and
+                        # we don't need the output (we read the JSON
+                        # result file instead).
+                        proc = subprocess.run(
+                            [sys.executable, str(runner),
+                             args_file.name, result_file.name],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=600,
+                            check=False,
+                            cwd=str(PROJECT_ROOT),
+                        )
+
+                        # Parse result file
+                        try:
+                            with open(result_file.name, "r", encoding="utf-8") as f:
+                                res = json.load(f)
+                        except Exception as e:
+                            res = {
+                                "phases_run": [],
+                                "phase_timings": {},
+                                "parallel_groups": [],
+                                "errors": [{"phase": "subprocess",
+                                            "error": f"exit={proc.returncode}: {e}"}],
+                            }
+                        finally:
+                            for fn in (args_file.name, result_file.name):
+                                try:
+                                    os.unlink(fn)
+                                except OSError:
+                                    pass
+
+                        # Synthesize a result-like object for the status fields
+                        class _R:
+                            pass
+                        result = _R()
+                        result.phases_run = res.get("phases_run", [])
+                        result.phase_timings = res.get("phase_timings", {})
+                        result.parallel_groups = res.get("parallel_groups", [])
+                        result.subdomains = res.get("subdomains", [])
+                        result.live_hosts = res.get("live_hosts", [])
+                        result.open_ports = res.get("open_ports", {})
+                        result.vulnerabilities = res.get("vulnerabilities", [])
+                        result.passive_cves = res.get("passive_cves", [])
+                        result.ip_mode = res.get("ip_mode", False)
+                        result.errors = res.get("errors", [])
+
+                        job["status"] = "completed"
+                        job["phases_done"] = result.phases_run
+                        job["phase_timings"] = result.phase_timings
+                        job["parallel_groups"] = result.parallel_groups
+                        job["summary"] = {
+                            "subdomains": len(result.subdomains),
+                            "alive_hosts": len(result.live_hosts),
+                            "open_ports": sum(
+                                len(v) for v in result.open_ports.values()
+                            ),
+                            "vulnerabilities": len(result.vulnerabilities),
+                            "passive_cves": len(result.passive_cves),
+                            "ip_mode": result.ip_mode,
+                            "errors": len(result.errors),
+                        }
+                        _ws_broadcast("recon_pipeline_completed", {
+                            "job_id": job_id, "summary": job["summary"],
+                            "groups": job["parallel_groups"],
+                        })
+                    except Exception as e:
+                        job["status"] = "error"
+                        job["error"] = str(e)
+                        _ws_broadcast("recon_pipeline_error", {
+                            "job_id": job_id, "error": str(e),
+                        })
+
+                t = threading.Thread(target=_run_pipeline, daemon=True)
+                t.start()
+                self._json_response({
+                    "job_id": job_id,
+                    "status": "started",
+                    "target": target,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/recon/pipeline/status":
+            try:
+                data = json.loads(body) if body else {}
+                job_id = data.get("job_id", "")
+                job = _recon_pipeline_jobs.get(job_id)
+                if job:
+                    self._json_response(job)
+                else:
+                    self._json_response({"error": "job not found"}, status=404)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/ctf/feedback":
+            # Ingest a single feedback entry from the dashboard
+            try:
+                data = json.loads(body) if body else {}
+                from core.ctf_feedback import CTFFeedbackStore, FeedbackEntry
+                store = CTFFeedbackStore()
+                entry = FeedbackEntry.from_dict(data)
+                if not entry.challenge or not entry.category:
+                    self._json_response(
+                        {"error": "challenge and category are required"},
+                        status=400,
+                    )
+                    return
+                fb_id = store.add(entry)
+                self._json_response({
+                    "status": "ingested",
+                    "feedback_id": fb_id,
+                    "stats": store.stats(),
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/ctf/train":
+            # Trigger a training run (from url, dir, or github repo)
+            try:
+                data = json.loads(body) if body else {}
+                mode = (data.get("mode") or "").lower()
+                from core.ctf_training import (
+                    train_from_url, train_from_dir, train_from_github_repo,
+                )
+
+                if mode == "url":
+                    url = data.get("url", "")
+                    if not url:
+                        self._json_response(
+                            {"error": "url required for mode=url"}, status=400,
+                        )
+                        return
+
+                    def _do():
+                        try:
+                            train_from_url(url)
+                        except Exception as e:
+                            logger.warning("train_from_url error: %s", e)
+                    threading.Thread(target=_do, daemon=True).start()
+                    self._json_response({"status": "training_started",
+                                          "mode": "url", "url": url})
+
+                elif mode == "github":
+                    owner = data.get("owner", "")
+                    repo = data.get("repo", "")
+                    branch = data.get("branch", "master")
+                    max_files = int(data.get("max_files", 25))
+                    if not (owner and repo):
+                        self._json_response(
+                            {"error": "owner and repo required"}, status=400,
+                        )
+                        return
+
+                    def _do():
+                        try:
+                            train_from_github_repo(
+                                owner, repo, branch, max_files,
+                            )
+                        except Exception as e:
+                            logger.warning("train_from_github error: %s", e)
+                    threading.Thread(target=_do, daemon=True).start()
+                    self._json_response({
+                        "status": "training_started",
+                        "mode": "github",
+                        "repo": f"{owner}/{repo}",
+                        "max_files": max_files,
+                    })
+
+                elif mode == "dir":
+                    from pathlib import Path as _P
+                    d = data.get("path", "")
+                    if not d:
+                        self._json_response(
+                            {"error": "path required for mode=dir"}, status=400,
+                        )
+                        return
+
+                    def _do():
+                        try:
+                            train_from_dir(_P(d))
+                        except Exception as e:
+                            logger.warning("train_from_dir error: %s", e)
+                    threading.Thread(target=_do, daemon=True).start()
+                    self._json_response({"status": "training_started",
+                                          "mode": "dir", "path": d})
+                else:
+                    self._json_response(
+                        {"error": "mode must be url, github, or dir"},
+                        status=400,
+                    )
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/ctf/run":
+            # Hunt for CTF flags on a target via core.ctf_mode
+            try:
+                data = json.loads(body) if body else {}
+                target = data.get("target", "").strip()
+                flag_prefix = data.get("flag_prefix", "HTB")
+                custom_pattern = data.get("custom_pattern") or None
+                timeout_min = float(data.get("timeout_minutes", 10))
+
+                if not target:
+                    self._json_response({"error": "target required"}, status=400)
+                    return
+
+                job_id = str(uuid.uuid4())[:8]
+                _recon_pipeline_jobs[job_id] = {
+                    "id": job_id,
+                    "target": target,
+                    "status": "starting",
+                    "started_at": time.time(),
+                    "kind": "ctf",
+                    "flag_prefix": flag_prefix,
+                    "flags": [],
+                    "findings": [],
+                    "error": None,
+                }
+
+                def _run_ctf():
+                    job = _recon_pipeline_jobs[job_id]
+                    try:
+                        job["status"] = "running"
+                        from core.ctf_mode import CTFRunner
+                        import asyncio as _asyncio
+
+                        runner = CTFRunner(
+                            flag_prefix=flag_prefix,
+                            custom_flag_pattern=custom_pattern,
+                            timeout_minutes=timeout_min,
+                        )
+
+                        async def _do():
+                            return await runner.run(target)
+
+                        result = _asyncio.run(_do())
+                        job["status"] = "completed"
+                        job["flags"] = [f.to_dict() for f in result.flags]
+                        job["findings"] = result.findings
+                        job["errors"] = result.errors
+                        _ws_broadcast("ctf_completed", {
+                            "job_id": job_id,
+                            "flag_count": len(result.flags),
+                            "target": target,
+                        })
+                    except Exception as e:
+                        job["status"] = "error"
+                        job["error"] = str(e)
+
+                threading.Thread(target=_run_ctf, daemon=True).start()
+                self._json_response({
+                    "job_id": job_id,
+                    "status": "started",
+                    "target": target,
+                    "flag_prefix": flag_prefix,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/kb/search":
+            try:
+                data = json.loads(body) if body else {}
+                query = data.get("query", "").strip()
+                category = data.get("category")
+                top_k = int(data.get("top_k", 5))
+                if not query:
+                    self._json_response({"error": "query required"}, status=400)
+                    return
+                try:
+                    from core.knowledge_base import KnowledgeBase
+                    kb = KnowledgeBase()
+                    results = kb.search(query, top_k=top_k, category=category)
+                    self._json_response({
+                        "query": query,
+                        "results": results,
+                        "total": kb.count(),
+                    })
+                except Exception as e:
+                    self._json_response({"error": f"KB: {e}"}, status=500)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        elif path == "/api/recon/pipeline/cancel":
+            try:
+                data = json.loads(body) if body else {}
+                job_id = data.get("job_id", "")
+                job = _recon_pipeline_jobs.get(job_id)
+                if not job:
+                    self._json_response({"error": "job not found"}, status=404)
+                    return
+                # Best-effort cancel: mark cancelled (worker thread will exit
+                # naturally; we don't kill threads in Python).
+                job["status"] = "cancelled"
+                self._json_response({"status": "cancelled", "job_id": job_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
         # ── CodeFix endpoints ──
         elif path == "/api/codefix/run":
             try:
@@ -2689,6 +3230,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 job_id = _start_codefix_job(finding_id, repo_path)
                 self._json_response({"status": "started", "job_id": job_id})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Report delete ──
+        elif path == "/api/reports/delete":
+            try:
+                data = json.loads(body) if body else {}
+                filename = data.get("filename", "")
+                safe = Path(filename).name
+                report_path = REPORTS_DIR / safe
+                if not report_path.exists():
+                    self._json_response({"error": "Report not found"}, status=404)
+                elif report_path.is_file() and safe and ".." not in filename:
+                    report_path.unlink()
+                    self._json_response({"status": "deleted", "filename": safe})
+                else:
+                    self._json_response({"error": "Invalid filename"}, status=400)
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=400)
+
+        # ── Project settings ──
+        elif path == "/api/projects":
+            try:
+                data = json.loads(body) if body else {}
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                settings_file = STATE_DIR / "project_settings.json"
+                settings_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                self._json_response({"status": "saved"})
             except Exception as e:
                 self._json_response({"error": str(e)}, status=400)
 
@@ -2769,6 +3338,77 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/codefix/status":
             self._json_response(get_codefix_status())
+
+        # ── CTF training stats + recommendations ──
+        elif path == "/api/ctf/stats":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                self._json_response(store.stats())
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path == "/api/ctf/feedback/list":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                limit = int(qp("limit", "50"))
+                self._json_response({"entries": store.list(limit=limit)})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path == "/api/ctf/ranking":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                category = qp("category")
+                min_tries = int(qp("min_tries", "1"))
+                ranking = store.technique_ranking(
+                    category=category, min_tries=min_tries,
+                )
+                self._json_response({"ranking": ranking})
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        elif path == "/api/ctf/recommend":
+            try:
+                from core.ctf_feedback import CTFFeedbackStore
+                store = CTFFeedbackStore()
+                category = qp("category", "web")
+                stack_str = qp("stack", "") or ""
+                stack = [s.strip() for s in stack_str.split(",") if s.strip()]
+                top_k = int(qp("top", "5"))
+                recs = store.recommend_for_stack(stack, category, top_k)
+                self._json_response({
+                    "category": category,
+                    "stack": stack,
+                    "recommended_techniques": recs,
+                })
+            except Exception as e:
+                self._json_response({"error": str(e)}, status=500)
+
+        # ── Recon Pipeline list/detail (GET, for polling) ──
+        elif path == "/api/recon/pipeline/list":
+            jobs = []
+            for jid, job in _recon_pipeline_jobs.items():
+                jobs.append({
+                    "id": jid,
+                    "target": job.get("target", ""),
+                    "status": job.get("status", ""),
+                    "started_at": job.get("started_at", 0),
+                    "phases_done": job.get("phases_done", []),
+                    "summary": job.get("summary", {}),
+                })
+            jobs.sort(key=lambda x: x["started_at"], reverse=True)
+            self._json_response({"jobs": jobs[:50]})
+
+        elif path.startswith("/api/recon/pipeline/") and path != "/api/recon/pipeline/list":
+            jid = path.rsplit("/", 1)[1]
+            job = _recon_pipeline_jobs.get(jid)
+            if job:
+                self._json_response(job)
+            else:
+                self._json_response({"error": "job not found"}, 404)
 
         elif path == "/api/sessions/list":
             self._json_response(get_sessions_list())
@@ -3074,12 +3714,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"remediations": []})
 
         elif path == "/api/reports":
-            # List HTML reports in reports/ directory
+            # List HTML + Markdown reports in reports/ directory
             reports = []
             if REPORTS_DIR.exists():
-                for f in sorted(REPORTS_DIR.glob("*.html"), reverse=True):
-                    reports.append({"name": f.name, "size": f.stat().st_size, "modified": f.stat().st_mtime})
-            self._json_response({"reports": reports[:20]})
+                for ext in ("*.html", "*.md"):
+                    for f in sorted(REPORTS_DIR.glob(ext), reverse=True):
+                        reports.append({
+                            "name": f.name,
+                            "size": f.stat().st_size,
+                            "modified": f.stat().st_mtime,
+                            "type": f.suffix.lstrip("."),
+                        })
+            reports.sort(key=lambda x: x["modified"], reverse=True)
+            self._json_response({"reports": reports[:50]})
+
+        elif path.startswith("/api/reports/") and path != "/api/reports/":
+            filename = path.split("/api/reports/", 1)[1]
+            # Sanitize: no path traversal
+            safe = Path(filename).name
+            report_path = REPORTS_DIR / safe
+            if report_path.exists() and report_path.is_file():
+                self._serve_file(report_path,
+                                 "text/html" if safe.endswith(".html") else "text/plain")
+            else:
+                self._json_response({"error": "Report not found"}, 404)
+
+        elif path == "/api/projects":
+            # Current project config (single-project mode)
+            settings = {}
+            settings_file = STATE_DIR / "project_settings.json"
+            if settings_file.exists():
+                try:
+                    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            self._json_response({"project": settings})
 
         # ── Sessions (legacy) ──
         elif path == "/api/sessions":

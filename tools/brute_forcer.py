@@ -297,15 +297,19 @@ class BruteForcer:
             ) as conn:
                 return True, "SSH login successful"
         except ImportError:
-            # Fallback to subprocess
+            # Fallback to subprocess.
+            # SECURITY (fix #8): use sshpass -e (env-var) instead of -p
+            # (argv) — argv passwords leak to `ps -ef`.
+            import os as _os
             proc = await asyncio.create_subprocess_exec(
-                "sshpass", "-p", password,
+                "sshpass", "-e",
                 "ssh", "-o", "StrictHostKeyChecking=no",
                 "-o", f"ConnectTimeout={int(self.timeout)}",
                 "-p", str(port),
                 f"{username}@{host}", "echo", "ok",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={**_os.environ, "SSHPASS": password},
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode == 0:

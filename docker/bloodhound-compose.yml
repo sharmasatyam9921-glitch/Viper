@@ -1,0 +1,73 @@
+##
+## BloodHound Community Edition + Neo4j stack for VIPER
+##
+## Usage:
+##   docker compose -f docker/bloodhound-compose.yml up -d
+##   # First run takes ~1-2 min for Neo4j init + BH CE migrations
+##   # UI: http://localhost:8080  (default creds shown on first stdout boot)
+##   # Neo4j Bolt: bolt://localhost:7687  (creds: neo4j / BloodHound)
+##
+## VIPER's tools/bloodhound_runner.py can push parsed graphs into the
+## Neo4j here via push_to_neo4j(graph, Neo4jConfig()).
+##
+## Tear down + wipe data:
+##   docker compose -f docker/bloodhound-compose.yml down -v
+##
+
+services:
+  app-db:
+    image: docker.io/library/postgres:16
+    container_name: viper-bh-postgres
+    environment:
+      - POSTGRES_USER=bloodhound
+      - POSTGRES_PASSWORD=bloodhoundcommunityedition
+      - POSTGRES_DB=bloodhound
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bloodhound -d bloodhound -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  graph-db:
+    image: docker.io/library/neo4j:5.20-community
+    container_name: viper-bh-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/BloodHound
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2G
+    ports:
+      - "127.0.0.1:7687:7687"   # Bolt
+      - "127.0.0.1:7474:7474"   # HTTP browser
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  bloodhound:
+    image: docker.io/specterops/bloodhound:latest
+    container_name: viper-bh-app
+    depends_on:
+      app-db:
+        condition: service_healthy
+      graph-db:
+        condition: service_healthy
+    environment:
+      - bhe_database_connection=user=bloodhound password=bloodhoundcommunityedition dbname=bloodhound host=app-db
+      - bhe_neo4j_connection=neo4j://neo4j:BloodHound@graph-db:7687/
+      - bhe_default_admin_principal_name=admin
+      - bhe_default_admin_email_address=admin@viper.local
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  neo4j-data:
