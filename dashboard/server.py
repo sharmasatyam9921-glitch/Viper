@@ -90,6 +90,187 @@ except ImportError:
 _graph_engine = None
 _settings_manager = None
 
+# ── HackMode (swarm) audit-log helpers — Phase 4 ──────────────────────
+# These read directly from the audit_log SQLite table that
+# `core.audit_logger.AuditLogger` writes to. They're stateless — each call
+# opens, queries, closes. Safe for concurrent dashboard polling.
+
+def _hack_db_connect(db_path: str):
+    """Return a read-only connection or None if the DB doesn't exist /
+    is missing the audit_log table."""
+    import os
+    import sqlite3
+    if not os.path.exists(db_path):
+        return None
+    try:
+        con = sqlite3.connect(db_path, timeout=2.0)
+        con.row_factory = sqlite3.Row
+        # Confirm audit_log table exists — fail-soft if it doesn't
+        cur = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'"
+        )
+        if cur.fetchone() is None:
+            con.close()
+            return None
+        return con
+    except Exception:
+        return None
+
+
+def _hack_list_hunts(db_path: str, limit: int) -> dict:
+    """List recent hunts. Returns {hunts: [{hunt_id, started_at,
+    last_event_at, event_count, finding_count, target}]}."""
+    con = _hack_db_connect(db_path)
+    if con is None:
+        return {"hunts": []}
+    try:
+        rows = con.execute(
+            """
+            SELECT
+                hunt_id,
+                MIN(ts) AS started_at,
+                MAX(ts) AS last_event_at,
+                COUNT(*) AS event_count,
+                SUM(CASE WHEN action = 'finding.published' THEN 1 ELSE 0 END)
+                    AS finding_count,
+                (
+                    SELECT target FROM audit_log a2
+                    WHERE a2.hunt_id = audit_log.hunt_id
+                      AND a2.target IS NOT NULL AND a2.target != ''
+                    ORDER BY ts ASC LIMIT 1
+                ) AS target
+            FROM audit_log
+            GROUP BY hunt_id
+            ORDER BY MAX(ts) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return {"hunts": [dict(r) for r in rows]}
+    finally:
+        con.close()
+
+
+def _hack_hunt_snapshot(db_path: str, hunt_id: str) -> dict:
+    """Aggregate snapshot of one hunt: per-phase stats + workers +
+    findings rollup. Used by the /hack dashboard for initial render."""
+    con = _hack_db_connect(db_path)
+    if con is None:
+        return {"hunt_id": hunt_id, "found": False}
+    try:
+        import json
+        # Phase progress
+        phase_rows = con.execute(
+            """
+            SELECT phase,
+                   MIN(ts) AS started_at,
+                   MAX(CASE WHEN action='phase.completed' THEN ts END) AS completed_at,
+                   SUM(CASE WHEN action='worker.dispatched' THEN 1 ELSE 0 END)
+                       AS workers_dispatched,
+                   SUM(CASE WHEN action='worker.completed' THEN 1 ELSE 0 END)
+                       AS workers_completed,
+                   SUM(CASE WHEN action='worker.failed' THEN 1 ELSE 0 END)
+                       AS workers_failed,
+                   SUM(CASE WHEN action='finding.published' THEN 1 ELSE 0 END)
+                       AS findings_count
+            FROM audit_log
+            WHERE hunt_id = ? AND phase IS NOT NULL AND phase != ''
+            GROUP BY phase
+            ORDER BY MIN(ts)
+            """,
+            (hunt_id,),
+        ).fetchall()
+        # Workers — keep last status per worker (audit may have multiple
+        # entries per actor; we want the latest)
+        worker_rows = con.execute(
+            """
+            SELECT actor AS worker_id,
+                   phase,
+                   MIN(ts) AS started_at,
+                   MAX(ts) AS last_seen,
+                   MAX(action) AS last_action,
+                   MAX(duration_ms) AS duration_ms,
+                   MAX(outcome) AS outcome,
+                   SUM(findings_count) AS findings_count
+            FROM audit_log
+            WHERE hunt_id = ?
+              AND actor IS NOT NULL AND actor != ''
+              AND action IN ('worker.dispatched', 'worker.completed', 'worker.failed')
+            GROUP BY actor
+            ORDER BY MIN(ts)
+            """,
+            (hunt_id,),
+        ).fetchall()
+        # Findings (deduped on event_id)
+        finding_rows = con.execute(
+            """
+            SELECT ts, phase, severity, payload_json, actor
+            FROM audit_log
+            WHERE hunt_id = ? AND action = 'finding.published'
+            ORDER BY ts ASC
+            LIMIT 1000
+            """,
+            (hunt_id,),
+        ).fetchall()
+        findings = []
+        for r in finding_rows:
+            d = dict(r)
+            if d.get("payload_json"):
+                try:
+                    d["payload"] = json.loads(d.pop("payload_json"))
+                except Exception:
+                    d.pop("payload_json", None)
+                    d["payload"] = {}
+            else:
+                d.pop("payload_json", None)
+            findings.append(d)
+        return {
+            "hunt_id": hunt_id,
+            "found": True,
+            "phases": [dict(r) for r in phase_rows],
+            "workers": [dict(r) for r in worker_rows],
+            "findings": findings,
+        }
+    finally:
+        con.close()
+
+
+def _hack_audit_query(db_path: str, hunt_id: str, *, since: float,
+                       action: str, limit: int) -> dict:
+    """Incremental audit events (paged via `since`)."""
+    con = _hack_db_connect(db_path)
+    if con is None:
+        return {"hunt_id": hunt_id, "events": []}
+    try:
+        import json
+        sql = (
+            "SELECT * FROM audit_log "
+            "WHERE hunt_id = ? AND ts >= ?"
+        )
+        args = [hunt_id, since]
+        if action:
+            sql += " AND action = ?"
+            args.append(action)
+        sql += " ORDER BY ts ASC LIMIT ?"
+        args.append(limit)
+        rows = con.execute(sql, args).fetchall()
+        events = []
+        for r in rows:
+            d = dict(r)
+            if d.get("payload_json"):
+                try:
+                    d["payload"] = json.loads(d.pop("payload_json"))
+                except Exception:
+                    d.pop("payload_json", None)
+                    d["payload"] = {}
+            else:
+                d.pop("payload_json", None)
+            events.append(d)
+        return {"hunt_id": hunt_id, "events": events, "count": len(events)}
+    finally:
+        con.close()
+
+
 def _get_graph_engine():
     global _graph_engine
     if _graph_engine is None and V4_AVAILABLE:
@@ -3557,6 +3738,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"query": q, "results": results})
             else:
                 self._json_response({"query": q, "results": []})
+
+        # ── HackMode (swarm) endpoints — Phase 4 ─────────────────────
+        # All three endpoints read from the audit_log SQLite table the
+        # AuditLogger writes to. Default DB path is `data/viper.db`.
+        elif path == "/api/hack/hunts":
+            # List all recorded hunts. Optional ?limit=N (default 50).
+            limit = max(1, min(int(qp("limit", "50") or "50"), 500))
+            db_path = qp("db_path", "data/viper.db")
+            self._json_response(_hack_list_hunts(db_path, limit))
+
+        elif path == "/api/hack/hunt":
+            # Snapshot of ONE hunt: phases, worker counts, finding rollup.
+            # ?hunt_id=<slug>
+            hunt_id = qp("hunt_id", "")
+            if not hunt_id:
+                self._json_response({"error": "hunt_id required"}, status=400)
+                return
+            db_path = qp("db_path", "data/viper.db")
+            self._json_response(_hack_hunt_snapshot(db_path, hunt_id))
+
+        elif path == "/api/hack/audit":
+            # Incremental events ?hunt_id=<slug>&since=<unix-ts>&action=<filter>&limit=<n>
+            hunt_id = qp("hunt_id", "")
+            if not hunt_id:
+                self._json_response({"error": "hunt_id required"}, status=400)
+                return
+            since = float(qp("since", "0") or "0")
+            action = qp("action", "")
+            limit = max(1, min(int(qp("limit", "500") or "500"), 5000))
+            db_path = qp("db_path", "data/viper.db")
+            self._json_response(_hack_audit_query(
+                db_path, hunt_id, since=since, action=action, limit=limit,
+            ))
 
         elif path == "/api/agents/status":
             # v5: Multi-agent subsystem status
