@@ -95,6 +95,101 @@ _settings_manager = None
 # `core.audit_logger.AuditLogger` writes to. They're stateless — each call
 # opens, queries, closes. Safe for concurrent dashboard polling.
 
+def _hack_start_subprocess(data: dict) -> dict:
+    """Spawn `python viper.py hack <target> [flags]` as a background process.
+
+    The hunt runs detached — its audit log + summary land where the
+    existing /api/hack/* endpoints read from, so the UI just keeps
+    polling and the new hunt appears.
+
+    Body shape:
+        target:   str (required unless resume given)
+        resume:   str | None  hunt_id to resume
+        profile:  "ctf" | "bugbounty" | "lab" | None (auto-detect)
+        go:       bool (enable destructive workers)
+        time:     int | None (minutes — overrides profile)
+        workers:  int | None
+        scope:    str | None (path to scope JSON)
+
+    Returns:
+        {ok: True, pid, command_preview} on launch
+        {ok: False, error: "..."} on validation failure
+    """
+    import os
+    import shlex
+    import subprocess
+    import sys as _sys
+
+    target = (data.get("target") or "").strip()
+    resume = (data.get("resume") or "").strip()
+    if not target and not resume:
+        return {"ok": False, "error": "target (or resume) required"}
+
+    # Whitelist target shape — fail-closed against shell injection
+    # paranoia. argv mode would already neutralize it, but explicit
+    # validation makes intent obvious.
+    import re as _re
+    if target:
+        if not _re.fullmatch(r"[a-zA-Z0-9._:\-/?#=%@+]{1,500}", target):
+            return {"ok": False,
+                    "error": "target contains disallowed characters"}
+    if resume:
+        if not _re.fullmatch(r"[a-zA-Z0-9._\-]{1,200}", resume):
+            return {"ok": False, "error": "resume hunt_id malformed"}
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    viper_py = os.path.join(repo_root, "viper.py")
+    if not os.path.exists(viper_py):
+        return {"ok": False, "error": f"viper.py not found at {viper_py}"}
+
+    argv: list[str] = [_sys.executable, "-u", viper_py, "hack"]
+    if resume:
+        argv += ["--resume", resume]
+    else:
+        argv.append(target)
+    profile = (data.get("profile") or "").strip()
+    if profile in ("ctf", "bugbounty", "lab"):
+        argv += ["--profile", profile]
+    if bool(data.get("go")):
+        argv.append("--go")
+    if data.get("time") is not None:
+        try:
+            argv += ["--time", str(int(data["time"]))]
+        except (TypeError, ValueError):
+            pass
+    if data.get("workers") is not None:
+        try:
+            argv += ["--workers", str(int(data["workers"]))]
+        except (TypeError, ValueError):
+            pass
+    scope = (data.get("scope") or "").strip()
+    if scope and os.path.exists(scope):
+        argv += ["--scope", scope]
+    # Always quiet — dashboard is the UI; terminal log is irrelevant
+    argv += ["--quiet", "--no-color"]
+
+    try:
+        # Detach: capture nothing (DEVNULL all the pipes), no shell,
+        # don't wait. The hunt writes its own audit log + summary.
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=repo_root,
+            close_fds=True,
+        )
+    except OSError as e:
+        return {"ok": False, "error": f"spawn failed: {e!r}"}
+
+    # Don't wait — return immediately so the UI can start polling
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "command_preview": " ".join(shlex.quote(a) for a in argv[2:]),
+    }
+
+
 def _hack_db_connect(db_path: str):
     """Return a read-only connection or None if the DB doesn't exist /
     is missing the audit_log table."""
@@ -2662,6 +2757,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response(
                 {"error": "cross-origin POST rejected"}, status=403,
             )
+            return
+
+        # ── POST /api/hack/start ─ launch a hunt from the UI ─────────
+        if path == "/api/hack/start":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._json_response({"error": "invalid JSON"}, status=400)
+                return
+            result = _hack_start_subprocess(data)
+            status = 200 if result.get("ok") else 400
+            self._json_response(result, status=status)
             return
 
         if path == "/api/settings":

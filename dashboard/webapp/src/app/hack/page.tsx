@@ -21,6 +21,7 @@
 
 import { useState, useMemo } from "react";
 import { useHunts, useHuntSnapshot } from "@/hooks/useSwarm";
+import { apiPost } from "@/lib/api";
 import {
   HACK_PHASES,
   SEVERITY_COLORS,
@@ -256,6 +257,164 @@ function HuntsList({
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// NewHuntForm
+// ────────────────────────────────────────────────────────────────────────
+
+interface StartResp {
+  ok: boolean;
+  pid?: number;
+  command_preview?: string;
+  error?: string;
+}
+
+function NewHuntForm({ onStarted }: { onStarted: () => void }) {
+  const [target, setTarget] = useState("");
+  const [profile, setProfile] = useState<"" | "ctf" | "bugbounty" | "lab">("");
+  const [go, setGo] = useState(false);
+  const [timeMin, setTimeMin] = useState<string>("");
+  const [workers, setWorkers] = useState<string>("");
+  const [submitting, setSubmitting] = useState(false);
+  const [lastResult, setLastResult] = useState<StartResp | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!target.trim()) {
+      setLastResult({ ok: false, error: "target required" });
+      return;
+    }
+    setSubmitting(true);
+    setLastResult(null);
+    const payload: Record<string, unknown> = { target: target.trim(), go };
+    if (profile) payload.profile = profile;
+    if (timeMin) payload.time = Number(timeMin);
+    if (workers) payload.workers = Number(workers);
+
+    const r = await apiPost<StartResp>("/api/hack/start", payload);
+    setSubmitting(false);
+    setLastResult(r ?? { ok: false, error: "network error" });
+    if (r?.ok) {
+      // Clear the target so a fresh hunt doesn't accidentally repeat
+      setTarget("");
+      onStarted();
+    }
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 mb-4 space-y-3"
+    >
+      <header className="flex items-center justify-between">
+        <h2 className="font-semibold">New hunt</h2>
+        <span className="text-xs text-zinc-500">
+          POSTs to /api/hack/start
+        </span>
+      </header>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex-1 min-w-[260px]">
+          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
+            Target
+          </span>
+          <input
+            type="text"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder="http://127.0.0.1:9999  or  example.com  or  10.10.10.5"
+            className="w-full rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-blue-600"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+        <label>
+          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
+            Profile
+          </span>
+          <select
+            value={profile}
+            onChange={(e) =>
+              setProfile(e.target.value as "" | "ctf" | "bugbounty" | "lab")
+            }
+            className="rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-blue-600"
+          >
+            <option value="">auto</option>
+            <option value="ctf">ctf</option>
+            <option value="bugbounty">bugbounty</option>
+            <option value="lab">lab</option>
+          </select>
+        </label>
+        <label>
+          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
+            Time (min)
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={120}
+            value={timeMin}
+            onChange={(e) => setTimeMin(e.target.value)}
+            placeholder="default"
+            className="w-24 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-blue-600"
+          />
+        </label>
+        <label>
+          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
+            Workers
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={64}
+            value={workers}
+            onChange={(e) => setWorkers(e.target.value)}
+            placeholder="12"
+            className="w-20 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-blue-600"
+          />
+        </label>
+        <label className="flex items-center gap-2 pb-2">
+          <input
+            type="checkbox"
+            checked={go}
+            onChange={(e) => setGo(e.target.checked)}
+            className="h-4 w-4 rounded bg-zinc-800 border-zinc-700 text-blue-600 focus:ring-blue-600 focus:ring-offset-zinc-900"
+          />
+          <span className="text-sm text-zinc-300" title="Enable exploit + post phases (destructive workers)">
+            --go
+          </span>
+        </label>
+        <button
+          type="submit"
+          disabled={submitting || !target.trim()}
+          className="ml-auto rounded-md bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:cursor-not-allowed px-5 py-2 text-sm font-semibold text-zinc-50 transition-colors"
+        >
+          {submitting ? "Launching…" : "Hack"}
+        </button>
+      </div>
+      {lastResult && (
+        <div
+          className={[
+            "text-xs px-3 py-2 rounded-md border",
+            lastResult.ok
+              ? "border-emerald-700/60 bg-emerald-900/30 text-emerald-200"
+              : "border-red-700/60 bg-red-900/30 text-red-200",
+          ].join(" ")}
+        >
+          {lastResult.ok ? (
+            <>
+              Launched (pid {lastResult.pid}).{" "}
+              <code className="font-mono opacity-80">
+                viper.py {lastResult.command_preview}
+              </code>
+            </>
+          ) : (
+            <>Error: {lastResult.error}</>
+          )}
+        </div>
+      )}
+    </form>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Page
 // ────────────────────────────────────────────────────────────────────────
 
@@ -287,6 +446,8 @@ export default function HackPage() {
           {huntsQuery.isFetching ? "Refreshing…" : `${hunts.length} hunts`}
         </div>
       </header>
+
+      <NewHuntForm onStarted={() => huntsQuery.refetch()} />
 
       <PhaseRibbon phases={snapshot?.phases ?? []} />
 
