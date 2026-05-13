@@ -410,6 +410,15 @@ class SwarmCoordinator:
             default_timeout_s=self.per_worker_timeout,
         )
 
+    def _available_techniques(self) -> list[str]:
+        """Default: every registered worker for this coordinator's PHASE.
+        Subclasses can override."""
+        try:
+            from .swarm_workers import list_workers
+            return list_workers(self.PHASE)
+        except Exception:
+            return []
+
 
 # ----- Concrete recon coordinator ------------------------------------------
 
@@ -459,9 +468,148 @@ class ReconSwarmCoordinator(SwarmCoordinator):
             ))
         return manifest
 
-    def _available_techniques(self) -> list[str]:
-        try:
-            from .swarm_workers import list_workers
-            return list_workers("recon")
-        except Exception:
+
+# ----- Concrete vuln coordinator -------------------------------------------
+
+
+class VulnSwarmCoordinator(SwarmCoordinator):
+    """Vuln-discovery phase: fan out N vuln workers across each discovered
+    asset.
+
+    Recon publishes asset-shaped findings ({type: subdomain/open_port/...,
+    asset: <hostname>, url: <url>}) to the "vuln" topic incrementally.
+    The orchestrator (HackMode) does NOT have to wait for recon to finish
+    — it can call this coordinator with the assets discovered so far, or
+    feed each finding as it arrives.
+
+    Manifest expansion: workers x assets. With 9 vuln workers and 25
+    assets, that's 225 worker slots (bounded by `max_concurrent`).
+    """
+
+    PHASE = "vuln"
+    OUTPUT_TOPIC = "exploit"
+
+    # Asset keys we consider "vuln-actionable". Open-port findings get
+    # converted to URLs where the port suggests HTTP.
+    _HTTP_PORTS = {80, 81, 8000, 8001, 8008, 8080, 8081, 8088, 9000, 9001,
+                   9090, 9100, 3000, 5000, 5001, 8443, 443, 9443, 8888,
+                   9999, 10000}
+
+    def __init__(self, *, default_techniques: Optional[list[str]] = None, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.default_techniques = default_techniques
+
+    def build_manifest(self, target: str, context: dict) -> list[WorkerSpec]:
+        from .swarm_workers import get_worker_runner  # lazy
+
+        techniques = (
+            context.get("techniques")
+            or self.default_techniques
+            or self._available_techniques()
+        )
+        assets = self._collect_assets(target, context)
+        if not assets:
             return []
+
+        manifest: list[WorkerSpec] = []
+        for asset_url in assets:
+            for tech in techniques:
+                try:
+                    runner = get_worker_runner("vuln", tech)
+                except KeyError:
+                    logger.warning("unknown vuln technique: %s — skipping", tech)
+                    continue
+                manifest.append(WorkerSpec(
+                    technique=f"{tech}@{asset_url}",
+                    runner=self._make_asset_runner(runner, asset_url),
+                    timeout_s=context.get(
+                        "per_worker_timeout", self.per_worker_timeout
+                    ),
+                    priority=5,
+                    payload={
+                        "scope_reasoner": context.get("scope_reasoner"),
+                        "rate_limiter": context.get("rate_limiter"),
+                        "asset_url": asset_url,
+                    },
+                ))
+        return manifest
+
+    def _make_asset_runner(self, base_runner: AgentRunner, asset_url: str) -> AgentRunner:
+        """Wrap a per-target vuln runner so it operates on the asset_url
+        instead of the coordinator's primary target."""
+
+        async def runner(agent: SwarmAgent) -> list[dict]:
+            # Override the agent's target for this run so workers probe
+            # the discovered asset, not the parent target.
+            original = agent.target
+            agent.target = asset_url
+            try:
+                return await base_runner(agent)
+            finally:
+                agent.target = original
+
+        return runner
+
+    def _collect_assets(self, target: str, context: dict) -> list[str]:
+        """Build the list of asset URLs to probe.
+
+        Sources (in priority order):
+          1. context["assets"] — explicit list (used by tests + HackMode
+             when re-running over discovered assets).
+          2. context["findings"] — recon findings to enrich into URLs.
+          3. fallback to [target] so this coordinator works standalone.
+        """
+        explicit = context.get("assets")
+        if explicit:
+            return [self._coerce_url(a, target) for a in explicit]
+
+        findings = context.get("findings") or []
+        urls: set[str] = set()
+        for f in findings:
+            asset_url = self._asset_to_url(f)
+            if asset_url:
+                urls.add(asset_url)
+        if urls:
+            return sorted(urls)
+
+        # Last fallback: probe the primary target itself
+        return [self._coerce_url(target, target)]
+
+    @staticmethod
+    def _coerce_url(asset: str, default: str) -> str:
+        """If `asset` already looks like a URL, return as-is. If it's a
+        bare host, default to https://<host>."""
+        s = (asset or "").strip()
+        if not s:
+            return default
+        if "://" in s:
+            return s
+        # Bare host — prefer https
+        return f"https://{s}"
+
+    def _asset_to_url(self, finding: dict) -> Optional[str]:
+        """Best-effort: turn a recon finding into a probable URL."""
+        # Explicit URL wins
+        url = finding.get("url")
+        if url:
+            return url
+        # subdomain / dns
+        t = (finding.get("type") or "").lower()
+        host = finding.get("asset") or finding.get("title")
+        if not host:
+            return None
+        if t in ("subdomain", "dns_a", "dns_aaaa", "dns_cname"):
+            return f"https://{host}"
+        if t == "open_port":
+            port = finding.get("port") or 0
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                return None
+            if port in self._HTTP_PORTS:
+                scheme = "https" if port in (443, 8443, 9443) else "http"
+                return f"{scheme}://{host}:{port}"
+            # Non-HTTP port — skip for vuln workers (could still go to
+            # nuclei but most vuln workers are HTTP-only)
+            return None
+        return None

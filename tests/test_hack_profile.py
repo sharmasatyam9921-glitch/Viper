@@ -111,8 +111,10 @@ class TestStopConditions:
         ) is False
 
     def test_one_pass_after_one_iter(self):
-        assert _stop_after_one({"iteration": 0}) is False
-        assert _stop_after_one({"iteration": 1}) is True
+        # Fires AFTER an iteration completes (findings_per_iteration appended),
+        # not just because the iteration counter incremented at the top of the loop.
+        assert _stop_after_one({"iteration": 1, "findings_per_iteration": []}) is False
+        assert _stop_after_one({"iteration": 1, "findings_per_iteration": [3]}) is True
 
 
 # ---------------------------------------------------------------------------

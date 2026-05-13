@@ -32,6 +32,7 @@ from __future__ import annotations
 from . import (  # noqa: F401
     crtsh,
     dns,
+    endpoints,
     github_secrets,
     port_scan,
     shodan,
@@ -41,6 +42,6 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "crtsh", "dns", "github_secrets", "port_scan",
+    "crtsh", "dns", "endpoints", "github_secrets", "port_scan",
     "shodan", "subdomain", "wappalyzer", "wayback",
 ]

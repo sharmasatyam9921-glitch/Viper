@@ -467,3 +467,171 @@ class TestReconSwarmCoordinator:
 
         result = asyncio.run(go())
         assert result.workers_dispatched == 0
+
+
+# ---------------------------------------------------------------------------
+# VulnSwarmCoordinator
+# ---------------------------------------------------------------------------
+
+
+class TestVulnSwarmCoordinator:
+    def test_fans_out_workers_times_assets(self, tmp_path):
+        """N techniques × M assets should dispatch N×M workers."""
+        # Register 2 test vuln techniques
+        async def fake_runner(agent):
+            return [{"type": "vuln_test", "vuln_type": f"vuln:{agent.target}",
+                     "title": f"hit on {agent.target}", "severity": "info"}]
+
+        register_worker("vuln", "_test_v1", fake_runner)
+        register_worker("vuln", "_test_v2", fake_runner)
+        try:
+            from core.swarm_coordinator import VulnSwarmCoordinator
+
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = VulnSwarmCoordinator(
+                        bus=bus,
+                        default_techniques=["_test_v1", "_test_v2"],
+                    )
+                    return await coord.handle_message({
+                        "target": "https://primary.example",
+                        "assets": [
+                            "https://api.example.com",
+                            "https://www.example.com",
+                            "https://x.example.com",
+                        ],
+                    })
+                finally:
+                    await bus.stop()
+
+            result = asyncio.run(go())
+            # 2 techniques × 3 assets = 6 workers
+            assert result.workers_dispatched == 6
+            assert result.workers_completed == 6
+            assert result.findings_count == 3  # 3 unique assets, dedup
+        finally:
+            from core.swarm_workers import _REGISTRY
+            _REGISTRY["vuln"].pop("_test_v1", None)
+            _REGISTRY["vuln"].pop("_test_v2", None)
+
+    def test_workers_see_asset_url_not_primary_target(self, tmp_path):
+        """Each worker's agent.target should be the asset, not the
+        primary target passed to handle_message."""
+        captured: list[str] = []
+
+        async def capture_runner(agent):
+            captured.append(agent.target)
+            return []
+
+        register_worker("vuln", "_test_capture", capture_runner)
+        try:
+            from core.swarm_coordinator import VulnSwarmCoordinator
+
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = VulnSwarmCoordinator(
+                        bus=bus, default_techniques=["_test_capture"],
+                    )
+                    return await coord.handle_message({
+                        "target": "https://primary.example",
+                        "assets": ["https://api.example.com", "https://www.example.com"],
+                    })
+                finally:
+                    await bus.stop()
+
+            asyncio.run(go())
+            assert "https://api.example.com" in captured
+            assert "https://www.example.com" in captured
+            # Primary target was NOT used as worker target
+            assert "https://primary.example" not in captured
+        finally:
+            from core.swarm_workers import _REGISTRY
+            _REGISTRY["vuln"].pop("_test_capture", None)
+
+    def test_extracts_assets_from_recon_findings(self, tmp_path):
+        """When called with `findings`, the coordinator should convert
+        subdomain/open_port findings into URLs and probe each."""
+        captured: list[str] = []
+
+        async def capture_runner(agent):
+            captured.append(agent.target)
+            return []
+
+        register_worker("vuln", "_test_capture", capture_runner)
+        try:
+            from core.swarm_coordinator import VulnSwarmCoordinator
+
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = VulnSwarmCoordinator(
+                        bus=bus, default_techniques=["_test_capture"],
+                    )
+                    return await coord.handle_message({
+                        "target": "https://primary.example",
+                        "findings": [
+                            {"type": "subdomain", "title": "api.example.com",
+                             "asset": "api.example.com"},
+                            {"type": "open_port", "asset": "10.0.0.5",
+                             "port": 8080},
+                            {"type": "open_port", "asset": "10.0.0.5",
+                             "port": 22},  # SSH — skip (not in _HTTP_PORTS)
+                            {"type": "subdomain", "asset": "www.example.com",
+                             "url": "https://www.example.com/login"},
+                        ],
+                    })
+                finally:
+                    await bus.stop()
+
+            asyncio.run(go())
+            # api.example.com (subdomain), 10.0.0.5:8080 (http port),
+            # www.example.com/login (explicit URL) = 3 URLs
+            # 10.0.0.5:22 is SSH so skipped
+            assert "https://api.example.com" in captured
+            assert "http://10.0.0.5:8080" in captured
+            assert "https://www.example.com/login" in captured
+            assert not any(":22" in u for u in captured)
+        finally:
+            from core.swarm_workers import _REGISTRY
+            _REGISTRY["vuln"].pop("_test_capture", None)
+
+    def test_empty_assets_falls_back_to_target(self, tmp_path):
+        captured: list[str] = []
+
+        async def capture_runner(agent):
+            captured.append(agent.target)
+            return []
+
+        register_worker("vuln", "_test_capture", capture_runner)
+        try:
+            from core.swarm_coordinator import VulnSwarmCoordinator
+
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = VulnSwarmCoordinator(
+                        bus=bus, default_techniques=["_test_capture"],
+                    )
+                    return await coord.handle_message({"target": "example.com"})
+                finally:
+                    await bus.stop()
+
+            asyncio.run(go())
+            # No assets / no findings → probe the target itself
+            assert captured == ["https://example.com"]
+        finally:
+            from core.swarm_workers import _REGISTRY
+            _REGISTRY["vuln"].pop("_test_capture", None)
+
+    def test_phase_is_vuln(self):
+        from core.swarm_coordinator import VulnSwarmCoordinator
+        bus = AgentBus()
+        coord = VulnSwarmCoordinator(bus=bus)
+        assert coord.PHASE == "vuln"
+        assert coord.OUTPUT_TOPIC == "exploit"

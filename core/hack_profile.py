@@ -71,8 +71,13 @@ def _stop_when_exhausted(state: dict) -> bool:
 
 
 def _stop_after_one(state: dict) -> bool:
-    """Lab stop: terminate after one full phase sweep."""
-    return state.get("iteration", 0) >= 1
+    """Lab stop: terminate after ONE COMPLETED phase sweep.
+
+    `findings_per_iteration` is only appended AFTER all phases of an
+    iteration have run, so this check fires between iterations, not
+    between phases (which would skip vuln after only recon ran).
+    """
+    return len(state.get("findings_per_iteration", [])) >= 1
 
 
 # ----- Profile dataclass ------------------------------------------------------

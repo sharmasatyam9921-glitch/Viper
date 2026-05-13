@@ -75,3 +75,4 @@ def _safe_import(modname: str) -> None:
 
 
 _safe_import("core.swarm_workers.recon")
+_safe_import("core.swarm_workers.vuln")

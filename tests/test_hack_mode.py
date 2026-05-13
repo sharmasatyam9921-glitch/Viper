@@ -324,3 +324,120 @@ class TestPhaseRouting:
         result = asyncio.run(hm.run())
         # Only recon should appear in phase_results
         assert list(result.phase_results.keys()) == ["recon"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — recon → vuln pipeline integration
+# ---------------------------------------------------------------------------
+
+
+class TestPhase2Pipeline:
+    """Recon → Vuln pipeline using real coordinators (not stubs) with mocked
+    workers. Verifies findings flow from one phase to the next."""
+
+    def test_vuln_phase_receives_recon_findings(self, tmp_path):
+        """The vuln coordinator's `_collect_assets` should turn recon
+        findings (subdomain / open_port) into asset URLs."""
+        from core.swarm_workers import register_worker, _REGISTRY
+
+        recon_seen: list[str] = []
+        vuln_seen: list[str] = []
+
+        async def recon_runner(agent):
+            recon_seen.append(agent.target)
+            # Pretend recon discovered three assets. vuln_type must be
+            # distinct per finding or SwarmEngine.dedup collapses them.
+            return [
+                {"type": "subdomain", "vuln_type": "subdomain:api",
+                 "asset": "api.example.com", "title": "api.example.com",
+                 "url": "https://api.example.com"},
+                {"type": "subdomain", "vuln_type": "subdomain:www",
+                 "asset": "www.example.com", "title": "www.example.com",
+                 "url": "https://www.example.com"},
+                {"type": "open_port", "vuln_type": "open_port:8080",
+                 "asset": "10.0.0.5", "port": 8080,
+                 "url": "http://10.0.0.5:8080"},
+            ]
+
+        async def vuln_runner(agent):
+            vuln_seen.append(agent.target)
+            return [{"type": "test_vuln", "vuln_type": f"vuln:{agent.target}",
+                     "title": f"vuln on {agent.target}", "severity": "info"}]
+
+        register_worker("recon", "_test_recon", recon_runner)
+        register_worker("vuln", "_test_vuln", vuln_runner)
+        try:
+            # Profile with recon + vuln phases enabled, real coordinators
+            profile = LabProfile()
+            profile.phases = ["recon", "vuln", "report"]
+            profile.workers = {"recon": ["_test_recon"], "vuln": ["_test_vuln"]}
+
+            audit = AuditLogger.for_hunt(
+                "example.com",
+                hunts_dir=tmp_path / "hunts", db_path=tmp_path / "v.db",
+            )
+            hm = HackMode(
+                target="example.com",
+                profile=profile,
+                narrator=Narrator(quiet=True),
+                audit=audit,
+            )
+            # Use the real default coordinator wiring (no _coord_factory override)
+            result = asyncio.run(hm.run())
+
+            # Recon ran once against the primary target
+            assert recon_seen == ["example.com"]
+            # Vuln ran against each discovered asset
+            assert "https://api.example.com" in vuln_seen
+            assert "https://www.example.com" in vuln_seen
+            assert "http://10.0.0.5:8080" in vuln_seen
+            # Both phases recorded in result
+            assert "recon" in result.phase_results
+            assert "vuln" in result.phase_results
+            assert result.phase_results["recon"].findings_count == 3
+            # 3 vuln findings (one per asset)
+            assert result.phase_results["vuln"].findings_count == 3
+        finally:
+            _REGISTRY["recon"].pop("_test_recon", None)
+            _REGISTRY["vuln"].pop("_test_vuln", None)
+
+    def test_vuln_phase_no_recon_findings_falls_back_to_target(self, tmp_path):
+        """If recon produced nothing, vuln should still probe the
+        primary target."""
+        from core.swarm_workers import register_worker, _REGISTRY
+
+        vuln_seen: list[str] = []
+
+        async def recon_empty(agent):
+            return []  # no findings
+
+        async def vuln_runner(agent):
+            vuln_seen.append(agent.target)
+            return []
+
+        register_worker("recon", "_test_recon_empty", recon_empty)
+        register_worker("vuln", "_test_vuln_capture", vuln_runner)
+        try:
+            profile = LabProfile()
+            profile.phases = ["recon", "vuln", "report"]
+            profile.workers = {
+                "recon": ["_test_recon_empty"],
+                "vuln": ["_test_vuln_capture"],
+            }
+
+            audit = AuditLogger.for_hunt(
+                "example.com",
+                hunts_dir=tmp_path / "hunts", db_path=tmp_path / "v.db",
+            )
+            hm = HackMode(
+                target="example.com",
+                profile=profile,
+                narrator=Narrator(quiet=True),
+                audit=audit,
+            )
+            asyncio.run(hm.run())
+            # Vuln probed the primary target (https://example.com)
+            assert vuln_seen == ["https://example.com"]
+        finally:
+            _REGISTRY["recon"].pop("_test_recon_empty", None)
+            _REGISTRY["vuln"].pop("_test_vuln_capture", None)

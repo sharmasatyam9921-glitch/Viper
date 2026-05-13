@@ -40,6 +40,7 @@ from .swarm_coordinator import (
     CoordinatorResult,
     ReconSwarmCoordinator,
     SwarmCoordinator,
+    VulnSwarmCoordinator,
 )
 
 logger = logging.getLogger("viper.hack_mode")
@@ -350,6 +351,13 @@ class HackMode:
             # Empty techniques list → use all registered for the phase
             "techniques": techniques or None,
         }
+
+        # Feed prior-phase findings forward as the new phase's input
+        # (recon → vuln especially: every discovered subdomain/port
+        # becomes a vuln-probe target).
+        if phase != "recon":
+            payload["findings"] = list(self._state.get("findings", []))
+
         return await coord.handle_message(payload)
 
     # ------------------------------------------------------------------
@@ -357,11 +365,12 @@ class HackMode:
     # ------------------------------------------------------------------
 
     def _default_coordinator(self, phase: str, common: dict) -> SwarmCoordinator:
-        """Map phase → coordinator class. Phase 1 wires recon only; the
-        rest fall back to a no-op coordinator (returns empty results).
-        Phase 2/3 will replace these with their real subclasses."""
+        """Map phase → coordinator class. Wired through Phase 2; phases
+        not yet implemented (exploit/post/report) get a no-op."""
         if phase == "recon":
             return ReconSwarmCoordinator(**common)
+        if phase == "vuln":
+            return VulnSwarmCoordinator(**common)
         return _NoOpCoordinator(phase=phase, **common)
 
 
