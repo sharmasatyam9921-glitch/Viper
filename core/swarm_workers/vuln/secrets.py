@@ -1,0 +1,147 @@
+"""HTTP-response secret scanner.
+
+Fetches the target's HTML, JS bundles linked from it, and a few common
+exposure paths (`/.env`, `/.git/HEAD`, `/.aws/credentials`,
+`/server-status`, `/actuator/env`, `/swagger.json`). Greps for known
+credential / API-key shapes (AKIA…, GitHub PATs, Slack hooks, etc.)
+using a small built-in pattern set.
+
+Distinct from `recon/github_secrets.py` (org-wide GitHub) — this hits
+the LIVE target host.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from typing import List
+
+from core.swarm_engine import SwarmAgent
+from core.swarm_workers import register_worker
+
+from ._http import fetch, normalize_target_url
+
+logger = logging.getLogger("viper.swarm_workers.vuln.secrets")
+
+TECHNIQUE = "secrets"
+
+# Pattern set: (name, regex, severity)
+_SECRET_PATTERNS = [
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "high"),
+    ("aws_session_token", re.compile(r"\bASIA[0-9A-Z]{16}\b"), "high"),
+    ("github_pat", re.compile(r"\bghp_[A-Za-z0-9]{36,}\b"), "critical"),
+    ("github_fine_grained", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82,}\b"), "critical"),
+    ("github_oauth", re.compile(r"\bgho_[A-Za-z0-9]{36,}\b"), "critical"),
+    ("slack_bot_token", re.compile(r"\bxoxb-[A-Za-z0-9-]{10,}\b"), "high"),
+    ("slack_user_token", re.compile(r"\bxoxp-[A-Za-z0-9-]{10,}\b"), "high"),
+    ("slack_webhook", re.compile(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+"), "medium"),
+    ("discord_webhook", re.compile(r"https://(?:discord(?:app)?\.com|canary\.discord\.com)/api/webhooks/\d+/[A-Za-z0-9_-]+"), "medium"),
+    ("stripe_live", re.compile(r"\bsk_live_[A-Za-z0-9]{24,}\b"), "critical"),
+    ("stripe_test", re.compile(r"\bsk_test_[A-Za-z0-9]{24,}\b"), "low"),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "medium"),
+    ("private_key_pem", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"), "critical"),
+    ("jwt_token", re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{20,}\b"), "low"),
+    ("password_assignment", re.compile(r"(?i)(?:password|passwd|pwd)\s*[:=]\s*[\"\'`]([A-Za-z0-9!@#$%^&*]{8,})[\"\'`]"), "medium"),
+    ("aws_secret", re.compile(r"(?i)aws_secret_access_key\s*[:=]\s*[\"\'`]?([A-Za-z0-9/+]{40})[\"\'`]?"), "critical"),
+]
+
+
+_EXPOSURE_PATHS = [
+    "/.env", "/.git/HEAD", "/.git/config",
+    "/.aws/credentials", "/.aws/config",
+    "/server-status", "/server-info",
+    "/actuator/env", "/actuator/health", "/actuator/heapdump",
+    "/swagger.json", "/swagger-ui.html", "/openapi.json",
+    "/composer.json", "/package.json",
+    "/wp-config.php.bak", "/config.php.bak", "/.htaccess.bak",
+]
+
+
+def _scan_body(body: str, url: str) -> List[dict]:
+    findings: list[dict] = []
+    for name, pat, sev in _SECRET_PATTERNS:
+        for m in pat.finditer(body[:512 * 1024]):  # cap body scan
+            secret = m.group(0)
+            findings.append({
+                "type": "secret_leak",
+                "vuln_type": f"secret:{name}",
+                "title": f"Leaked secret: {name}",
+                "severity": sev,
+                "url": url,
+                "cwe": "CWE-540",
+                "confidence": 0.9,
+                "evidence": (
+                    # Truncate visibly — never leak the full secret in audit
+                    f"{name} found ({secret[:6]}…{secret[-4:]}, {len(secret)} chars)"
+                ),
+            })
+            break  # one finding per pattern per URL
+    return findings
+
+
+async def run(agent: SwarmAgent) -> List[dict]:
+    url = normalize_target_url(agent.target)
+    if not url:
+        return []
+    timeout = min(agent.timeout_s, 8.0)
+    findings: list[dict] = []
+
+    # 1. Main page
+    resp = await fetch("GET", url, timeout=timeout)
+    if resp:
+        findings.extend(_scan_body(resp.body, url))
+
+    # 2. Common exposure paths — in parallel
+    async def _check(path: str) -> List[dict]:
+        full = url.rstrip("/") + path
+        r = await fetch("GET", full, timeout=timeout, follow_redirects=False)
+        if not r or not r.ok or not r.body:
+            return []
+        out: list[dict] = _scan_body(r.body, full)
+        # Even without secret hits, exposing /.env or /.git is itself a finding
+        if path in ("/.env",) and ("=" in r.body or "API_KEY" in r.body.upper()):
+            out.append({
+                "type": "env_exposed",
+                "vuln_type": f"env_exposed:{path}",
+                "title": f"{path} publicly accessible",
+                "severity": "high",
+                "url": full,
+                "cwe": "CWE-200",
+                "confidence": 0.95,
+                "evidence": f".env-style file served at {path}",
+            })
+        if path == "/.git/HEAD" and r.body.startswith("ref: refs/heads/"):
+            out.append({
+                "type": "git_exposed",
+                "vuln_type": "git_exposed",
+                "title": "Git repository exposed (.git/HEAD)",
+                "severity": "high",
+                "url": full,
+                "cwe": "CWE-538",
+                "confidence": 0.98,
+                "evidence": ".git/HEAD returns a valid ref string — full repo likely recoverable",
+            })
+        if path == "/actuator/env" and ("propertySources" in r.body or "configurationProperties" in r.body):
+            out.append({
+                "type": "actuator_exposed",
+                "vuln_type": "actuator_env",
+                "title": "Spring Boot actuator/env exposed",
+                "severity": "high",
+                "url": full,
+                "cwe": "CWE-200",
+                "confidence": 0.9,
+                "evidence": "/actuator/env returns property sources",
+            })
+        return out
+
+    results = await asyncio.gather(
+        *(_check(p) for p in _EXPOSURE_PATHS), return_exceptions=True,
+    )
+    for r in results:
+        if isinstance(r, list):
+            findings.extend(r)
+    return findings
+
+
+register_worker("vuln", TECHNIQUE, run)

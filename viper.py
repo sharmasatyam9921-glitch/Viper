@@ -49,6 +49,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 
 def main():
+    # Subcommand routing — `viper.py hack <target> ...` invokes the
+    # autonomous swarm-orchestrator HackMode entry point. Everything else
+    # (existing flat-arg flow) is untouched for backwards compatibility.
+    if len(sys.argv) > 1 and sys.argv[1] == "hack":
+        from core.hack_cli import run_hack_cli
+        sys.exit(run_hack_cli(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="VIPER 4.0 — AI Bug Bounty Scanner")
     parser.add_argument("target", nargs="?", help="Target URL to scan")
     parser.add_argument("--full", action="store_true", help="Full hunt (recon+surface+nuclei+manual)")
