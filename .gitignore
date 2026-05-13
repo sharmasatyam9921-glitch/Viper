@@ -160,3 +160,86 @@ wordlists/
 fitness/
 labs/
 CLAUDE.local.md
+
+# ── Sanitization rails (see _quarantine/ for what was moved out) ──
+# Quarantine bucket — never commit anything here. Bulk-delete this dir
+# when you no longer need the artifacts.
+/_quarantine/
+
+# Root-level PDFs and outputs (almost always pentest/CTF exfil)
+/*.pdf
+/*.docx
+/attack_output.txt
+/*_output.txt
+/*_results.txt
+/*_response.txt
+/*_dump.txt
+/*.eml
+
+# Root-level CTF / scratch scripts. Real VIPER code lives in core/,
+# tools/, pentest/, agents/, recon/ — root-level scripts here are
+# session-specific solve scripts and shouldn't be committed.
+/ctf_*.py
+/hack_*.py
+/pwn_*.py
+/solve_*.py
+/exploit_*.py
+/probe_*.py
+/train_*.py
+/hunt_*.py
+/analyze_*.py
+/brute_*.py
+/fetch_*.py
+/recover_*.py
+/decrypt_*.py
+/guild_*.py
+/panel_*.py
+/restart_*.py
+/runner_*.py
+/session_*.py
+/shell_*.py
+/simulate_*.py
+/test_*.py
+/try_*.py
+/raw_*.py
+/xh_*.py
+/benchmark_*.py
+/viper_quick_*.py
+/viper_v6.py
+/viper_graph.py
+/viper_hunt_*.py
+/get_help.py
+# Anything ending in _v2/_v3/_final/_clean/_debug/_solve is iterative
+# scratch; keep finalized code in tools/ or pentest/.
+/*_v2.py
+/*_v3.py
+/*_final.py
+/*_clean.py
+/*_debug.py
+
+# Reference / training material directories
+/guild_src/
+/proof/
+/challenges/
+
+# Submission tracking workspace
+/.claude/skills/submit-h1/
+
+# Ignore all archive/ content by default — it's old experiments, hunt
+# outputs, exploit artifacts (PHAR/ZIP), etc. The four `old_*` subdirs
+# below stay tracked (see negative rules earlier in this file).
+archive/demos_dir/
+archive/docs/
+archive/exploit_artifacts/
+archive/hunt_results/
+archive/ml_dir/
+archive/powershell_scripts/
+archive/redteam/
+archive/stale_state/
+archive/temp/
+archive/tests/
+archive/tests_dir/
+archive/tests_root/
+archive/viper_v2/
+archive/*.txt
+archive/requirements.txt
