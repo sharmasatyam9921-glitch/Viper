@@ -613,3 +613,263 @@ class VulnSwarmCoordinator(SwarmCoordinator):
             # nuclei but most vuln workers are HTTP-only)
             return None
         return None
+
+
+# ----- Exploit coordinator (gated) ------------------------------------------
+
+
+class ExploitSwarmCoordinator(SwarmCoordinator):
+    """Exploit phase: drive past vuln findings into actual access.
+
+    Critical difference from VulnSwarmCoordinator: every worker dispatch
+    is gated by `approval_gate`. The gate is checked at dispatch time
+    so a denial just skips the worker without crashing the swarm.
+
+    Inputs (via context):
+      - `findings`: list of VULN findings (each has type/vuln_type
+        identifying the exploit technique to dispatch).
+      - `approval_gate`: a `core.approval_gate.ApprovalGate` instance,
+        or None → all workers skipped (safe default).
+      - `auto_approve_destructive`: if True and gate is None, exploits
+        run without approval (used by lab profile).
+
+    Worker selection: maps vuln_type prefix → exploit technique:
+      sqli       → sqli_exploit
+      xss        → xss_exploit
+      idor       → idor_exploit
+      bola       → idor_exploit (same exploit shape)
+      ssti       → ssti_exploit
+      cmdi       → cmdi_exploit
+      ssrf       → cmdi_exploit (similar verification flow)
+      auth_bypass / login → auth_bypass
+    """
+
+    PHASE = "exploit"
+    OUTPUT_TOPIC = "post"
+
+    # Vuln-finding → exploit-worker technique
+    _EXPLOIT_MAP = {
+        "sqli": "sqli_exploit",
+        "sqli_blind": "sqli_exploit",
+        "xss": "xss_exploit",
+        "xss_reflected": "xss_exploit",
+        "xss_tag": "xss_exploit",
+        "xss_text": "xss_exploit",
+        "idor": "idor_exploit",
+        "idor_candidate": "idor_exploit",
+        "bola": "idor_exploit",
+        "bola_candidate": "idor_exploit",
+        "ssti": "ssti_exploit",
+        "ssti_candidate": "ssti_exploit",
+        "cmdi": "cmdi_exploit",
+        "rce": "cmdi_exploit",
+        "auth_bypass": "auth_bypass",
+        "login": "auth_bypass",
+    }
+
+    def __init__(
+        self,
+        *,
+        approval_gate=None,
+        auto_approve_destructive: bool = False,
+        **kw: Any,
+    ) -> None:
+        super().__init__(**kw)
+        self.approval_gate = approval_gate
+        self.auto_approve_destructive = auto_approve_destructive
+
+    def build_manifest(self, target: str, context: dict) -> list[WorkerSpec]:
+        from .swarm_workers import get_worker_runner  # lazy
+
+        findings = context.get("findings") or []
+        if not findings:
+            return []
+
+        manifest: list[WorkerSpec] = []
+        for finding in findings:
+            # Skip recon-only findings (subdomain, open_port, dns_*, etc.)
+            tech = self._exploit_for_finding(finding)
+            if not tech:
+                continue
+            try:
+                base_runner = get_worker_runner("exploit", tech)
+            except KeyError:
+                logger.debug("no exploit worker for technique %s", tech)
+                continue
+            # Each finding gets its own gated runner
+            target_url = (
+                finding.get("url")
+                or context.get("target")
+                or target
+            )
+            manifest.append(WorkerSpec(
+                technique=f"{tech}@{target_url}",
+                runner=self._gated_runner(base_runner, finding, target_url),
+                timeout_s=context.get(
+                    "per_worker_timeout", self.per_worker_timeout
+                ),
+                priority=4,  # higher priority than vuln (lower-numeric=higher)
+                payload={
+                    "finding": finding,
+                    "target_url": target_url,
+                    "scope_reasoner": context.get("scope_reasoner"),
+                },
+            ))
+        return manifest
+
+    def _exploit_for_finding(self, finding: dict) -> Optional[str]:
+        """Pick the exploit worker for a vuln finding, or None if none matches."""
+        # Try `type`, then prefix of `vuln_type`
+        t = (finding.get("type") or "").lower()
+        if t in self._EXPLOIT_MAP:
+            return self._EXPLOIT_MAP[t]
+        vt = (finding.get("vuln_type") or "").lower()
+        for prefix, tech in self._EXPLOIT_MAP.items():
+            if vt.startswith(prefix):
+                return tech
+        return None
+
+    def _gated_runner(self, base_runner: AgentRunner, finding: dict,
+                       target_url: str) -> AgentRunner:
+        """Wrap a runner with the approval gate."""
+
+        async def gated(agent: SwarmAgent) -> list[dict]:
+            # Re-bind agent.target so the worker probes the vuln's URL
+            agent.target = target_url
+            if not await self._approve(agent.technique, finding, target_url):
+                # Approval denied — emit a "skipped" finding for audit
+                return [{
+                    "type": "exploit_skipped",
+                    "vuln_type": f"exploit_skipped:{agent.technique}",
+                    "title": f"Exploit gated: {agent.technique} on {target_url}",
+                    "severity": "info",
+                    "url": target_url,
+                    "evidence": "Approval gate denied or unavailable.",
+                }]
+            return await base_runner(agent)
+
+        return gated
+
+    async def _approve(self, technique: str, finding: dict,
+                        target_url: str) -> bool:
+        """Approval gate check. Returns True if the runner may proceed."""
+        gate = self.approval_gate
+        if gate is None:
+            return self.auto_approve_destructive
+        try:
+            approved, _modified = await gate.confirm_tool(
+                tool_name=technique,
+                args={"target": target_url, "finding": finding},
+                rationale=(
+                    f"Confirm finding via {technique} against {target_url}. "
+                    f"Source finding: {finding.get('title', finding.get('type'))}"
+                ),
+            )
+            return bool(approved)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("approval_gate raised: %s — failing closed", e)
+            return False
+
+
+# ----- Post-exploit coordinator (gated) -------------------------------------
+
+
+class PostSwarmCoordinator(SwarmCoordinator):
+    """Post-exploit phase: privesc enum + lateral + flag hunting.
+
+    Inputs (via context):
+      - `findings`: list of exploit-phase findings indicating foothold.
+        Each foothold finding should set `foothold: True` and may
+        include `os`, `shell`, `host` keys.
+      - `approval_gate`: same semantics as ExploitSwarmCoordinator.
+
+    All post workers are gated. The CTF `flag_hunter` worker is unique
+    in that it runs even WITHOUT explicit exploit findings (it searches
+    the original target's HTML for embedded flags — useful for web
+    CTF challenges where the flag is visible without a shell).
+    """
+
+    PHASE = "post"
+    OUTPUT_TOPIC = "report"
+
+    # Default workers always considered. flag_hunter is the only one
+    # safe to run on plain HTTP responses without a foothold; the rest
+    # need shell-like access (gated upstream).
+    _DEFAULT_TECHNIQUES = ["flag_hunter"]
+    _FOOTHOLD_TECHNIQUES = ["linpeas", "windows_privesc", "ad_enum",
+                             "gtfobins", "flag_hunter"]
+
+    def __init__(
+        self,
+        *,
+        approval_gate=None,
+        auto_approve_destructive: bool = False,
+        **kw: Any,
+    ) -> None:
+        super().__init__(**kw)
+        self.approval_gate = approval_gate
+        self.auto_approve_destructive = auto_approve_destructive
+
+    def build_manifest(self, target: str, context: dict) -> list[WorkerSpec]:
+        from .swarm_workers import get_worker_runner  # lazy
+
+        findings = context.get("findings") or []
+        has_foothold = any(f.get("foothold") for f in findings)
+        techniques = (
+            context.get("techniques")
+            or (self._FOOTHOLD_TECHNIQUES if has_foothold else self._DEFAULT_TECHNIQUES)
+        )
+
+        manifest: list[WorkerSpec] = []
+        for tech in techniques:
+            try:
+                base_runner = get_worker_runner("post", tech)
+            except KeyError:
+                logger.debug("no post worker for technique %s", tech)
+                continue
+            # flag_hunter is non-destructive — only it bypasses gate
+            requires_gate = tech != "flag_hunter"
+            runner = (
+                self._gated_runner(base_runner, tech)
+                if requires_gate else base_runner
+            )
+            manifest.append(WorkerSpec(
+                technique=tech,
+                runner=runner,
+                timeout_s=context.get(
+                    "per_worker_timeout", self.per_worker_timeout
+                ),
+                priority=3,
+                payload={
+                    "findings": findings,
+                    "scope_reasoner": context.get("scope_reasoner"),
+                },
+            ))
+        return manifest
+
+    def _gated_runner(self, base_runner: AgentRunner, technique: str) -> AgentRunner:
+        async def gated(agent: SwarmAgent) -> list[dict]:
+            if not await self._approve(technique, agent.target):
+                return [{
+                    "type": "post_skipped",
+                    "vuln_type": f"post_skipped:{technique}",
+                    "title": f"Post-exploit gated: {technique}",
+                    "severity": "info",
+                    "evidence": "Approval gate denied or unavailable.",
+                }]
+            return await base_runner(agent)
+        return gated
+
+    async def _approve(self, technique: str, target: str) -> bool:
+        gate = self.approval_gate
+        if gate is None:
+            return self.auto_approve_destructive
+        try:
+            approved, _ = await gate.confirm_tool(
+                tool_name=technique,
+                args={"target": target},
+                rationale=f"Post-exploit: {technique} on {target}",
+            )
+            return bool(approved)
+        except Exception:
+            return False
