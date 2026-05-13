@@ -51,7 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("target", help="URL / hostname / IP to hack")
+    p.add_argument(
+        "target", nargs="?", default=None,
+        help="URL / hostname / IP to hack (omit when using --resume)",
+    )
+    p.add_argument(
+        "--resume", metavar="HUNT_ID",
+        help="Resume a previous hunt from its audit log. The audit.jsonl "
+             "must exist under --hunts-dir/<HUNT_ID>/.",
+    )
     p.add_argument(
         "--go", action="store_true",
         help="Enable destructive workers (exploit + privesc + lateral). "
@@ -106,54 +114,93 @@ def run_hack_cli(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     # 1. Preflight
-    if not args.target or not args.target.strip():
-        print("[ERR] target is required", file=sys.stderr)
-        return 1
+    if args.resume:
+        # When resuming, target is recovered from the audit log
+        if args.target:
+            print(
+                "[WARN] --resume ignores positional target; using the "
+                "target recorded in the audit log.",
+                file=sys.stderr,
+            )
+    else:
+        if not args.target or not args.target.strip():
+            print("[ERR] target is required (or pass --resume HUNT_ID)",
+                  file=sys.stderr)
+            return 1
     if args.scope and not Path(args.scope).exists():
         print(f"[ERR] scope file not found: {args.scope}", file=sys.stderr)
         return 1
 
-    # 2. Build profile
-    try:
-        profile = detect_profile(
-            args.target,
-            scope_file=args.scope,
-            explicit=args.profile,
-            go=args.go,
-        )
-    except ValueError as e:
-        print(f"[ERR] profile selection: {e}", file=sys.stderr)
-        return 1
-
-    # Apply CLI overrides
-    if args.time is not None:
-        profile.time_budget_s = args.time * 60.0
-    if args.workers is not None:
-        profile.max_concurrent = max(1, args.workers)
+    # 2. Build profile (skipped for --resume — recovered from audit log)
+    if args.resume:
+        profile = None  # HackMode.resume() will recover it
+    else:
+        try:
+            profile = detect_profile(
+                args.target,
+                scope_file=args.scope,
+                explicit=args.profile,
+                go=args.go,
+            )
+        except ValueError as e:
+            print(f"[ERR] profile selection: {e}", file=sys.stderr)
+            return 1
+        # Apply CLI overrides on a fresh profile
+        if args.time is not None:
+            profile.time_budget_s = args.time * 60.0
+        if args.workers is not None:
+            profile.max_concurrent = max(1, args.workers)
 
     # 3. Build collaborators
-    audit = AuditLogger.for_hunt(
-        args.target,
-        hunts_dir=Path(args.hunts_dir),
-        db_path=Path(args.db_path),
-    )
     narrator = Narrator(quiet=args.quiet, use_color=not args.no_color)
 
     scope_reasoner: Optional[ScopeReasoner] = None
-    if profile.use_scope_reasoner:
+    # Resume path doesn't yet know `profile`, so always build the reasoner
+    # if a scope file was provided
+    need_scope = args.scope is not None or (
+        profile is not None and profile.use_scope_reasoner
+    )
+    if need_scope:
         try:
             scope_reasoner = _build_scope_reasoner(args.scope, args.db_path)
         except Exception as e:  # noqa: BLE001
             print(f"[WARN] scope reasoner unavailable: {e}", file=sys.stderr)
 
-    # 4. Run
-    hm = HackMode(
-        target=args.target,
-        profile=profile,
-        narrator=narrator,
-        audit=audit,
-        scope_reasoner=scope_reasoner,
-    )
+    # 4. Run — resume or fresh
+    if args.resume:
+        try:
+            hm = HackMode.resume(
+                args.resume,
+                hunts_dir=Path(args.hunts_dir),
+                db_path=Path(args.db_path),
+                narrator=narrator,
+                scope_reasoner=scope_reasoner,
+            )
+        except FileNotFoundError as e:
+            print(f"[ERR] {e}", file=sys.stderr)
+            return 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[ERR] resume failed: {e}", file=sys.stderr)
+            return 1
+        # CLI overrides on the resumed profile
+        if args.time is not None:
+            hm.profile.time_budget_s = args.time * 60.0
+        if args.workers is not None:
+            hm.profile.max_concurrent = max(1, args.workers)
+        audit = hm.audit
+    else:
+        audit = AuditLogger.for_hunt(
+            args.target,
+            hunts_dir=Path(args.hunts_dir),
+            db_path=Path(args.db_path),
+        )
+        hm = HackMode(
+            target=args.target,
+            profile=profile,
+            narrator=narrator,
+            audit=audit,
+            scope_reasoner=scope_reasoner,
+        )
     try:
         result = asyncio.run(hm.run())
     except KeyboardInterrupt:
