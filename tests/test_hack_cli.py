@@ -22,10 +22,19 @@ from core.hack_cli import build_parser, run_hack_cli  # noqa: E402
 
 
 class TestBuildParser:
-    def test_target_required(self):
+    def test_target_optional_for_resume(self):
+        """`target` is now optional (so `--resume HUNT_ID` works without it).
+        Required-target check moved into run_hack_cli's preflight."""
         p = build_parser()
-        with pytest.raises(SystemExit):
-            p.parse_args([])  # no target
+        ns = p.parse_args([])
+        assert ns.target is None
+        assert ns.resume is None
+
+    def test_resume_flag_parses(self):
+        p = build_parser()
+        ns = p.parse_args(["--resume", "example.com_12345"])
+        assert ns.resume == "example.com_12345"
+        assert ns.target is None
 
     def test_default_flags(self):
         p = build_parser()

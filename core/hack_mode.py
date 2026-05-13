@@ -33,12 +33,19 @@ from typing import Any, Awaitable, Callable, Optional
 
 from .agent_bus import AgentBus, Priority
 from .audit_logger import AuditLogger
-from .hack_profile import Profile, detect_profile
+from .hack_profile import (
+    BugBountyProfile,
+    CTFProfile,
+    LabProfile,
+    Profile,
+    detect_profile,
+)
 from .narrator import Narrator
 from .scope_reasoner import ScopeReasoner
 from .swarm_coordinator import (
     CoordinatorResult,
     ExploitSwarmCoordinator,
+    FindingDedup,
     PostSwarmCoordinator,
     ReconSwarmCoordinator,
     SwarmCoordinator,
@@ -129,6 +136,10 @@ class HackMode:
         self.approval_gate = approval_gate
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
+        # Phase 5: a single FindingDedup is shared by every coordinator
+        # so cross-phase duplicates (same SQLi found by probe AND exploit)
+        # don't get republished to the bus.
+        self.dedup = FindingDedup()
         self._started = False
         self._stopped = False
         # State carried into stop_conditions
@@ -176,6 +187,117 @@ class HackMode:
             audit=audit,
             scope_reasoner=scope_reasoner,
         )
+
+    @classmethod
+    def resume(
+        cls,
+        hunt_id: str,
+        *,
+        hunts_dir: Optional[Path] = None,
+        db_path: Optional[Path] = None,
+        profile: Optional[Profile] = None,
+        narrator: Optional[Narrator] = None,
+        scope_reasoner: Optional[ScopeReasoner] = None,
+        approval_gate=None,
+    ) -> "HackMode":
+        """Reconstruct a HackMode from an existing hunt's audit log.
+
+        Replays prior `phase.completed` events into `_state` so the
+        persistence loop skips finished phases on the next iteration.
+        The target is recovered from the first `hunt.started` event.
+
+        Raises FileNotFoundError if the hunt's audit.jsonl doesn't exist.
+        """
+        hunts_dir_p = Path(hunts_dir) if hunts_dir else Path("state/hunts")
+        audit_path = hunts_dir_p / hunt_id / "audit.jsonl"
+        if not audit_path.exists():
+            raise FileNotFoundError(
+                f"audit log not found for hunt_id={hunt_id!r}: {audit_path}"
+            )
+
+        # Rebuild the audit logger pointing at the SAME files
+        audit = AuditLogger(
+            hunt_id=hunt_id,
+            jsonl_path=audit_path,
+            db_path=Path(db_path) if db_path else Path("data/viper.db"),
+        )
+
+        # Replay events to recover target, profile (best-effort), and state
+        events = audit.read_jsonl()
+        target = ""
+        recovered_profile_dict: dict = {}
+        completed_phases: list[str] = []
+        prior_findings: list[dict] = []
+        iteration = 0
+        for ev in events:
+            if ev.action == "hunt.started":
+                target = ev.target or target
+                p = (ev.payload or {}).get("profile")
+                if isinstance(p, dict):
+                    recovered_profile_dict = p
+            elif ev.action == "phase.completed":
+                if ev.phase and ev.phase not in completed_phases:
+                    completed_phases.append(ev.phase)
+            elif ev.action == "loop.iteration":
+                iteration = max(iteration, int(
+                    (ev.payload or {}).get("iteration") or 0
+                ))
+            elif ev.action == "finding.published":
+                # Carry forward the published findings so the next iteration
+                # can re-use them as asset inputs without re-running recon.
+                p = ev.payload or {}
+                prior_findings.append({
+                    "type": (p.get("title") or "").split(":")[0] or "finding",
+                    "vuln_type": (p.get("technique") or "") + ":" + (p.get("title") or ""),
+                    "title": p.get("title"),
+                    "url": p.get("url"),
+                    "severity": ev.severity or "info",
+                    "phase": ev.phase,
+                })
+
+        if not target:
+            raise RuntimeError(
+                f"audit log for hunt_id={hunt_id!r} is missing a "
+                "hunt.started event — cannot recover target"
+            )
+
+        # Profile resolution priority: explicit arg → audited profile → default
+        if profile is None and recovered_profile_dict:
+            name = recovered_profile_dict.get("name", "").lower()
+            if "ctf" in name:
+                profile = CTFProfile()
+            elif "bug" in name:
+                profile = BugBountyProfile(
+                    allow_destructive=recovered_profile_dict.get(
+                        "allow_destructive", False,
+                    ),
+                )
+            else:
+                profile = LabProfile(
+                    allow_destructive=recovered_profile_dict.get(
+                        "allow_destructive", False,
+                    ),
+                )
+        if profile is None:
+            profile = detect_profile(target)
+
+        if narrator is None:
+            narrator = Narrator(quiet=False)
+
+        hm = cls(
+            target=target,
+            profile=profile,
+            narrator=narrator,
+            audit=audit,
+            scope_reasoner=scope_reasoner,
+            approval_gate=approval_gate,
+        )
+        # Seed state so completed phases are skipped + findings flow forward
+        hm._state["iteration"] = iteration
+        hm._state["findings"] = prior_findings
+        hm._state["resumed_completed_phases"] = completed_phases
+        hm._state["resumed"] = True
+        return hm
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -262,6 +384,22 @@ class HackMode:
         max_iterations = self.profile.max_iterations
         total_phases = len(phases_to_run)
 
+        # On resume: skip phases that already completed in the prior run.
+        # Applies only to the FIRST iteration after a resume; subsequent
+        # iterations re-run the full pipeline.
+        resumed_skip = set(self._state.get("resumed_completed_phases", []))
+        first_iter_after_resume = self._state.get("resumed", False)
+        if resumed_skip:
+            self.narrator.info(
+                f"resuming: skipping already-completed phases on iter 1: "
+                f"{sorted(resumed_skip)}"
+            )
+            self.audit.event(
+                "loop.resumed",
+                target=self.target,
+                payload={"skipped_phases": sorted(resumed_skip)},
+            )
+
         while self._state["iteration"] < max_iterations:
             self._state["iteration"] += 1
             result.iterations = self._state["iteration"]
@@ -273,6 +411,10 @@ class HackMode:
             )
 
             for idx, phase in enumerate(phases_to_run, start=1):
+                # Skip already-completed phases on the first iteration after resume
+                if first_iter_after_resume and phase in resumed_skip:
+                    self.narrator.info(f"  resume: skipped {phase}")
+                    continue
                 # The narrator stage uses 1-indexed counters
                 self.narrator.stage(
                     f"{phase.upper()} swarm",
@@ -307,6 +449,9 @@ class HackMode:
                     return
 
             self._state["findings_per_iteration"].append(findings_this_iter)
+            # After the first iteration, drop the resume-skip flag so
+            # subsequent iterations re-run the full pipeline.
+            first_iter_after_resume = False
             # Iteration-level stop check (includes max_iterations)
             stop, why = self.profile.should_stop(self._state)
             if stop:
@@ -338,12 +483,20 @@ class HackMode:
 
     async def _run_phase(self, phase: str) -> CoordinatorResult:
         """Dispatch one phase's coordinator. Returns its CoordinatorResult."""
+        # Per-phase budget (Phase 5): split the total time across phases
+        # so slow workers in one phase can't starve downstream phases.
+        phase_count = max(1, len([
+            p for p in self.profile.phases if p != "report"
+        ]))
+        phase_budget = self.profile.get_phase_budget(phase_count)
         # Build coordinator
         common = {
             "bus": self.bus,
             "audit_logger": self.audit,
             "max_concurrent": self.profile.max_concurrent,
             "per_worker_timeout": self.profile.per_worker_timeout,
+            "overall_timeout": phase_budget,
+            "dedup": self.dedup,
         }
         coord = self._coord_factory(phase, common)
 

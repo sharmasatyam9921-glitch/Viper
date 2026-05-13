@@ -93,8 +93,21 @@ async def fetch(
     body: Optional[bytes] = None,
     timeout: float = 10.0,
     follow_redirects: bool = True,
+    rate_limit: bool = True,
 ) -> Optional[HttpResp]:
-    """Async wrapper around stdlib urllib via asyncio.to_thread."""
+    """Async wrapper around stdlib urllib via asyncio.to_thread.
+
+    Token-bucket rate-limited per host by default (30 req/s, burst 60).
+    Pass `rate_limit=False` to bypass — only useful for the rate-limiter
+    own tests.
+    """
+    if rate_limit and url:
+        # Lazy import to keep this module dependency-light at top of file
+        from ._rate_limit import wait_for_token
+        ok = await wait_for_token(url)
+        if not ok:
+            logger.debug("rate limit blocked %s %s", method, url)
+            return None
     return await asyncio.to_thread(
         _fetch_sync, method, url,
         headers=headers, body=body, timeout=timeout,

@@ -120,6 +120,22 @@ class Profile:
     # Per-worker timeout. Set lower for CTFs (boxes are smaller).
     per_worker_timeout: float = 60.0
 
+    # Per-phase time budget (in seconds). If a phase exceeds this, its
+    # coordinator's overall_timeout cuts it off and the loop moves on
+    # to the next phase. Prevents slow workers (e.g. wayback for
+    # localhost) from starving downstream phases.
+    # Default = time_budget_s / number_of_phases when set to None.
+    per_phase_budget_s: Optional[float] = None
+
+    def get_phase_budget(self, phase_count: int) -> float:
+        """Compute the per-phase budget, falling back to time_budget/N."""
+        if self.per_phase_budget_s is not None and self.per_phase_budget_s > 0:
+            return self.per_phase_budget_s
+        if phase_count <= 0:
+            return self.time_budget_s
+        # Leave 10% headroom for report + teardown
+        return (self.time_budget_s * 0.9) / phase_count
+
     def should_stop(self, state: dict) -> tuple[bool, Optional[str]]:
         """Run every stop condition. Returns (stop?, reason)."""
         for cond in self.stop_conditions:

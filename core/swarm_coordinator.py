@@ -72,6 +72,51 @@ class CoordinatorResult:
         return len(self.findings)
 
 
+# ----- Cross-coordinator finding dedup (Phase 5) ----------------------------
+
+import hashlib as _hashlib
+
+
+class FindingDedup:
+    """Hash-based dedup across coordinators within one hunt.
+
+    SwarmEngine dedups WITHIN one swarm. This dedups ACROSS swarms so the
+    same SQLi finding doesn't get republished by both vuln/sqli_probe
+    (low confidence) and exploit/sqli_exploit (high confidence) — the
+    first wins on the bus.
+
+    Hash key: target + vuln_type + parameter + payload.
+    Empty / missing keys are always allowed (can't fingerprint).
+    """
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    def is_new(self, finding: dict) -> bool:
+        key = self._key(finding)
+        if not key:
+            return True
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        return True
+
+    @staticmethod
+    def _key(finding: dict) -> str:
+        parts = [
+            str(finding.get("target", "") or finding.get("url", "")),
+            str(finding.get("vuln_type", "") or finding.get("type", "")),
+            str(finding.get("parameter", "")),
+            str(finding.get("payload", "")),
+        ]
+        if all(not p for p in parts):
+            return ""
+        return _hashlib.sha1("|".join(parts).encode()).hexdigest()
+
+    def reset(self) -> None:
+        self._seen.clear()
+
+
 # ----- Base coordinator -----------------------------------------------------
 
 
@@ -96,6 +141,7 @@ class SwarmCoordinator:
         per_worker_timeout: float = 60.0,
         overall_timeout: float = 300.0,
         rate_limit_s: float = 0.0,    # delay between worker spawns
+        dedup: Optional["FindingDedup"] = None,  # cross-coord dedup (Phase 5)
     ) -> None:
         self.bus = bus
         self.audit = audit_logger
@@ -103,6 +149,7 @@ class SwarmCoordinator:
         self.per_worker_timeout = per_worker_timeout
         self.overall_timeout = overall_timeout
         self.rate_limit_s = rate_limit_s
+        self.dedup = dedup  # None = no cross-coord dedup; HackMode injects one
 
         self.coordinator_id = f"{self.PHASE}_coord_{uuid.uuid4().hex[:8]}"
         # Each coordinator owns one engine per run (engines are stateful per run).
@@ -366,6 +413,23 @@ class SwarmCoordinator:
 
     async def _publish_finding(self, finding: dict, *, target: str, technique: str) -> None:
         """Stream one finding onto the OUTPUT_TOPIC + dashboard swarm channel."""
+        # Cross-coordinator dedup (Phase 5) — if a hash-equivalent finding
+        # was already published by an earlier coordinator, drop it here.
+        # The audit log still records the publish attempt below as
+        # finding.deduped so the dashboard can show the suppression.
+        if self.dedup is not None and not self.dedup.is_new(finding):
+            if self.audit:
+                self.audit.event(
+                    "finding.deduped",
+                    phase=self.PHASE,
+                    target=target,
+                    severity=str(finding.get("severity", "info")),
+                    payload={
+                        "title": finding.get("title") or finding.get("type"),
+                        "technique": technique,
+                    },
+                )
+            return
         # Enrich for downstream coordinators
         f = {
             "target": target,

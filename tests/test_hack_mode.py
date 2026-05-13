@@ -401,6 +401,117 @@ class TestPhase2Pipeline:
             _REGISTRY["recon"].pop("_test_recon", None)
             _REGISTRY["vuln"].pop("_test_vuln", None)
 
+    def test_resume_skips_completed_phases(self, tmp_path):
+        """A fresh run completes; then HackMode.resume() picks up the
+        same hunt and skips phases whose `phase.completed` event is
+        already in the audit log."""
+        from core.swarm_workers import register_worker, _REGISTRY
+
+        recon_calls: list[str] = []
+        vuln_calls: list[str] = []
+
+        async def recon_runner(agent):
+            recon_calls.append(agent.target)
+            return [{
+                "type": "subdomain", "vuln_type": "subdomain:api",
+                "asset": "api.example.com",
+                "url": "https://api.example.com",
+            }]
+
+        async def vuln_runner(agent):
+            vuln_calls.append(agent.target)
+            return [{
+                "type": "test_vuln", "vuln_type": f"vuln:{agent.target}",
+                "title": f"hit {agent.target}", "severity": "info",
+            }]
+
+        register_worker("recon", "_test_recon", recon_runner)
+        register_worker("vuln", "_test_vuln", vuln_runner)
+        try:
+            profile = LabProfile()
+            profile.phases = ["recon", "vuln", "report"]
+            profile.workers = {"recon": ["_test_recon"], "vuln": ["_test_vuln"]}
+
+            # Round 1 — fresh hunt, ts=100 so hunt_id is deterministic
+            audit_1 = AuditLogger.for_hunt(
+                "example.com",
+                hunts_dir=tmp_path / "hunts", db_path=tmp_path / "v.db",
+                ts=100,
+            )
+            hm_1 = HackMode(
+                target="example.com",
+                profile=profile,
+                narrator=Narrator(quiet=True),
+                audit=audit_1,
+            )
+            asyncio.run(hm_1.run())
+            assert len(recon_calls) == 1
+            assert len(vuln_calls) == 1  # 1 worker × 1 asset
+            hunt_id = audit_1.hunt_id
+
+            # Round 2 — resume the same hunt. Both phases are completed,
+            # max_iterations=1, so the loop runs but skips everything and
+            # exits via one_pass.
+            hm_2 = HackMode.resume(
+                hunt_id,
+                hunts_dir=tmp_path / "hunts",
+                db_path=tmp_path / "v.db",
+                profile=profile,
+                narrator=Narrator(quiet=True),
+            )
+            # Resume must NOT re-run recon / vuln
+            asyncio.run(hm_2.run())
+            assert len(recon_calls) == 1, "resume re-ran recon"
+            assert len(vuln_calls) == 1, "resume re-ran vuln"
+        finally:
+            _REGISTRY["recon"].pop("_test_recon", None)
+            _REGISTRY["vuln"].pop("_test_vuln", None)
+
+    def test_resume_missing_hunt_raises(self, tmp_path):
+        from core.hack_mode import HackMode
+        with pytest.raises(FileNotFoundError):
+            HackMode.resume(
+                "nonexistent_hunt_999",
+                hunts_dir=tmp_path / "hunts",
+                db_path=tmp_path / "v.db",
+            )
+
+    def test_resume_recovers_target_from_audit(self, tmp_path):
+        """The target string is recovered from the first hunt.started event."""
+        from core.swarm_workers import register_worker, _REGISTRY
+
+        async def trivial(agent):
+            return []
+
+        register_worker("recon", "_test_trivial", trivial)
+        try:
+            profile = LabProfile()
+            profile.phases = ["recon", "report"]
+            profile.workers = {"recon": ["_test_trivial"]}
+
+            target = "https://recovered.example.com:8443/path"
+            audit_1 = AuditLogger.for_hunt(
+                target,
+                hunts_dir=tmp_path / "hunts", db_path=tmp_path / "v.db",
+                ts=200,
+            )
+            hm_1 = HackMode(
+                target=target, profile=profile,
+                narrator=Narrator(quiet=True), audit=audit_1,
+            )
+            asyncio.run(hm_1.run())
+
+            hm_2 = HackMode.resume(
+                audit_1.hunt_id,
+                hunts_dir=tmp_path / "hunts",
+                db_path=tmp_path / "v.db",
+                profile=profile,
+                narrator=Narrator(quiet=True),
+            )
+            assert hm_2.target == target
+        finally:
+            _REGISTRY["recon"].pop("_test_trivial", None)
+
     def test_vuln_phase_no_recon_findings_falls_back_to_target(self, tmp_path):
         """If recon produced nothing, vuln should still probe the
         primary target."""
