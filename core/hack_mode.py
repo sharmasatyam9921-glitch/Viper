@@ -38,6 +38,8 @@ from .narrator import Narrator
 from .scope_reasoner import ScopeReasoner
 from .swarm_coordinator import (
     CoordinatorResult,
+    ExploitSwarmCoordinator,
+    PostSwarmCoordinator,
     ReconSwarmCoordinator,
     SwarmCoordinator,
     VulnSwarmCoordinator,
@@ -108,6 +110,7 @@ class HackMode:
         narrator: Narrator,
         audit: AuditLogger,
         scope_reasoner: Optional[ScopeReasoner] = None,
+        approval_gate=None,
         bus_queue_size: int = 10_000,
         coordinator_factory: Optional[
             Callable[[str, dict], SwarmCoordinator]
@@ -123,6 +126,7 @@ class HackMode:
         self.narrator = narrator
         self.audit = audit
         self.scope_reasoner = scope_reasoner
+        self.approval_gate = approval_gate
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
         self._started = False
@@ -365,12 +369,28 @@ class HackMode:
     # ------------------------------------------------------------------
 
     def _default_coordinator(self, phase: str, common: dict) -> SwarmCoordinator:
-        """Map phase → coordinator class. Wired through Phase 2; phases
-        not yet implemented (exploit/post/report) get a no-op."""
+        """Map phase → coordinator class. Wired through Phase 3; report
+        phase is still a no-op (handled by --report flag in CLI)."""
         if phase == "recon":
             return ReconSwarmCoordinator(**common)
         if phase == "vuln":
             return VulnSwarmCoordinator(**common)
+        if phase == "exploit":
+            return ExploitSwarmCoordinator(
+                approval_gate=self.approval_gate,
+                auto_approve_destructive=(
+                    self.profile.allow_destructive and self.approval_gate is None
+                ),
+                **common,
+            )
+        if phase == "post":
+            return PostSwarmCoordinator(
+                approval_gate=self.approval_gate,
+                auto_approve_destructive=(
+                    self.profile.allow_destructive and self.approval_gate is None
+                ),
+                **common,
+            )
         return _NoOpCoordinator(phase=phase, **common)
 
 

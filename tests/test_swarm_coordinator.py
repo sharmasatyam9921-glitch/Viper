@@ -635,3 +635,245 @@ class TestVulnSwarmCoordinator:
         coord = VulnSwarmCoordinator(bus=bus)
         assert coord.PHASE == "vuln"
         assert coord.OUTPUT_TOPIC == "exploit"
+
+
+# ---------------------------------------------------------------------------
+# ExploitSwarmCoordinator (gated)
+# ---------------------------------------------------------------------------
+
+
+class TestExploitSwarmCoordinator:
+    def test_no_findings_no_dispatch(self):
+        from core.swarm_coordinator import ExploitSwarmCoordinator
+
+        async def go():
+            bus = AgentBus()
+            await bus.start()
+            try:
+                coord = ExploitSwarmCoordinator(
+                    bus=bus, auto_approve_destructive=True,
+                )
+                return await coord.handle_message({"target": "x"})
+            finally:
+                await bus.stop()
+
+        result = asyncio.run(go())
+        assert result.workers_dispatched == 0
+
+    def test_routes_sqli_finding_to_sqli_exploit(self):
+        from core.swarm_coordinator import ExploitSwarmCoordinator
+        captured: list[str] = []
+
+        async def capture_runner(agent):
+            captured.append(agent.technique)
+            return []
+
+        register_worker("exploit", "sqli_exploit", capture_runner)
+        try:
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = ExploitSwarmCoordinator(
+                        bus=bus, auto_approve_destructive=True,
+                    )
+                    return await coord.handle_message({
+                        "target": "http://t/",
+                        "findings": [{
+                            "type": "sqli", "vuln_type": "sqli:id",
+                            "parameter": "id", "url": "http://t/?id=1",
+                        }],
+                    })
+                finally:
+                    await bus.stop()
+
+            result = asyncio.run(go())
+            assert result.workers_dispatched == 1
+            assert any("sqli_exploit" in t for t in captured)
+        finally:
+            # Restore the real runner so other tests still work
+            from core.swarm_workers.exploit import sqli_exploit  # noqa
+            from core.swarm_workers import register_worker as rw
+            rw("exploit", "sqli_exploit", sqli_exploit.run)
+
+    def test_unknown_finding_type_skipped(self):
+        from core.swarm_coordinator import ExploitSwarmCoordinator
+
+        async def go():
+            bus = AgentBus()
+            await bus.start()
+            try:
+                coord = ExploitSwarmCoordinator(
+                    bus=bus, auto_approve_destructive=True,
+                )
+                return await coord.handle_message({
+                    "target": "http://t/",
+                    "findings": [{"type": "subdomain", "vuln_type": "subdomain"}],
+                })
+            finally:
+                await bus.stop()
+
+        result = asyncio.run(go())
+        # subdomain isn't exploit-actionable → no dispatch
+        assert result.workers_dispatched == 0
+
+    def test_approval_gate_denied_skips_worker(self):
+        """When approval gate is None and auto_approve_destructive=False,
+        the gated runner emits a skipped marker instead of running."""
+        from core.swarm_coordinator import ExploitSwarmCoordinator
+
+        sentinel = []
+
+        async def real_exploit(agent):
+            sentinel.append("ran")
+            return [{"type": "should_not_appear"}]
+
+        register_worker("exploit", "sqli_exploit", real_exploit)
+        try:
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = ExploitSwarmCoordinator(
+                        bus=bus, approval_gate=None,
+                        auto_approve_destructive=False,
+                    )
+                    return await coord.handle_message({
+                        "target": "http://t/",
+                        "findings": [{
+                            "type": "sqli", "parameter": "id",
+                            "url": "http://t/?id=1",
+                        }],
+                    })
+                finally:
+                    await bus.stop()
+
+            result = asyncio.run(go())
+            # Worker did NOT actually run
+            assert sentinel == []
+            # But a "skipped" marker was emitted
+            assert result.findings_count >= 1
+            assert any(f["type"] == "exploit_skipped" for f in result.findings)
+        finally:
+            from core.swarm_workers.exploit import sqli_exploit
+            from core.swarm_workers import register_worker as rw
+            rw("exploit", "sqli_exploit", sqli_exploit.run)
+
+    def test_approval_gate_approves_runs_worker(self):
+        from core.swarm_coordinator import ExploitSwarmCoordinator
+
+        # Mock gate that always approves
+        class _GateAlwaysApprove:
+            async def confirm_tool(self, tool_name, args, rationale):
+                return True, args
+
+        ran = []
+
+        async def real_exploit(agent):
+            ran.append("yes")
+            return [{
+                "type": "sqli_exploited", "vuln_type": "sqli_exploited:id",
+                "title": "ok", "severity": "critical",
+            }]
+
+        register_worker("exploit", "sqli_exploit", real_exploit)
+        try:
+            async def go():
+                bus = AgentBus()
+                await bus.start()
+                try:
+                    coord = ExploitSwarmCoordinator(
+                        bus=bus, approval_gate=_GateAlwaysApprove(),
+                    )
+                    return await coord.handle_message({
+                        "target": "http://t/",
+                        "findings": [{"type": "sqli", "parameter": "id",
+                                      "url": "http://t/?id=1"}],
+                    })
+                finally:
+                    await bus.stop()
+
+            asyncio.run(go())
+            assert ran == ["yes"]
+        finally:
+            from core.swarm_workers.exploit import sqli_exploit
+            from core.swarm_workers import register_worker as rw
+            rw("exploit", "sqli_exploit", sqli_exploit.run)
+
+
+# ---------------------------------------------------------------------------
+# PostSwarmCoordinator (gated)
+# ---------------------------------------------------------------------------
+
+
+class TestPostSwarmCoordinator:
+    def test_flag_hunter_runs_without_foothold(self):
+        """flag_hunter is the only post worker not gated — runs even when
+        no foothold finding is present."""
+        from core.swarm_coordinator import PostSwarmCoordinator
+
+        async def go():
+            bus = AgentBus()
+            await bus.start()
+            try:
+                coord = PostSwarmCoordinator(bus=bus, approval_gate=None)
+                # No findings → only flag_hunter should be in the manifest
+                return await coord.handle_message({"target": "http://t/"})
+            finally:
+                await bus.stop()
+
+        result = asyncio.run(go())
+        # 1 worker (flag_hunter)
+        assert result.workers_dispatched == 1
+
+    def test_foothold_triggers_full_manifest(self):
+        from core.swarm_coordinator import PostSwarmCoordinator
+
+        async def go():
+            bus = AgentBus()
+            await bus.start()
+            try:
+                coord = PostSwarmCoordinator(
+                    bus=bus, auto_approve_destructive=True,
+                )
+                return await coord.handle_message({
+                    "target": "http://t/",
+                    "findings": [{"type": "cmdi_exploited", "foothold": True}],
+                })
+            finally:
+                await bus.stop()
+
+        result = asyncio.run(go())
+        # 5 workers when there's a foothold
+        assert result.workers_dispatched == 5
+
+    def test_non_flag_workers_gated_default(self):
+        """Without an approval gate and auto_approve=False, only flag_hunter
+        actually runs; the rest emit `post_skipped` markers."""
+        from core.swarm_coordinator import PostSwarmCoordinator
+
+        async def go():
+            bus = AgentBus()
+            await bus.start()
+            try:
+                coord = PostSwarmCoordinator(
+                    bus=bus, approval_gate=None,
+                    auto_approve_destructive=False,
+                )
+                return await coord.handle_message({
+                    "target": "http://t/",
+                    "findings": [{"type": "cmdi_exploited", "foothold": True}],
+                })
+            finally:
+                await bus.stop()
+
+        result = asyncio.run(go())
+        skipped = [f for f in result.findings if f["type"] == "post_skipped"]
+        # 4 of 5 workers should be gate-skipped (all except flag_hunter)
+        assert len(skipped) == 4
+
+    def test_phase_is_post(self):
+        from core.swarm_coordinator import PostSwarmCoordinator
+        coord = PostSwarmCoordinator(bus=AgentBus())
+        assert coord.PHASE == "post"
+        assert coord.OUTPUT_TOPIC == "report"
