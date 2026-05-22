@@ -1,79 +1,258 @@
-version: "3.9"
+# ──────────────────────────────────────────────────────────────────────────
+# VIPER 6.0 — Scalable multi-container stack
+#
+# Roles:
+#   viper-redis    — shared message bus + heartbeats
+#   viper-api      — dashboard HTTP + WebSocket server (port 8080)
+#   viper-webapp   — Next.js dashboard UI (port 3000)
+#   viper-worker   — swarm worker daemon; scale via WORKER_REPLICAS or
+#                    `docker compose up -d --scale viper-worker=N`
+#
+# Optional profiles (opt in with --profile <name>):
+#   --profile graph    → neo4j
+#   --profile postgres → postgres (alternative to SQLite)
+#   --profile ollama   → ollama local LLM
+#   --profile gvm      → greenbone vuln scanner
+#   --profile daemon   → 24/7 viper_daemon.py worker
+#
+# Quick start:
+#   cp .env.example .env  &&  docker compose up -d --build
+#   docker compose up -d --scale viper-worker=10
+# ──────────────────────────────────────────────────────────────────────────
 
 services:
-  viper:
-    build: .
-    container_name: viper-agent
+  # ── Shared message bus ──────────────────────────────────────────────
+  viper-redis:
+    image: redis:7-alpine
+    container_name: viper-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
     volumes:
-      - ./findings:/app/findings
-      - ./reports:/app/reports
+      - viper-redis-data:/data
+    networks:
+      - viper-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Dashboard backend (Python HTTP + WS) ────────────────────────────
+  viper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: viper:6.0
+    container_name: viper-api
+    depends_on:
+      viper-redis:
+        condition: service_healthy
+    environment:
+      MODE: api
+      REDIS_URL: redis://viper-redis:6379/0
+      VIPER_BIND_HOST: 0.0.0.0
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - viper-data:/app/data
+      - viper-logs:/app/logs
+      - viper-reports:/app/reports
+      - viper-state:/app/state
+      - viper-findings:/app/findings
+      - viper-models:/app/models
       - ./scopes:/app/scopes
       - ./memory:/app/memory
-      - ./state:/app/state
-      - ./logs:/app/logs
-      - ./.env:/app/.env:ro
     ports:
-      - "8080:8080"
+      - "${API_PORT:-8080}:8080"
+    networks:
+      - viper-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # ── Dashboard frontend (Next.js standalone) ─────────────────────────
+  viper-webapp:
+    build:
+      context: ./dashboard/webapp
+      dockerfile: Dockerfile
+    image: viper-webapp:6.0
+    container_name: viper-webapp
+    depends_on:
+      - viper-api
     environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONUTF8=1
-    env_file:
-      - .env
+      NODE_ENV: production
+      VIPER_API_URL: http://viper-api:8080
+    ports:
+      - "${WEBAPP_PORT:-3000}:3000"
     networks:
       - viper-net
     restart: unless-stopped
-    # Override CMD for specific modes:
-    # docker compose run viper --full https://target.com
-    # docker compose run viper --dashboard
 
-  # Optional: Neo4j graph database (replaces SQLite graph)
-  neo4j:
+  # ── Swarm workers (horizontal scale) ────────────────────────────────
+  # Scale up:  docker compose up -d --scale viper-worker=10
+  viper-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: viper:6.0
+    command: ["worker"]
+    depends_on:
+      viper-redis:
+        condition: service_healthy
+    environment:
+      MODE: worker
+      REDIS_URL: redis://viper-redis:6379/0
+      PHASES: ${WORKER_PHASES:-recon,vuln,exploit,post}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - viper-data:/app/data
+      - viper-logs:/app/logs
+      - viper-findings:/app/findings
+      - viper-models:/app/models
+      - ./scopes:/app/scopes
+      - ./memory:/app/memory
+    networks:
+      - viper-net
+    # Workers don't run an HTTP server — disable the image's API healthcheck.
+    healthcheck:
+      disable: true
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+    restart: unless-stopped
+
+  # ── 24/7 daemon (optional, profile=daemon) ──────────────────────────
+  viper-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: viper:6.0
+    container_name: viper-daemon
+    depends_on:
+      viper-redis:
+        condition: service_healthy
+    environment:
+      MODE: daemon
+      REDIS_URL: redis://viper-redis:6379/0
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - viper-data:/app/data
+      - viper-logs:/app/logs
+      - viper-reports:/app/reports
+      - viper-findings:/app/findings
+      - ./scopes:/app/scopes
+      - ./memory:/app/memory
+    networks:
+      - viper-net
+    profiles: ["daemon"]
+    restart: unless-stopped
+
+  # ── Neo4j (optional, profile=graph) ─────────────────────────────────
+  viper-neo4j:
     image: neo4j:5-community
     container_name: viper-neo4j
     ports:
-      - "7474:7474"  # Browser
-      - "7687:7687"  # Bolt
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
     environment:
-      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-changeme}
-      - NEO4J_PLUGINS=["apoc"]
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_pagecache_size: 512m
     volumes:
-      - neo4j_data:/data
+      - viper-neo4j-data:/data
+      - viper-neo4j-logs:/logs
     networks:
       - viper-net
     profiles: ["graph"]
-
-  # Optional: GVM/OpenVAS network scanner
-  gvm:
-    image: greenbone/community-edition:stable
-    container_name: viper-gvm
-    ports:
-      - "9392:9392"
-    volumes:
-      - gvm_data:/data
-    networks:
-      - viper-net
-    profiles: ["gvm"]
     restart: unless-stopped
 
-  # Optional: Ollama for local LLM (free, no API key)
-  ollama:
+  # ── Postgres (optional, profile=postgres) ───────────────────────────
+  viper-postgres:
+    image: postgres:16-alpine
+    container_name: viper-postgres
+    environment:
+      POSTGRES_DB: viper
+      POSTGRES_USER: viper
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viper-change-me}
+    volumes:
+      - viper-postgres-data:/var/lib/postgresql/data
+    networks:
+      - viper-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viper"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles: ["postgres"]
+    restart: unless-stopped
+
+  # ── Ollama (optional, profile=ollama) ───────────────────────────────
+  viper-ollama:
     image: ollama/ollama:latest
     container_name: viper-ollama
     ports:
       - "11434:11434"
     volumes:
-      - ollama_data:/root/.ollama
+      - viper-ollama-data:/root/.ollama
     networks:
       - viper-net
     profiles: ["ollama"]
-    # Pull model on first run:
-    # docker exec viper-ollama ollama pull deepseek-coder-v2:16b
+    restart: unless-stopped
+    # Pull a model on first run:
+    #   docker exec viper-ollama ollama pull deepseek-coder-v2:16b
+
+  # ── GVM/OpenVAS (optional, profile=gvm) ─────────────────────────────
+  viper-gvm:
+    image: greenbone/community-edition:stable
+    container_name: viper-gvm
+    ports:
+      - "9392:9392"
+    volumes:
+      - viper-gvm-data:/data
+    networks:
+      - viper-net
+    profiles: ["gvm"]
+    restart: unless-stopped
 
 networks:
   viper-net:
     driver: bridge
+    name: viper-net
 
 volumes:
-  neo4j_data:
-  gvm_data:
-  ollama_data:
+  viper-redis-data:
+  viper-data:
+  viper-logs:
+  viper-reports:
+  viper-state:
+  viper-findings:
+  viper-models:
+  viper-neo4j-data:
+  viper-neo4j-logs:
+  viper-postgres-data:
+  viper-ollama-data:
+  viper-gvm-data:

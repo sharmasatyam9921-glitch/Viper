@@ -1,0 +1,15 @@
+node_modules
+.next
+.next/cache
+out
+dist
+.git
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+Thumbs.db
+README.md
+.vscode
+.idea

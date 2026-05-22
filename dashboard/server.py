@@ -4239,16 +4239,23 @@ def broadcast_event(event_type, data):
         pass
 
 
+def _resolve_bind_host(default: str = "127.0.0.1") -> str:
+    """Pick the bind host. Defaults to localhost (safe for laptop usage);
+    set ``VIPER_BIND_HOST=0.0.0.0`` inside Docker so the API is reachable
+    from the webapp container + host port mapping."""
+    return os.environ.get("VIPER_BIND_HOST", default).strip() or default
+
+
 def start_dashboard(port=8080):
     """Start the dashboard in a background daemon thread (for integration with viper.py)."""
-    server = ThreadedHTTPServer(("127.0.0.1", port), DashboardHandler)
+    server = ThreadedHTTPServer((_resolve_bind_host(), port), DashboardHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     return server
 
 
 def main():
-    port = 8080
+    port = int(os.environ.get("VIPER_PORT") or 8080)
     for flag in ("--dashboard-port", "--port"):
         if flag in sys.argv:
             idx = sys.argv.index(flag) + 1
@@ -4256,8 +4263,9 @@ def main():
                 port = int(sys.argv[idx])
                 break
 
-    server = ThreadedHTTPServer(("127.0.0.1", port), DashboardHandler)
-    print(f"VIPER 5.0 Dashboard running at http://localhost:{port}")
+    bind_host = _resolve_bind_host()
+    server = ThreadedHTTPServer((bind_host, port), DashboardHandler)
+    print(f"VIPER 5.0 Dashboard running at http://{bind_host}:{port}")
     print(f"  DB: {VIPER_DB} ({'exists' if VIPER_DB.exists() else 'not found'})")
     print(f"  EvoGraph: {EVOGRAPH_DB} ({'exists' if EVOGRAPH_DB.exists() else 'not found'})")
     print(f"  Static: {DASHBOARD_DIR}")

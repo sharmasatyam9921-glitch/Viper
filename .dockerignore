@@ -1,0 +1,58 @@
+# Keep VIPER images small + reproducible
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Local state — never bake into image
+data/
+logs/
+reports/
+state/
+findings/
+models/
+credentials/
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend build artifacts
+dashboard/webapp/node_modules/
+dashboard/webapp/.next/
+dashboard/webapp/out/
+dashboard/webapp/dist/
+
+# Static assets we don't need at runtime
+archive/
+labs/
+juice-shop/
+training/
+challenges/
+natas/
+docs/
+*.md
+!README.md
+
+# Source-control / OS noise
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Tests + dev tooling
+tests/
+.coverage
+htmlcov/
+
+# Wordlists baked into the image only if you want them at runtime
+# (left out by default — fetch at runtime via volume mount)
+wordlists/
