@@ -394,6 +394,71 @@ class TestSecrets:
         git = [r for r in result if r["type"] == "git_exposed"]
         assert git
 
+    def test_juiceshop_ftp_directory_listing(self):
+        # /ftp returns an HTML index linking downloadable files → info disclosure.
+        async def fake(method, url, **kw):
+            if url.endswith("/ftp"):
+                return HttpResp(
+                    200, {},
+                    '<html><body><a href="acquisitions.md">acquisitions.md</a>'
+                    '<a href="coupons_2013.md.bak">coupons</a></body></html>',
+                    url,
+                )
+            if url.endswith("/ftp/acquisitions.md"):
+                return HttpResp(200, {}, "# Acquisition of ...confidential...", url)
+            return None  # everything else: no response, no findings
+
+        async def go():
+            with patch("core.swarm_workers.vuln.secrets.fetch", side_effect=fake):
+                runner = get_worker_runner("vuln", "secrets")
+                return await runner(_agent("http://t/", technique="secrets"))
+
+        result = asyncio.run(go())
+        listing = [r for r in result if r["type"] == "directory_listing"]
+        doc = [r for r in result if r["type"] == "sensitive_file_exposed"]
+        assert listing, "expected a directory_listing finding for /ftp"
+        assert doc, "expected a confidential-doc finding for /ftp/acquisitions.md"
+        # Labels must be scorer-matchable to the info_disclosure class.
+        assert all("information_disclosure" in r["vuln_type"]
+                   for r in listing + doc)
+        assert listing[0]["severity"] == "high"
+
+    def test_juiceshop_encryptionkeys_listing(self):
+        async def fake(method, url, **kw):
+            if url.endswith("/encryptionkeys"):
+                return HttpResp(
+                    200, {},
+                    '<a href="jwt.pub">jwt.pub</a><a href="premium.key">premium</a>',
+                    url,
+                )
+            return None
+
+        async def go():
+            with patch("core.swarm_workers.vuln.secrets.fetch", side_effect=fake):
+                runner = get_worker_runner("vuln", "secrets")
+                return await runner(_agent("http://t/", technique="secrets"))
+
+        result = asyncio.run(go())
+        listing = [r for r in result if r["type"] == "directory_listing"]
+        assert listing
+        assert "/encryptionkeys" in listing[0]["url"]
+
+    def test_no_false_positive_on_plain_200(self):
+        # A 200 that is NOT a listing must not produce an exposure finding.
+        async def fake(method, url, **kw):
+            if url.endswith("/ftp") or url.endswith("/encryptionkeys"):
+                return HttpResp(200, {}, "<html><body>Not Found page</body></html>", url)
+            return None
+
+        async def go():
+            with patch("core.swarm_workers.vuln.secrets.fetch", side_effect=fake):
+                runner = get_worker_runner("vuln", "secrets")
+                return await runner(_agent("http://t/", technique="secrets"))
+
+        result = asyncio.run(go())
+        assert not [r for r in result if r["type"] in
+                    ("directory_listing", "sensitive_file_exposed")]
+
 
 # ---------------------------------------------------------------------------
 # graphql

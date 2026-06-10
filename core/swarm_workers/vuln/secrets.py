@@ -55,6 +55,8 @@ _EXPOSURE_PATHS = [
     "/swagger.json", "/swagger-ui.html", "/openapi.json",
     "/composer.json", "/package.json",
     "/wp-config.php.bak", "/config.php.bak", "/.htaccess.bak",
+    # Exposed-file / directory-listing surfaces (anonymous read).
+    "/ftp", "/ftp/acquisitions.md", "/encryptionkeys",
 ]
 
 
@@ -132,6 +134,42 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 "cwe": "CWE-200",
                 "confidence": 0.9,
                 "evidence": "/actuator/env returns property sources",
+            })
+        # Anonymous directory listing — a 200 HTML index linking downloadable
+        # files (Juice-Shop-class /ftp, /encryptionkeys). vuln_type carries the
+        # canonical "information_disclosure" label so triage/scoring classify it.
+        if path in ("/ftp", "/encryptionkeys"):
+            body_l = r.body.lower()
+            listing = "<a href=" in body_l and any(
+                ext in body_l for ext in (".md", ".pdf", ".bak", ".key", ".pub", ".json")
+            )
+            if r.status == 200 and listing:
+                out.append({
+                    "type": "directory_listing",
+                    "vuln_type": f"information_disclosure:listing:{path}",
+                    "title": f"Anonymous directory listing at {path}",
+                    "severity": "high",
+                    "url": full,
+                    "cwe": "CWE-548",
+                    "confidence": 0.9,
+                    "evidence": (
+                        f"{path} returns a 200 HTML index linking downloadable "
+                        "files without authentication"
+                    ),
+                })
+        if path == "/ftp/acquisitions.md" and r.status == 200 and "acquisition" in r.body.lower():
+            out.append({
+                "type": "sensitive_file_exposed",
+                "vuln_type": "information_disclosure:confidential_doc",
+                "title": "Confidential document served anonymously",
+                "severity": "high",
+                "url": full,
+                "cwe": "CWE-200",
+                "confidence": 0.9,
+                "evidence": (
+                    "/ftp/acquisitions.md returns a 200 body describing "
+                    "confidential acquisitions without authentication"
+                ),
             })
         return out
 
