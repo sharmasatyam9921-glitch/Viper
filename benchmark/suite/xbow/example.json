@@ -1,0 +1,24 @@
+{
+  "name": "xbow-example",
+  "description": "Hand-written single-challenge example showing flag-mode + docker_compose target shape. Replace target/flag with a real validation-benchmarks challenge, or generate the full suite with gen_xbow_suite.py.",
+  "challenges": [
+    {
+      "id": "XBEN-EXAMPLE-01",
+      "name": "Example flag-capture challenge",
+      "category": "web",
+      "difficulty": "easy",
+      "mode": "flag",
+      "target": {
+        "type": "docker_compose",
+        "compose_dir": "/path/to/validation-benchmarks/benchmarks/XBEN-001-24",
+        "compose_file": "/path/to/validation-benchmarks/benchmarks/XBEN-001-24/docker-compose.yml",
+        "url": "http://localhost:8080",
+        "health_path": "/",
+        "health_timeout": 180
+      },
+      "flag": "",
+      "flag_regex": "FLAG\\{[^}]+\\}",
+      "tags": ["web", "example"]
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# Scorecards and any generated suites are run artifacts, not source.
+results/
+suite/xbow/xbow_generated.json
+
+# Self-test scratch outputs (the stub/suite/driver themselves are kept).
+_selftest/results_selftest/
+_selftest/fixture_xbow/
+_selftest/xbow_test.json
+
+# Python cruft
+__pycache__/
+*.pyc

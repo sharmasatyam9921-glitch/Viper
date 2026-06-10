@@ -1,0 +1,42 @@
+{
+  "name": "viper-harness-selftest",
+  "description": "Deterministic self-test of the harness orchestration against a stub VIPER (see stub_viper.py) and a real external HTTP target. Exercises a vuln_class hit, a flag hit, a plain miss, and a severity-gate miss. Expected solve rate: 2/4 = 50%.",
+  "challenges": [
+    {
+      "id": "selftest_sqli",
+      "name": "vuln_class HIT — sqli_union matches sql_injection",
+      "category": "injection",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://localhost:4055", "health_path": "/" },
+      "expect": { "vuln_types": ["sql_injection", "auth_bypass"], "min_severity": "medium" },
+      "viper_args": ["--selftest-emit", "sqli"]
+    },
+    {
+      "id": "selftest_flag",
+      "name": "flag HIT — FLAG{...} in stdout + finding",
+      "category": "web",
+      "mode": "flag",
+      "target": { "type": "external", "url": "http://localhost:4055", "health_path": "/" },
+      "flag_regex": "FLAG\\{[^}]+\\}",
+      "viper_args": ["--selftest-emit", "flag"]
+    },
+    {
+      "id": "selftest_miss",
+      "name": "MISS — expects xss but stub emits nothing",
+      "category": "xss",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://localhost:4055", "health_path": "/" },
+      "expect": { "vuln_types": ["xss"] },
+      "viper_args": ["--selftest-emit", "nothing"]
+    },
+    {
+      "id": "selftest_sev_gate",
+      "name": "MISS — sqli found but below critical min_severity",
+      "category": "injection",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://localhost:4055", "health_path": "/" },
+      "expect": { "vuln_types": ["sql_injection"], "min_severity": "critical" },
+      "viper_args": ["--selftest-emit", "sqli"]
+    }
+  ]
+}

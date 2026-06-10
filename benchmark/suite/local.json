@@ -1,0 +1,88 @@
+{
+  "name": "viper-local-juiceshop",
+  "description": "Self-driving local suite. Each challenge boots its own OWASP Juice Shop container (bkimminich/juice-shop) on host port 4000 -> container 3000, runs a full VIPER hunt, and grades by vuln class reported. Port 4000 is used to avoid colliding with the dashboard webapp on :3000. These are graded (vuln_class) challenges, not flag captures — use the xbow suite for an XBOW-comparable flag solve rate.",
+  "notes": "Juice Shop is slow to boot (~30-60s); each challenge restarts a fresh container for isolation. To run all challenges against ONE long-lived container instead, start it yourself (docker run -d -p 4000:3000 bkimminich/juice-shop) and change each target.type to \"external\".",
+  "challenges": [
+    {
+      "id": "juice_login_sqli",
+      "name": "Juice Shop — login SQL injection / auth bypass",
+      "category": "injection",
+      "difficulty": "medium",
+      "mode": "vuln_class",
+      "target": {
+        "type": "docker_image",
+        "image": "bkimminich/juice-shop",
+        "container_port": 3000,
+        "host_port": 4000,
+        "url": "http://localhost:4000",
+        "health_path": "/",
+        "health_timeout": 180
+      },
+      "expect": {
+        "vuln_types": ["sql_injection", "auth_bypass"],
+        "min_severity": "medium"
+      },
+      "tags": ["owasp-a03", "sqli", "auth"]
+    },
+    {
+      "id": "juice_search_xss",
+      "name": "Juice Shop — reflected XSS in product search",
+      "category": "xss",
+      "difficulty": "easy",
+      "mode": "vuln_class",
+      "target": {
+        "type": "docker_image",
+        "image": "bkimminich/juice-shop",
+        "container_port": 3000,
+        "host_port": 4000,
+        "url": "http://localhost:4000",
+        "health_path": "/",
+        "health_timeout": 180
+      },
+      "expect": {
+        "vuln_types": ["xss"]
+      },
+      "tags": ["owasp-a03", "xss"]
+    },
+    {
+      "id": "juice_access_control",
+      "name": "Juice Shop — broken access control / IDOR",
+      "category": "access_control",
+      "difficulty": "medium",
+      "mode": "vuln_class",
+      "target": {
+        "type": "docker_image",
+        "image": "bkimminich/juice-shop",
+        "container_port": 3000,
+        "host_port": 4000,
+        "url": "http://localhost:4000",
+        "health_path": "/",
+        "health_timeout": 180
+      },
+      "expect": {
+        "vuln_types": ["idor", "access_control"]
+      },
+      "tags": ["owasp-a01", "idor"]
+    },
+    {
+      "id": "juice_info_disclosure",
+      "name": "Juice Shop — sensitive data / info disclosure",
+      "category": "info_disclosure",
+      "difficulty": "easy",
+      "mode": "vuln_class",
+      "target": {
+        "type": "docker_image",
+        "image": "bkimminich/juice-shop",
+        "container_port": 3000,
+        "host_port": 4000,
+        "url": "http://localhost:4000",
+        "health_path": "/",
+        "health_timeout": 180
+      },
+      "expect": {
+        "vuln_types": ["info_disclosure"]
+      },
+      "tags": ["owasp-a02", "exposure"]
+    }
+  ]
+}
