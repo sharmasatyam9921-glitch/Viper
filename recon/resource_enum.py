@@ -34,6 +34,8 @@ from urllib.parse import urljoin, urlparse, parse_qs
 
 import aiohttp
 
+from core.secret_scanner import is_likely_real_secret
+
 logger = logging.getLogger("viper.resource_enum")
 
 HACKAGENT_DIR = Path(__file__).parent.parent
@@ -326,8 +328,9 @@ def _extract_from_js(content: str, source_url: str, base_url: str) -> Tuple[Set[
     for secret_type, pattern in _SECRET_PATTERNS:
         for match in re.finditer(pattern, content):
             value = match.group(1) if match.lastindex else match.group(0)
-            # Skip common false positives
-            if len(value) < 8 or value in ("password", "username", "changeme"):
+            # Entropy + placeholder + code-fragment FP filter (shared). Rejects
+            # dictionary words ("password") and greedy-regex catches of JS code.
+            if not is_likely_real_secret(value, secret_type=secret_type):
                 continue
             secrets.append({
                 "type": secret_type,

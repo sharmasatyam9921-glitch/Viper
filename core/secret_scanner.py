@@ -21,6 +21,63 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("viper.secrets")
 
+
+# Words/placeholders that regularly match secret regexes but are never secrets.
+_SECRET_FP_WORDS = frozenset({
+    "password", "passwd", "username", "user", "token", "secret", "apikey",
+    "api_key", "key", "auth", "bearer", "changeme", "example", "test",
+    "placeholder", "your_api_key", "yourtoken", "none", "null", "undefined",
+    "true", "false", "function", "return", "string", "number", "object",
+})
+# Characters that appear in code/markup but not in real credential tokens.
+# A captured "secret" containing these is almost always a greedy-regex catch of
+# surrounding JS/HTML, not an actual key.
+_SECRET_CODE_CHARS = set("{}()<>;\\` \t\n\"'")
+# Allowed charset for a real token (base64 / hex / jwt / url-safe).
+_SECRET_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-.:/+=~]{8,}$")
+
+
+def _shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    counts: Dict[str, int] = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def is_likely_real_secret(value: str, *, secret_type: str = "") -> bool:
+    """Heuristic false-positive filter for regex-matched 'secrets'.
+
+    Returns True only when `value` plausibly holds a real credential. Catches
+    the two dominant FP classes in minified JS: dictionary words / placeholders
+    ("password") and greedy-regex catches of surrounding code
+    (")?{consumed:t}:null}function ...").
+    """
+    if value is None:
+        return False
+    v = value.strip().strip("\"'").strip()
+    if len(v) < 8:
+        return False
+    if v.lower() in _SECRET_FP_WORDS:
+        return False
+    # Contains code/markup punctuation or whitespace → not a token.
+    if any(ch in _SECRET_CODE_CHARS for ch in v):
+        return False
+    # Must look like a contiguous credential token.
+    if not _SECRET_TOKEN_RE.match(v):
+        return False
+    # Low entropy → a word/identifier, not a high-randomness key. A genuine
+    # secret with mixed classes clears ~2.6 bits/char easily.
+    if _shannon_entropy(v) < 2.6:
+        return False
+    # Pure lowercase-alpha identifiers (no digits/specials) are variable names.
+    if v.isalpha() and v.islower() and len(v) < 20:
+        return False
+    return True
+
+
 # Files likely to contain secrets
 SENSITIVE_FILES = [
     ".env", ".env.local", ".env.production", ".env.staging",

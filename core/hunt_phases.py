@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from .secret_scanner import is_likely_real_secret
+
 # ---------------------------------------------------------------------------
 # Type aliases for callables passed in from ViperCore
 # ---------------------------------------------------------------------------
@@ -282,6 +284,11 @@ async def phase_surface(
         for secret in surface_result.js_secrets:
             src_url = secret.get("source", "")
             pattern = secret.get("pattern", "")
+            value = secret.get("value", "")
+            # Drop regex false positives (dictionary words / captured JS code)
+            # before they become high-severity findings.
+            if not is_likely_real_secret(value, secret_type=secret.get("type", "")):
+                continue
             key = (src_url, pattern)
             if key in seen_secrets:
                 continue
@@ -308,7 +315,9 @@ async def phase_surface(
                             target_id=tid,
                             vuln_type="js_secret",
                             severity="high",
-                            title=f"Potential secret in JS: {secret.get('pattern', 'unknown')[:50]}",
+                            title=(f"Secret in JS ({secret.get('type', 'generic')}): "
+                                   f"{value[:6]}…{value[-4:]}" if len(value) > 12
+                                   else f"Secret in JS ({secret.get('type', 'generic')})"),
                             url=src_url,
                             payload=secret.get("value", "")[:200],
                             evidence=json.dumps(secret),
