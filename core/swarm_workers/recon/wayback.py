@@ -6,6 +6,7 @@ finding forgotten endpoints, parameters, and exposed admin paths.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import urllib.parse
@@ -26,6 +27,20 @@ def _domain(target: str) -> str:
     if "://" in t:
         t = urlparse(t).netloc
     return t.split(":", 1)[0].rstrip(".")
+
+
+def _is_public_host(host: str) -> bool:
+    """Public web archives index the internet, so querying them for a
+    loopback/private/intranet target returns only internet-wide noise
+    (everyone's archived '127.0.0.1' URLs). Treat those as non-public."""
+    h = host.strip().lower()
+    if h in ("", "localhost"):
+        return False
+    try:
+        return ipaddress.ip_address(h).is_global  # private/loopback -> False
+    except ValueError:
+        # Hostname, not an IP. Single-label or *.local/.internal = intranet.
+        return "." in h and not h.endswith((".local", ".internal", ".localhost"))
 
 
 async def _wayback_urls(domain: str, *, limit: int = 500, timeout: float = 15.0) -> list[str]:
@@ -62,24 +77,31 @@ _INTERESTING = (
 
 async def run(agent: SwarmAgent) -> List[dict]:
     domain = _domain(agent.target)
-    if not domain:
+    if not domain or not _is_public_host(domain):
+        # Loopback/private/intranet target → the archive only has noise.
         return []
 
     urls = await _wayback_urls(
         domain, limit=500, timeout=min(agent.timeout_s, 20.0),
     )
 
+    # Only surface the genuinely interesting historical paths (forgotten admin
+    # / api / .git / backup endpoints) as findings. Emitting all 500 raw URLs
+    # floods the findings stream AND turns each into a vuln-probe asset, which
+    # starves the actual app-logic testing. Cap to keep the signal tight.
     findings: list[dict] = []
-    for u in urls[:500]:
-        # Highlight obviously interesting paths with higher severity
-        is_interesting = any(seg in u.lower() for seg in _INTERESTING)
+    for u in urls:
+        if not any(seg in u.lower() for seg in _INTERESTING):
+            continue
         findings.append({
             "type": "historical_url",
             "title": u,
             "url": u,
-            "severity": "low" if is_interesting else "info",
-            "evidence": "wayback machine archive",
+            "severity": "low",
+            "evidence": "wayback machine archive (interesting path)",
         })
+        if len(findings) >= 100:
+            break
     return findings
 
 

@@ -370,9 +370,12 @@ class TestWaybackWorker:
 
         results = asyncio.run(go())
         by_url = {r["url"]: r for r in results}
+        # Interesting paths are surfaced (low severity)...
         assert by_url["https://example.com/admin/login"]["severity"] == "low"
         assert by_url["https://example.com/.git/HEAD"]["severity"] == "low"
-        assert by_url["https://example.com/random/page"]["severity"] == "info"
+        # ...plain bulk URLs are filtered out entirely (no flooding).
+        assert "https://example.com/random/page" not in by_url
+        assert "https://example.com/" not in by_url
 
     def test_empty_when_archive_empty(self):
         async def go():
