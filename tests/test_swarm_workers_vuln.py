@@ -443,6 +443,27 @@ class TestSecrets:
         assert listing
         assert "/encryptionkeys" in listing[0]["url"]
 
+    def test_exposure_paths_are_root_relative(self):
+        # Worker dispatched against a sub-path asset must still test /ftp at the
+        # site ORIGIN, not append it to the asset path (/styles.css/ftp).
+        seen = []
+
+        async def fake(method, url, **kw):
+            seen.append(url)
+            if url == "http://t/ftp":
+                return HttpResp(200, {}, '<a href="acquisitions.md">x</a>', url)
+            return None
+
+        async def go():
+            with patch("core.swarm_workers.vuln.secrets.fetch", side_effect=fake):
+                runner = get_worker_runner("vuln", "secrets")
+                return await runner(_agent("http://t/styles.css", technique="secrets"))
+
+        result = asyncio.run(go())
+        assert "http://t/ftp" in seen
+        assert "http://t/styles.css/ftp" not in seen
+        assert any(r["type"] == "directory_listing" for r in result)
+
     def test_no_false_positive_on_plain_200(self):
         # A 200 that is NOT a listing must not produce an exposure finding.
         async def fake(method, url, **kw):

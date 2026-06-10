@@ -16,6 +16,7 @@ import asyncio
 import logging
 import re
 from typing import List
+from urllib.parse import urlsplit
 
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
@@ -94,9 +95,15 @@ async def run(agent: SwarmAgent) -> List[dict]:
     if resp:
         findings.extend(_scan_body(resp.body, url))
 
-    # 2. Common exposure paths — in parallel
+    # 2. Common exposure paths — in parallel. These are ROOT-relative: the
+    # worker may be dispatched against a discovered endpoint asset (e.g.
+    # /styles.css), but /.env, /.git, /ftp etc. live at the site origin, not
+    # under the asset's path. Derive the origin so we test scheme://host/<path>.
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}" if parts.netloc else url.rstrip("/")
+
     async def _check(path: str) -> List[dict]:
-        full = url.rstrip("/") + path
+        full = origin + path
         r = await fetch("GET", full, timeout=timeout, follow_redirects=False)
         if not r or not r.ok or not r.body:
             return []
