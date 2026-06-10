@@ -285,6 +285,7 @@ class Web3Auditor:
         Returns:
             List of finding dicts.
         """
+        import asyncio
         import urllib.parse
         import urllib.request
         import json as _json
@@ -325,8 +326,14 @@ class Web3Auditor:
 
         try:
             req = urllib.request.Request(api_url, headers={"User-Agent": "VIPER/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = _json.loads(resp.read().decode())
+
+            def _fetch_source() -> str:
+                # Blocking urlopen+read run off the event loop so a slow
+                # explorer API can't stall the whole async audit.
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return resp.read().decode()
+
+            data = _json.loads(await asyncio.to_thread(_fetch_source))
 
             if data.get("status") != "1" or not data.get("result"):
                 logger.error(f"Explorer API error: {data.get('message', 'unknown')}")

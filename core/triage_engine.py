@@ -8,6 +8,7 @@ prioritized remediation drafts with severity tiers.
 Inspired by open-source pentesting frameworks.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -108,9 +109,10 @@ class TriageEngine:
         4. Prioritize into severity tiers (Emergency, Critical, High, Medium, Low)
         5. Return RemediationDraft list
         """
-        # Phase 1: Static collection
+        # Phase 1: Static collection. run_triage_queries does blocking graph/DB
+        # work, so run it off the event loop to keep the async pipeline cooperative.
         logger.info("Phase 1: Running triage queries...")
-        raw_data = run_triage_queries(self.graph)
+        raw_data = await asyncio.to_thread(run_triage_queries, self.graph)
         total_records = sum(r["count"] for r in raw_data)
         logger.info(f"Collected {total_records} records from {len(raw_data)} queries")
 

@@ -157,6 +157,12 @@ class ModelRouter:
         self.api_base = os.environ.get("VIPER_API_BASE")
         self.max_tokens = int(os.environ.get("VIPER_MAX_TOKENS", "1024"))
         self.temperature = float(os.environ.get("VIPER_TEMPERATURE", "0.3"))
+        # Hard ceiling across the whole provider fallback chain (each provider
+        # call also has its own transport timeout). Generous default so it only
+        # fires on a pathological stall; on hit, complete() returns None.
+        self._overall_timeout_s = float(
+            os.environ.get("VIPER_LLM_TIMEOUT_S", "300") or 300
+        )
         max_rpm = int(os.environ.get("VIPER_RATE_LIMIT", "30"))
 
         self._rate_limiters: Dict[str, _RateLimiter] = {}
@@ -406,6 +412,34 @@ class ModelRouter:
             return None
 
     async def complete(
+        self,
+        prompt: str,
+        system: str = "",
+        model: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        json_mode: bool = False,
+    ) -> Optional[ModelResponse]:
+        """Bounded entry point — wraps the provider fallback chain in a single
+        hard timeout (``VIPER_LLM_TIMEOUT_S``, default 300s) so a pathological
+        stall can't hang a caller forever. On timeout, returns None — the same
+        contract callers already handle for "all providers failed"."""
+        try:
+            return await asyncio.wait_for(
+                self._complete_chain(
+                    prompt, system=system, model=model, max_tokens=max_tokens,
+                    temperature=temperature, json_mode=json_mode,
+                ),
+                timeout=self._overall_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "LLM request exceeded overall timeout (%.0fs) — returning None",
+                self._overall_timeout_s,
+            )
+            return None
+
+    async def _complete_chain(
         self,
         prompt: str,
         system: str = "",
