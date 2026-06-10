@@ -2,7 +2,7 @@
 """
 VIPER 4.0 - 7-Phase Automated Recon Pipeline
 ==============================================
-Inspired by RedAmon's recon/main.py architecture. Orchestrates:
+Multi-tool parallel recon pipeline architecture. Orchestrates:
 
   Phase 1: Domain Discovery    - subdomains (subfinder/amass/crt.sh), DNS resolution
   Phase 2: Passive Intelligence- URLScan.io + WHOIS + Shodan InternetDB (no target contact)
@@ -234,8 +234,28 @@ def _emit(phase: int, step: str, progress: float = 0.0, detail: str = ""):
 # External-tool helpers — graceful degradation
 # ---------------------------------------------------------------------------
 
+import os as _os
+
+# ProjectDiscovery / Go security tools (httpx, nuclei, naabu, katana, ...)
+# install to ~/go/bin. A pip package can shadow the real binary on PATH — most
+# notably the `httpx` python library's CLI, which doesn't understand httpx's
+# flags and silently produces no output (manifesting as "0 alive hosts"). So
+# resolve to the REAL tool: explicit <NAME>_PATH env → ~/go/bin → PATH.
+_GOBIN = Path(_os.environ.get("GOBIN") or (Path.home() / "go" / "bin"))
+
+
+def _resolve_tool(name: str) -> Optional[str]:
+    env = _os.environ.get(f"{name.upper()}_PATH")
+    if env and Path(env).exists():
+        return env
+    for cand in (_GOBIN / name, _GOBIN / f"{name}.exe"):
+        if cand.exists():
+            return str(cand)
+    return shutil.which(name)
+
+
 def _tool_available(name: str) -> bool:
-    return shutil.which(name) is not None
+    return _resolve_tool(name) is not None
 
 
 async def _run_tool(cmd: List[str], timeout: int = 300) -> Optional[str]:
@@ -248,9 +268,11 @@ async def _run_tool(cmd: List[str], timeout: int = 300) -> Optional[str]:
     saturated when multiple background pipelines run concurrently.
     """
     tool = cmd[0]
-    if not _tool_available(tool):
+    resolved = _resolve_tool(tool)
+    if resolved is None:
         logger.warning("Tool '%s' not found on PATH -- skipping", tool)
         return None
+    cmd = [resolved] + list(cmd[1:])  # use the real binary, not a pip shim
 
     import subprocess
     import concurrent.futures
@@ -398,7 +420,7 @@ class ReconPipeline:
 
     def _check_roe_time_window(self) -> tuple:
         """
-        Pre-phase check (redamon-style): block recon if outside the
+        Pre-phase check: block recon if outside the
         approved time window. Returns ``(allowed, reason)``.
 
         Honors two settings keys:
@@ -455,10 +477,15 @@ class ReconPipeline:
                 if hosts:
                     return True, [cleaned], hosts[0]
 
-            # Bare IPv4/IPv6?
+            # Bare IPv4/IPv6, optionally with a port (host:port / [ipv6]:port).
+            host_only = cleaned
+            if cleaned.startswith("["):              # [::1]:4000
+                host_only = cleaned[1:].split("]", 1)[0]
+            elif cleaned.count(":") == 1:            # 127.0.0.1:4000
+                host_only = cleaned.split(":", 1)[0]
             try:
-                ipaddress.ip_address(cleaned)
-                return True, [cleaned], cleaned
+                ipaddress.ip_address(host_only)
+                return True, [host_only], host_only
             except ValueError:
                 pass
         except ImportError:
@@ -1166,12 +1193,24 @@ class ReconPipeline:
         tech_map: Dict[str, List[Dict]] = {}
 
         # Build probe targets
-        HTTP_PORTS = {80, 443, 8080, 8443, 8000, 3000, 5000, 9090}
+        HTTP_PORTS = {80, 443, 8080, 8443, 8000, 8888, 3000, 4000, 4200,
+                      5000, 9000, 9090}
         probe_targets: Set[str] = set(subdomains)
         for host in subdomains:
             for port in open_ports.get(host, []):
                 if port in HTTP_PORTS:
                     probe_targets.add(f"{host}:{port}")
+
+        # Always probe the EXACT target the operator pointed us at, including a
+        # non-standard explicit port (e.g. http://host:4000). Recon's host
+        # extraction drops the port and the HTTP_PORTS allowlist can omit it, so
+        # without this seed a target on a non-standard port is never probed and
+        # the whole hunt sees "0 alive".
+        orig_url = ctx.get("url", "")
+        if orig_url:
+            _pu = urlparse(orig_url if "://" in orig_url else f"http://{orig_url}")
+            if _pu.hostname and _pu.port:
+                probe_targets.add(f"{_pu.hostname}:{_pu.port}")
 
         # 3a. httpx
         if _tool_available("httpx"):
@@ -1301,7 +1340,7 @@ class ReconPipeline:
         alive_hosts = ctx.get("alive_hosts", [])
         domain = ctx["domain"]
 
-        # ── Skip-on-empty guard (redamon GROUP-5 conditional pattern) ─
+        # ── Skip-on-empty guard (conditional skip pattern) ─
         if not alive_hosts:
             if self.settings.get("skip_active_on_empty", False):
                 _emit(5, "SKIPPED: no live hosts from Phase 4", 1.0)
@@ -1557,7 +1596,7 @@ class ReconPipeline:
         alive_hosts = ctx.get("alive_hosts", [])
         domain = ctx["domain"]
 
-        # ── Skip-on-empty guard (redamon GROUP-5 conditional pattern) ─
+        # ── Skip-on-empty guard (conditional skip pattern) ─
         if not alive_hosts:
             if self.settings.get("skip_active_on_empty", False):
                 _emit(6, "SKIPPED: no live hosts from Phase 4", 1.0)

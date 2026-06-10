@@ -14,7 +14,7 @@
         "image": "bkimminich/juice-shop",
         "container_port": 3000,
         "host_port": 4000,
-        "url": "http://localhost:4000",
+        "url": "http://127.0.0.1:4000",
         "health_path": "/",
         "health_timeout": 180
       },
@@ -35,7 +35,7 @@
         "image": "bkimminich/juice-shop",
         "container_port": 3000,
         "host_port": 4000,
-        "url": "http://localhost:4000",
+        "url": "http://127.0.0.1:4000",
         "health_path": "/",
         "health_timeout": 180
       },
@@ -55,7 +55,7 @@
         "image": "bkimminich/juice-shop",
         "container_port": 3000,
         "host_port": 4000,
-        "url": "http://localhost:4000",
+        "url": "http://127.0.0.1:4000",
         "health_path": "/",
         "health_timeout": 180
       },
@@ -75,7 +75,7 @@
         "image": "bkimminich/juice-shop",
         "container_port": 3000,
         "host_port": 4000,
-        "url": "http://localhost:4000",
+        "url": "http://127.0.0.1:4000",
         "health_path": "/",
         "health_timeout": 180
       },
