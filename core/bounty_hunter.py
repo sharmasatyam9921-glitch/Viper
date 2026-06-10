@@ -15,6 +15,8 @@ Features:
 """
 
 import json
+import logging
+import os
 import urllib.request
 import ssl
 from dataclasses import dataclass, field
@@ -22,6 +24,11 @@ from typing import List, Dict, Optional
 from datetime import datetime
 from pathlib import Path
 from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+# Repo root derived from this file's location (core/bounty_hunter.py -> repo root)
+_BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class Platform(Enum):
@@ -160,7 +167,7 @@ class ProgramDatabase:
     ]
     
     def __init__(self, programs_dir: Path = None):
-        self.programs_dir = programs_dir or Path("skills/hackagent/programs")
+        self.programs_dir = programs_dir or (_BASE_DIR / "programs")
         self.programs_dir.mkdir(parents=True, exist_ok=True)
         self.programs: Dict[str, BountyProgram] = {}
         self._load_featured()
@@ -180,7 +187,8 @@ class ProgramDatabase:
         prog_dir = self.programs_dir / program.handle
         prog_dir.mkdir(exist_ok=True)
         info_file = prog_dir / "program.json"
-        with open(info_file, 'w') as f:
+        tmp_file = info_file.with_suffix(".json.tmp")
+        with open(tmp_file, 'w') as f:
             json.dump({
                 "name": program.name,
                 "platform": program.platform.value,
@@ -191,6 +199,7 @@ class ProgramDatabase:
                 "allows_automation": program.allows_automation,
                 "notes": program.notes
             }, f, indent=2)
+        os.replace(tmp_file, info_file)
     
     def get_program(self, handle: str) -> Optional[BountyProgram]:
         """Get program by handle."""
@@ -219,34 +228,44 @@ class SubmissionTracker:
     """Track bug bounty submissions and earnings."""
     
     def __init__(self, data_file: Path = None):
-        self.data_file = data_file or Path("skills/hackagent/submissions.json")
+        self.data_file = data_file or (_BASE_DIR / "submissions.json")
         self.submissions: List[Submission] = []
         self._load()
     
     def _load(self):
         """Load submissions from file."""
-        if self.data_file.exists():
+        if not self.data_file.exists():
+            return
+        try:
             with open(self.data_file) as f:
                 data = json.load(f)
-                for s in data.get("submissions", []):
-                    self.submissions.append(Submission(
-                        program=s["program"],
-                        title=s["title"],
-                        severity=s["severity"],
-                        submitted_at=datetime.fromisoformat(s["submitted_at"]),
-                        status=s.get("status", "pending"),
-                        bounty=s.get("bounty", 0),
-                        url=s.get("url", ""),
-                        notes=s.get("notes", "")
-                    ))
+        except (OSError, ValueError) as e:
+            logger.warning("Failed to read submissions from %s: %s", self.data_file, e)
+            return
+        for s in data.get("submissions", []):
+            try:
+                self.submissions.append(Submission(
+                    program=s["program"],
+                    title=s["title"],
+                    severity=s["severity"],
+                    submitted_at=datetime.fromisoformat(s["submitted_at"]),
+                    status=s.get("status", "pending"),
+                    bounty=s.get("bounty", 0),
+                    url=s.get("url", ""),
+                    notes=s.get("notes", "")
+                ))
+            except (KeyError, ValueError) as e:
+                logger.warning("Skipping malformed submission record: %s", e)
     
     def _save(self):
-        """Save submissions to file."""
-        with open(self.data_file, 'w') as f:
+        """Save submissions to file (atomic write to avoid corruption on crash)."""
+        tmp_file = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
+        with open(tmp_file, 'w') as f:
             json.dump({
                 "submissions": [s.to_dict() for s in self.submissions],
                 "stats": self.get_stats()
             }, f, indent=2)
+        os.replace(tmp_file, self.data_file)
     
     def add_submission(self, submission: Submission):
         """Add a new submission."""
@@ -557,7 +576,7 @@ class BountyHunter:
             note=f"Generic estimate for {severity} severity — actual varies by program",
         )
 
-    def list_targets(self) -> List[str]:
+    def list_targets(self) -> str:
         """List available targets with scope."""
         lines = ["## Available Bug Bounty Targets\n"]
         for prog in self.programs.programs.values():

@@ -184,7 +184,7 @@ class CloudAgent:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             container_status = stdout.decode().strip()
 
             if container_status == "exited":

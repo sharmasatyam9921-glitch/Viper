@@ -289,7 +289,8 @@ def build_cpe(tech: str, version: str = None) -> Optional[str]:
 
 
 def lookup_cves(cpe_or_tech: str, version: str = None,
-                max_results: int = 20, api_key: str = None) -> List[dict]:
+                max_results: int = 20, api_key: str = None,
+                timeout: float = 10.0) -> List[dict]:
     """
     Look up CVEs from NVD for a given CPE string or technology+version.
 
@@ -339,7 +340,7 @@ def lookup_cves(cpe_or_tech: str, version: str = None,
 
     try:
         req = Request(url, headers=headers)
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
 
         vulnerabilities = data.get("vulnerabilities", [])
@@ -361,7 +362,7 @@ def lookup_cves(cpe_or_tech: str, version: str = None,
 
 
 def lookup_vulners(query: str, api_key: str = None,
-                   max_results: int = 20) -> List[dict]:
+                   max_results: int = 20, timeout: float = 10.0) -> List[dict]:
     """
     Look up vulnerabilities from Vulners API.
 
@@ -403,7 +404,7 @@ def lookup_vulners(query: str, api_key: str = None,
                 "User-Agent": "VIPER/4.0",
             },
         )
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
 
         if data.get("result") != "OK":
@@ -528,7 +529,8 @@ VULNERS_LUCENE_URL = "https://vulners.com/api/v3/search/lucene/"
 
 
 async def lookup_cves_vulners(query: str, api_key: str = None,
-                               max_results: int = 20) -> List[dict]:
+                               max_results: int = 20,
+                               timeout: float = 10.0) -> List[dict]:
     """
     Look up CVEs via the Vulners Lucene search API (async, stdlib-only).
 
@@ -565,7 +567,7 @@ async def lookup_cves_vulners(query: str, api_key: str = None,
         url = f"{VULNERS_LUCENE_URL}?{params}"
         try:
             req = Request(url, headers={"User-Agent": "VIPER/4.0"})
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except HTTPError as e:
             if e.code == 429:

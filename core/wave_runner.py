@@ -532,8 +532,8 @@ class ToolWaveExecutor:
                     "num_actions": len(wave),
                     "tools": [a.get("tool", a.get("tool_name", "?")) for a in wave],
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("wave_start progress callback failed: %s", exc)
 
         async def _exec_one(action: Dict, action_index: int) -> ToolWaveResult:
             tool_name = action.get("tool", action.get("tool_name", "unknown"))
@@ -594,13 +594,13 @@ class ToolWaveExecutor:
                         "success": result.success,
                         "elapsed": result.elapsed_seconds,
                     })
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("tool_complete progress callback failed: %s", exc)
 
             return result
 
         # Execute all actions in parallel with per-wave timeout
-        tasks = [_exec_one(action, i) for i, action in enumerate(wave)]
+        tasks = [asyncio.create_task(_exec_one(action, i)) for i, action in enumerate(wave)]
 
         try:
             results = await asyncio.wait_for(
@@ -612,7 +612,7 @@ class ToolWaveExecutor:
             # Collect whatever completed
             results = []
             for t in tasks:
-                if t.done():
+                if t.done() and not t.cancelled():
                     results.append(t.result())
                 else:
                     t.cancel()
@@ -651,8 +651,8 @@ class ToolWaveExecutor:
                     "failed": fail,
                     "total": len(final_results),
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("wave_complete progress callback failed: %s", exc)
 
         logger.info(f"[Wave {wave_index}] Complete: {ok} ok, {fail} failed out of {len(final_results)}")
         return final_results

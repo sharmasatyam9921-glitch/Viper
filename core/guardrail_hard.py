@@ -133,13 +133,21 @@ _BLOCKED_DOMAINS: frozenset = frozenset({
 _SAFE_SUFFIXES = (".local", ".test", ".lab", ".internal", ".home", ".lan", ".example", ".localhost")
 
 _SAFE_DOMAINS: frozenset = frozenset({
+    # Vuln-web sandboxes (IBM, Acunetix, etc. — all explicitly authorized
+    # for testing per their public T&Cs)
     "vulnweb.com", "testphp.vulnweb.com", "testasp.vulnweb.com",
     "testhtml5.vulnweb.com", "rest.vulnweb.com",
+    "demo.testfire.net", "testfire.net",                # IBM AltoroMutual
+    "demo.testfire.net.well-known", "altoromutual.com",
+    "zero.webappsecurity.com", "crackme.cenzic.com",
+    "ghost.deister.es", "hack.me",
+    # CTF / lab platforms
     "hackthebox.com", "hackthebox.eu", "app.hackthebox.com",
     "tryhackme.com", "tryhackme.io",
     "dvwa.co.uk", "pentesterlab.com", "portswigger.net",
     "overthewire.org", "root-me.org", "ctftime.org",
-    "vulnhub.com", "exploit.education",
+    "vulnhub.com", "exploit.education", "hack.me",
+    "picoctf.org", "picoctf.com",
 })
 
 _SAFE_HOSTNAME_KEYWORDS = (

@@ -183,3 +183,40 @@ class TestAgentBusPriority:
         assert "topic" in d
         assert "priority" in d
         assert d["agent_id"] == "test-agent"
+
+
+class TestLateTopicDispatch:
+    """A topic first seen AFTER start() must still get a dispatcher,
+    otherwise its messages queue forever and eventually drop."""
+
+    async def test_subscribe_after_start_delivers(self, agent_bus):
+        received = []
+
+        async def handler(msg):
+            received.append(msg)
+
+        await agent_bus.start()
+        # Topic 'late_sub' did not exist at start time.
+        agent_bus.subscribe("late_sub", handler)
+        await agent_bus.publish("late_sub", payload={"x": 1})
+        await asyncio.sleep(0.1)
+        assert len(received) == 1
+        assert received[0].topic == "late_sub"
+
+    async def test_publish_then_subscribe_after_start_delivers(self, agent_bus):
+        received = []
+
+        async def handler(msg):
+            received.append(msg)
+
+        await agent_bus.start()
+        # Publish FIRST to a brand-new topic (creates the queue), THEN subscribe.
+        # Before the fix, publish created a queue with no dispatcher and the
+        # message was stranded.
+        await agent_bus.publish("late_pub", payload={"y": 2}, priority=Priority.HIGH)
+        agent_bus.subscribe("late_pub", handler)
+        await agent_bus.publish("late_pub", payload={"y": 3})
+        await asyncio.sleep(0.1)
+        # At least the post-subscribe message is delivered; the dispatcher exists.
+        assert any(m.payload == {"y": 3} for m in received)
+        assert "late_pub" in agent_bus._dispatchers

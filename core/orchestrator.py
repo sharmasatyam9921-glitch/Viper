@@ -175,6 +175,9 @@ class ViperOrchestrator:
         self.think_engine = think_engine
         self.tool_registry = tool_registry or {}
         self.guardrail = guardrail
+        # Per-tool wall-clock ceiling so a hung tool cannot stall the loop
+        # indefinitely. Generous default keeps normal tools unaffected.
+        self._tool_timeout_s = 300.0
         self._machine = self._build_machine()
 
         # Multi-agent subsystem (Phase 1)
@@ -334,19 +337,24 @@ class ViperOrchestrator:
 
         t0 = time.monotonic()
 
-        # Run
-        final_state = await self._machine.run(state)
+        try:
+            # Run (mutates and returns the same state object)
+            final_state = await self._machine.run(state)
+        finally:
+            elapsed = time.monotonic() - t0
 
-        elapsed = time.monotonic() - t0
+            # End chain (use `state`: run() mutates it in place, so it is
+            # populated even if run() raised before returning)
+            if self.chain_writer and "chain_id" in state:
+                status = "completed" if state.get("task_complete") else "interrupted"
+                try:
+                    self.chain_writer.end_chain(state["chain_id"], status=status)
+                except Exception as exc:
+                    logger.warning(f"chain_writer.end_chain failed: {exc}")
 
-        # End chain
-        if self.chain_writer and "chain_id" in final_state:
-            status = "completed" if final_state.get("task_complete") else "interrupted"
-            self.chain_writer.end_chain(final_state["chain_id"], status=status)
-
-        # Stop multi-agent subsystem
-        if self._enable_agents:
-            await self._stop_agents()
+            # Stop multi-agent subsystem
+            if self._enable_agents:
+                await self._stop_agents()
 
         return self._build_response(final_state, elapsed)
 
@@ -442,11 +450,17 @@ class ViperOrchestrator:
         t0 = time.monotonic()
         try:
             if asyncio.iscoroutinefunction(tool_fn):
-                output = await tool_fn(**tool_args)
+                coro = tool_fn(**tool_args)
             else:
-                output = await asyncio.get_running_loop().run_in_executor(None, lambda: tool_fn(**tool_args))
+                coro = asyncio.get_running_loop().run_in_executor(None, lambda: tool_fn(**tool_args))
+            output = await asyncio.wait_for(coro, timeout=self._tool_timeout_s)
             success = True
             error = None
+        except asyncio.TimeoutError:
+            output = f"Tool {tool_name} timed out after {self._tool_timeout_s}s"
+            success = False
+            error = output
+            logger.error(output)
         except Exception as exc:
             output = str(exc)
             success = False
@@ -521,14 +535,23 @@ class ViperOrchestrator:
             t0 = time.monotonic()
             try:
                 if asyncio.iscoroutinefunction(fn):
-                    out = await fn(**args)
+                    coro = fn(**args)
                 else:
-                    out = await asyncio.get_running_loop().run_in_executor(None, lambda: fn(**args))
+                    coro = asyncio.get_running_loop().run_in_executor(None, lambda: fn(**args))
+                out = await asyncio.wait_for(coro, timeout=self._tool_timeout_s)
                 return {
                     "tool_name": name,
                     "tool_args": args,
                     "output": str(out)[:10000] if out else "",
                     "success": True,
+                    "duration_ms": (time.monotonic() - t0) * 1000,
+                }
+            except asyncio.TimeoutError:
+                return {
+                    "tool_name": name,
+                    "tool_args": args,
+                    "output": f"Tool {name} timed out after {self._tool_timeout_s}s",
+                    "success": False,
                     "duration_ms": (time.monotonic() - t0) * 1000,
                 }
             except Exception as exc:

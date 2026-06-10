@@ -146,14 +146,15 @@ class NucleiScanner:
             result = subprocess.run(
                 ['where' if sys.platform == 'win32' else 'which', 'nuclei'],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             if result.returncode == 0:
                 path = result.stdout.strip().split('\n')[0]
                 self.log(f"Found nuclei: {path}")
                 return path
         except Exception as e:  # noqa: BLE001
-            pass
+            logger.debug(f"nuclei binary lookup via which/where failed: {e}")
         
         # Check common paths
         common_paths = [

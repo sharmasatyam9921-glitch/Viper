@@ -108,7 +108,8 @@ class ParallelHunter:
             try:
                 from core.evograph import EvoGraph
                 evograph = EvoGraph()
-            except Exception:
+            except Exception as e:
+                logger.debug("EvoGraph unavailable, hunting without cross-target learning: %s", e)
                 evograph = None
 
         tasks = []

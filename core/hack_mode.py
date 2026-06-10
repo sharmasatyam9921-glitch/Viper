@@ -33,6 +33,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 from .agent_bus import AgentBus, Priority
 from .audit_logger import AuditLogger
+from .chain_planner import CHAIN_REQUIRED, ChainPlanner
+from .guardrail_hard import is_blocked
 from .hack_profile import (
     BugBountyProfile,
     CTFProfile,
@@ -140,6 +142,16 @@ class HackMode:
         # so cross-phase duplicates (same SQLi found by probe AND exploit)
         # don't get republished to the bus.
         self.dedup = FindingDedup()
+        # Mythos-style finding-driven chaining. Enabled only when the profile
+        # opts in (max_chain_depth > 0); None keeps the legacy linear loop.
+        _depth = int(getattr(profile, "max_chain_depth", 0) or 0)
+        self.chain_planner: Optional[ChainPlanner] = (
+            ChainPlanner(
+                max_depth=_depth,
+                max_tasks=int(getattr(profile, "max_chain_tasks", 24) or 24),
+            )
+            if _depth > 0 else None
+        )
         self._started = False
         self._stopped = False
         # State carried into stop_conditions
@@ -319,7 +331,6 @@ class HackMode:
                 "hunt_id": self.audit.hunt_id,
             },
         )
-        await self.bus.start()
 
         result = HackResult(
             target=self.target,
@@ -327,6 +338,31 @@ class HackMode:
             hunt_id=self.audit.hunt_id,
             audit_path=self.audit.jsonl_path,
         )
+
+        # Hard guardrail — deterministic blocklist (gov/mil/edu/intl TLDs +
+        # protected major domains). Applies to EVERY profile; a blocked domain
+        # is never a legitimate target. Fails the run closed before any work.
+        blocked, reason = is_blocked(self.target)
+        if blocked:
+            result.stop_reason = "guardrail_blocked"
+            result.elapsed_s = time.time() - t0
+            self.narrator.warn(f"target blocked by guardrail: {reason}")
+            self.audit.event(
+                "guardrail.blocked", target=self.target,
+                outcome="blocked", payload={"reason": reason},
+            )
+            self.audit.event(
+                "hunt.completed", target=self.target, outcome="blocked",
+                findings_count=0, payload={"stop_reason": result.stop_reason},
+            )
+            self._stopped = True  # nothing to tear down; bus never started
+            return result
+
+        await self.bus.start()
+        # Install the per-hunt scope gate so every worker HTTP request is
+        # checked before it leaves the box (fail-closed). Set inside this task
+        # so worker child-tasks inherit it via contextvars.
+        self._install_scope_guard()
 
         try:
             await asyncio.wait_for(
@@ -349,6 +385,7 @@ class HackMode:
             return
         self._stopped = True
         result.elapsed_s = time.time() - started_at
+        self._clear_scope_guard()
         try:
             await self.bus.stop()
         except Exception:
@@ -373,6 +410,95 @@ class HackMode:
             stop_reason=result.stop_reason or "completed",
             findings=result.findings_count,
         )
+        # Auto-generate the HTML report on completion. Offloaded to a thread:
+        # generate_report_sync spins its own event loop, which cannot run
+        # inside this live async loop. Failure here must not break teardown.
+        try:
+            await asyncio.to_thread(self._write_report, result, started_at)
+        except Exception as exc:
+            self.audit.event(
+                "report.failed", target=self.target,
+                payload={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    def _write_report(self, result: "HackResult", started_at: float) -> None:
+        """Render hunt_<id>.html from in-memory findings (no LLM, blocking)."""
+        from core.html_reporter import generate_report_sync, save_report
+        report_findings = []
+        for f in result.findings:
+            report_findings.append({
+                "severity": str(f.get("severity") or "info").lower(),
+                "vuln_type": (f.get("vuln_type") or f.get("title")
+                              or f.get("type") or "Finding"),
+                "url": f.get("url") or self.target,
+                "source": f.get("technique") or f.get("source") or "swarm",
+                "payload": f.get("payload") or "",
+                "evidence": (f.get("evidence") or f.get("marker")
+                             or f.get("details") or ""),
+                "confidence": f.get("confidence", 0.0),
+                "validated": f.get("validated", True),
+            })
+        metadata = {
+            "start_time": time.strftime(
+                "%Y-%m-%dT%H:%M:%S", time.localtime(started_at)),
+            "elapsed_seconds": result.elapsed_s,
+            "hunt_id": result.hunt_id,
+            "phases": {p: {} for p in result.phase_results},
+        }
+        html = generate_report_sync(report_findings, self.target, metadata)
+        path = save_report(html, f"hunt_{result.hunt_id}.html")
+        self.audit.event(
+            "report.generated", target=self.target,
+            outcome="success", findings_count=len(report_findings),
+            payload={"report": path.name},
+        )
+
+    # ------------------------------------------------------------------
+    # Scope gate (worker HTTP fail-closed)
+    # ------------------------------------------------------------------
+
+    def _scope_allows(self, url: str) -> bool:
+        """Predicate installed into the worker HTTP layer. Fails closed."""
+        sr = self.scope_reasoner
+        if sr is None:
+            return True
+        try:
+            return bool(sr.decide(url).allowed)
+        except Exception:  # noqa: BLE001 — any scope error denies the request
+            return False
+
+    def _install_scope_guard(self) -> None:
+        if self.scope_reasoner is None:
+            return  # owned box (lab/CTF) — no gate
+        try:
+            from .swarm_workers.vuln._http import set_scope_guard
+            set_scope_guard(self._scope_allows)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not install worker scope guard: %s", exc)
+        # Install the typed egress context (scope + audit) so anything routed
+        # through core.tool_gateway is checked + audited under this hunt.
+        try:
+            from .tool_gateway import EgressContext, set_context
+            set_context(EgressContext(
+                scope=self._scope_allows,
+                audit=lambda action, payload: self.audit.event(
+                    action, target=self.target, payload=payload),
+                hunt_id=self.audit.hunt_id,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not install egress context: %s", exc)
+
+    def _clear_scope_guard(self) -> None:
+        try:
+            from .swarm_workers.vuln._http import clear_scope_guard
+            clear_scope_guard()
+        except Exception:
+            pass
+        try:
+            from .tool_gateway import clear_context
+            clear_context()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # The main loop
@@ -404,6 +530,7 @@ class HackMode:
             self._state["iteration"] += 1
             result.iterations = self._state["iteration"]
             findings_this_iter = 0
+            iter_findings: list[dict] = []
             self.audit.event(
                 "loop.iteration",
                 target=self.target,
@@ -427,6 +554,7 @@ class HackMode:
                 for f in phase_res.findings:
                     result.findings.append(f)
                     self._state["findings"].append(f)
+                    iter_findings.append(f)
                     self.narrator.emit_finding(f)
                 findings_this_iter += phase_res.findings_count
                 self.narrator.finish_stage(
@@ -436,6 +564,26 @@ class HackMode:
                 # Cheap inter-phase stop check (e.g. flag found mid-iteration).
                 # Only named stop_conditions fire here — NOT max_iterations,
                 # which is a between-iteration check.
+                early_stop, why = self._check_named_stop()
+                if early_stop:
+                    result.stop_reason = why or "stop_condition"
+                    self.audit.event(
+                        "stop_condition.met",
+                        target=self.target,
+                        payload={"reason": why},
+                    )
+                    self.narrator.info(f"stop condition met: {why}")
+                    self._state["findings_per_iteration"].append(findings_this_iter)
+                    return
+
+            # Mythos-style bounded chaining: take the confirmed findings from
+            # this iteration and drive them deeper — re-dispatch vuln→exploit→
+            # post against the new attack surface they reveal, until the
+            # surface stops growing (convergence) or the depth budget is hit.
+            if self.chain_planner is not None:
+                chained = await self._run_chain(result, iter_findings)
+                findings_this_iter += chained
+                # A flag (or other stop) can surface mid-chain — honor it.
                 early_stop, why = self._check_named_stop()
                 if early_stop:
                     result.stop_reason = why or "stop_condition"
@@ -481,8 +629,20 @@ class HackMode:
                 continue
         return False, None
 
-    async def _run_phase(self, phase: str) -> CoordinatorResult:
-        """Dispatch one phase's coordinator. Returns its CoordinatorResult."""
+    async def _run_phase(
+        self,
+        phase: str,
+        *,
+        assets: Optional[list[str]] = None,
+        findings: Optional[list[dict]] = None,
+        chain_depth: int = 0,
+    ) -> CoordinatorResult:
+        """Dispatch one phase's coordinator. Returns its CoordinatorResult.
+
+        `assets`/`findings` override the default context (used by the chain
+        loop to scope a phase to just the newly-revealed surface); `chain_depth`
+        is passed through for audit/telemetry.
+        """
         # Per-phase budget (Phase 5): split the total time across phases
         # so slow workers in one phase can't starve downstream phases.
         phase_count = max(1, len([
@@ -509,13 +669,141 @@ class HackMode:
             "techniques": techniques or None,
         }
 
+        # Chain overrides: scope this phase to explicit assets/findings.
+        if assets is not None:
+            payload["assets"] = assets
+        if chain_depth:
+            payload["chain_depth"] = chain_depth
+        if findings is not None:
+            payload["findings"] = findings
         # Feed prior-phase findings forward as the new phase's input
         # (recon → vuln especially: every discovered subdomain/port
         # becomes a vuln-probe target).
-        if phase != "recon":
+        elif phase != "recon":
             payload["findings"] = list(self._state.get("findings", []))
 
         return await coord.handle_message(payload)
+
+    # ------------------------------------------------------------------
+    # Bounded finding-driven chaining (mythos-style)
+    # ------------------------------------------------------------------
+
+    async def _run_chain(
+        self, result: HackResult, seed_findings: list[dict],
+    ) -> int:
+        """Drive confirmed findings deeper until convergence / depth budget.
+
+        For each round, the ChainPlanner classifies the frontier findings and
+        emits follow-up tasks for the ones that opened new surface (a confirmed
+        primitive, a foothold, or a high-sev hit with a URL). We then re-run the
+        enabled offensive phases against just that surface, feed the results
+        back, and repeat. Termination is convergence-first (no new surface),
+        never a wall-clock timeout — the global time budget is the only timer,
+        enforced by the `asyncio.wait_for` around `_run_loop`.
+        """
+        planner = self.chain_planner
+        if planner is None:
+            return 0
+        # Chaining only makes sense when offensive phases are enabled — it
+        # drives exploits deeper. Default recon+vuln runs stay linear.
+        if "exploit" not in self.profile.phases:
+            return 0
+        chain_phases = [p for p in ("vuln", "exploit", "post")
+                        if p in self.profile.phases]
+
+        total_chained = 0
+        frontier = list(seed_findings)
+        depth = 0
+        while depth < planner.max_depth:
+            # Annotate each frontier finding with its verdict for the report.
+            for f in frontier:
+                if isinstance(f, dict):
+                    f.setdefault("chain_verdict", planner.verdict(f))
+
+            decision = planner.plan(frontier, depth)
+            if decision.converged:
+                break
+
+            # Fail-closed scope gate on chained surface: a finding's URL must
+            # never pull workers onto an off-scope host. When a scope reasoner
+            # is present (bug-bounty), drop any task it doesn't allow; CTF/lab
+            # run on owned boxes without one.
+            tasks = decision.new_tasks
+            if self.scope_reasoner is not None:
+                kept = []
+                for t in tasks:
+                    try:
+                        allowed = bool(self.scope_reasoner.decide(t.asset_url).allowed)
+                    except Exception:
+                        allowed = False  # any error → fail closed
+                    if allowed:
+                        kept.append(t)
+                    else:
+                        self.audit.event(
+                            "chain.scope_blocked",
+                            target=self.target,
+                            payload={"asset": t.asset_url, "origin": t.origin_type},
+                        )
+                        self.narrator.warn(
+                            f"  chain: dropped off-scope surface {t.asset_url}"
+                        )
+                tasks = kept
+            if not tasks:
+                break  # nothing in-scope left to chain → converge
+
+            assets = [t.asset_url for t in tasks]
+            self.audit.event(
+                "chain.expanded",
+                target=self.target,
+                payload={
+                    "depth": depth + 1,
+                    "tasks": len(tasks),
+                    "assets": assets[:20],
+                    "origins": sorted({t.origin_type for t in tasks}),
+                },
+            )
+            self.narrator.info(
+                f"  chaining (depth {depth + 1}): {len(tasks)} "
+                f"new surface(s) from confirmed findings"
+            )
+
+            round_findings: list[dict] = []
+            vuln_findings: list[dict] = []
+            for phase in chain_phases:
+                if phase == "vuln":
+                    pr = await self._run_phase(
+                        phase, assets=assets, chain_depth=depth + 1)
+                    vuln_findings = list(pr.findings)
+                elif phase == "exploit":
+                    pr = await self._run_phase(
+                        phase,
+                        findings=(vuln_findings or list(self._state["findings"])),
+                        chain_depth=depth + 1)
+                else:  # post
+                    pr = await self._run_phase(
+                        phase,
+                        findings=(round_findings or list(self._state["findings"])),
+                        chain_depth=depth + 1)
+                result.phase_results[f"{phase}@chain{depth + 1}"] = pr
+                for f in pr.findings:
+                    result.findings.append(f)
+                    self._state["findings"].append(f)
+                    round_findings.append(f)
+                    self.narrator.emit_finding(f)
+
+            total_chained += len(round_findings)
+            if not round_findings:
+                break  # convergence: nothing new produced this round
+            frontier = round_findings
+            depth += 1
+
+        if total_chained:
+            self.audit.event(
+                "chain.completed",
+                target=self.target,
+                payload={"depth_reached": depth, "findings_chained": total_chained},
+            )
+        return total_chained
 
     # ------------------------------------------------------------------
     # Default coordinator wiring

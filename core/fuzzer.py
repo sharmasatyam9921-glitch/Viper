@@ -173,7 +173,7 @@ class PayloadMutator:
                 if mutated and mutated not in results:
                     results.append(mutated)
             except Exception as e:  # noqa: BLE001
-                pass
+                logger.debug(f"Mutator {mutator.__name__} failed for payload={payload!r}: {e}")
         
         return results
 
@@ -337,6 +337,7 @@ class SmartFuzzer:
             try:
                 response = send_func(payload)
             except Exception as e:
+                logger.debug(f"Fuzz send_func failed for payload={payload!r}: {e}")
                 continue
             
             # Check if interesting

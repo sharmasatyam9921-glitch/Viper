@@ -15,12 +15,15 @@ All inline CSS, no external dependencies. Dark professional theme.
 
 import html
 import json
+import logging
 import os
 import hashlib
 from datetime import datetime
 from pathlib import Path
 from string import Template
 from typing import Dict, List, Optional, Any
+
+logger = logging.getLogger("viper.html_reporter")
 
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -195,8 +198,8 @@ async def _generate_narrative(router, prompt: str, system: str = "") -> Optional
         resp = await router.complete(prompt=prompt, system=system, max_tokens=800)
         if resp and resp.text:
             return resp.text.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"LLM narrative generation failed, falling back to template: {e}")
     return None
 
 
@@ -984,24 +987,24 @@ async def generate_report(
     if model_router:
         try:
             exec_narrative = await _llm_executive_summary(model_router, target, findings, metadata)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Executive summary narrative failed, using template: {e}")
         try:
             scope_narrative = await _llm_scope_methodology(model_router, target, metadata)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Scope methodology narrative failed, using template: {e}")
         try:
             risk_narrative = await _llm_risk_assessment(model_router, findings)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Risk assessment narrative failed, using template: {e}")
         try:
             surface_narrative = await _llm_attack_surface(model_router, target, findings, metadata)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Attack surface narrative failed, using template: {e}")
         try:
             remediation_narrative = await _llm_remediation_roadmap(model_router, findings)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Remediation roadmap narrative failed, using template: {e}")
 
     sections = [
         _build_header(target, metadata),

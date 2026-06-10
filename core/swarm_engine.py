@@ -16,12 +16,15 @@ Design principles (from XBOW's playbook):
 
 import asyncio
 import hashlib
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+
+logger = logging.getLogger("viper.swarm_engine")
 
 
 class AgentStatus(Enum):
@@ -160,6 +163,8 @@ class SwarmEngine:
                 agent.status = AgentStatus.FAILED
                 agent.error = str(e)
                 self._stats.failed += 1
+                logger.debug("swarm agent %s (%s) failed: %s",
+                             agent.agent_id, agent.technique, e, exc_info=True)
             finally:
                 agent.completed_at = time.time()
         return agent
@@ -247,8 +252,8 @@ async def runner_param_sqli_probe(agent: SwarmAgent) -> List[Dict[str, Any]]:
                             "needs_validation": True
                         })
                         return findings  # one finding per agent
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("sqli probe error on %s: %s", target, e)
     return findings
 
 
@@ -273,8 +278,8 @@ async def runner_param_xss_probe(agent: SwarmAgent) -> List[Dict[str, Any]]:
                         "confidence": 0.85, "validated": False,
                         "needs_validation": True
                     })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("xss probe error on %s: %s", target, e)
     return findings
 
 
@@ -298,8 +303,8 @@ async def runner_directory_probe(agent: SwarmAgent) -> List[Dict[str, Any]]:
                         "evidence": body[:200],
                         "validated": True if r.status == 200 else False
                     })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("directory probe error on %s: %s", url, e)
     return findings
 
 
@@ -322,7 +327,8 @@ async def runner_subdomain_probe(agent: SwarmAgent) -> List[Dict[str, Any]]:
                             "title": (await r.text(errors='replace'))[:100]
                         })
                         return findings
-            except Exception:
+            except Exception as e:
+                logger.debug("subdomain probe error on %s: %s", url, e)
                 continue
     return findings
 

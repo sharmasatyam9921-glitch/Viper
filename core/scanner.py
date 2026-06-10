@@ -102,8 +102,8 @@ class HTTPScanner:
             body = ""
             try:
                 body = e.read().decode('utf-8', errors='ignore')
-            except Exception as e:  # noqa: BLE001
-                pass
+            except Exception as read_err:  # noqa: BLE001
+                logger.debug("Failed to read HTTPError body for %s: %s", url, read_err)
             
             return ScanResult(
                 url=url,

@@ -64,7 +64,10 @@ async def handle_job(env: Envelope, *, worker_id: str) -> None:
         logger.warning("[%s] bad job env: missing technique/target: %r", worker_id, payload)
         return
 
-    runner = get_worker_runner(env.topic, technique)
+    try:
+        runner = get_worker_runner(env.topic, technique)
+    except KeyError:
+        runner = None
     if runner is None:
         logger.warning("[%s] no runner for phase=%s technique=%s", worker_id, env.topic, technique)
         return

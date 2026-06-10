@@ -274,6 +274,13 @@ class WebSearchTool:
         """True if at least one search provider is configured."""
         return len(self._providers) > 0
 
+    # Alias matching the rest of the tool wrappers
+    # (``tools/google_dork.py`` etc. expose ``.available``). Both names
+    # work as attribute access; neither is callable.
+    @property
+    def available(self) -> bool:
+        return self.is_available
+
     async def search(self, query: str, num_results: int = 5) -> List[dict]:
         """
         Search the web for security research information.

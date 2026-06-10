@@ -157,10 +157,28 @@ class SecretScanner:
         "generic_api_key": "medium", "generic_secret": "medium",
     }
 
-    # Types that should skip entropy check (structural matches are enough)
+    # Types that should skip entropy check. Patterns with a strong fixed
+    # prefix + fixed length are already specific enough on their own; the
+    # entropy gate was destroying signal on canonical short tokens
+    # (e.g. AWS `AKIA…` is exactly 20 chars w/ Shannon entropy ~3.68).
     SKIP_ENTROPY = {
+        # Strong-prefix structural patterns
+        "aws_access_key", "aws_mws_key",
+        "github_pat", "github_oauth", "github_app_token",
+        "github_refresh_token", "github_fine_grained",
+        "slack_token", "slack_webhook",
+        "stripe_live_key", "stripe_test_key",
+        "square_access_token", "square_oauth",
+        "shopify_token", "shopify_custom_token",
+        "telegram_bot_token",
+        "discord_webhook", "discord_bot_token",
+        "openai_api_key", "anthropic_api_key",
+        "google_api_key", "google_oauth", "google_oauth_refresh",
+        # Format-locked secrets
         "private_key_pem", "database_url", "password_in_url",
-        "gcp_service_account", "azure_storage_key", "slack_webhook",
+        "gcp_service_account", "azure_storage_key",
+        # JWT-like
+        "jwt_token",
     }
 
     def __init__(self, github_token: Optional[str] = None, verbose: bool = True):
@@ -249,8 +267,8 @@ class SecretScanner:
                 self._rate_remaining = int(resp.headers.get("X-RateLimit-Remaining", self._rate_remaining - 1))
                 if resp.status == 200:
                     return await resp.text()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("GitHub raw fetch failed for %s: %s", url, e)
         return None
 
     # --- Core scanning ---

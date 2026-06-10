@@ -29,6 +29,7 @@ Workers MUST be:
 from __future__ import annotations
 
 from . import (  # noqa: F401
+    ai_hunter,
     bola,
     cors,
     graphql,
@@ -41,6 +42,6 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "bola", "cors", "graphql", "idor", "jwt",
+    "ai_hunter", "bola", "cors", "graphql", "idor", "jwt",
     "nuclei", "secrets", "sqli_probe", "xss_probe",
 ]

@@ -165,8 +165,8 @@ class RoEParser:
             if text.strip():
                 self.log("Read PDF as plain text (fallback)", "WARN")
                 return text
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Plain-text fallback read failed for %s: %s", pdf_path, e)
 
         raise RuntimeError(f"Could not extract text from {pdf_path}. Install pypdf2: pip install PyPDF2")
 

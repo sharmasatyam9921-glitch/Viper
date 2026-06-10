@@ -157,7 +157,7 @@ PATTERNS = {
             "UUID from GraphQL introspection",
         ],
         bypass_techniques=[
-            "UUID version Agentlysis",
+            "UUID version Analysis",
             "Leak from other endpoints",
             "Google dorking: site:target.com inurl:uuid",
             "Wayback machine for old UUIDs"

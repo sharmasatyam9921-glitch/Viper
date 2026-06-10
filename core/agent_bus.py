@@ -86,7 +86,27 @@ class AgentBus:
         self._subscribers.setdefault(topic, []).append(callback)
         if topic not in self._queues:
             self._queues[topic] = asyncio.PriorityQueue(maxsize=self._max_queue_size)
+        self._ensure_dispatcher(topic)
         logger.debug("Subscribed callback to topic '%s'", topic)
+
+    def _ensure_dispatcher(self, topic: str) -> None:
+        """Guarantee a running topic has a dispatcher task.
+
+        A topic first seen AFTER ``start()`` (via ``publish`` or ``subscribe``)
+        gets a queue lazily but, before this, no consumer — so its messages
+        would queue until full and then be dropped. Spawn the missing
+        dispatcher so late topics behave like ones present at start time.
+        """
+        if not self._running or topic in self._dispatchers:
+            return
+        try:
+            self._dispatchers[topic] = asyncio.create_task(
+                self._dispatch_loop(topic), name=f"bus-dispatch-{topic}"
+            )
+        except RuntimeError:
+            # No running event loop (shouldn't happen while _running); the
+            # next start() will create the dispatcher instead.
+            pass
 
     def unsubscribe(self, topic: str, callback: SubscriberCallback) -> None:
         """Remove *callback* from *topic* subscribers."""
@@ -107,6 +127,9 @@ class AgentBus:
         """Publish a message to *topic*. Returns the message_id."""
         if topic not in self._queues:
             self._queues[topic] = asyncio.PriorityQueue(maxsize=self._max_queue_size)
+            # A topic first seen at publish time after start() needs its own
+            # dispatcher, or its messages would queue forever and then drop.
+            self._ensure_dispatcher(topic)
 
         msg = BusMessage(
             priority=priority,

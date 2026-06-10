@@ -313,7 +313,14 @@ class ReACTEngine:
                 step_num=step_num,
                 thought=thought,
                 action=action,
-                action_input={"target": target, "context_keys": list(current_context.keys())},
+                action_input={
+                    "target": target,
+                    "context_keys": list(current_context.keys()),
+                    # Record the access level this action reached so the final
+                    # assessment can report the high-water mark (new_context
+                    # holds the post-action state; current_context updates below).
+                    "access_level": new_context.get("access_level", 0),
+                },
                 observation=observation,
                 reward=reward,
                 llm_used=used_llm,
@@ -338,8 +345,8 @@ class ReACTEngine:
                         self._evograph_session_id, step_num,
                         thought, action, observation, reward,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"EvoGraph record_reasoning_step failed: {exc}")
 
             if finding:
                 findings.append(finding)
@@ -553,7 +560,7 @@ class ReACTEngine:
 
         finding_types = [f.get("type", "unknown") for f in findings]
         max_access = max(
-            (s.action_input.get("context", {}).get("access_level", 0) for s in trace.steps),
+            (s.action_input.get("access_level", 0) for s in trace.steps),
             default=0,
         )
         return (

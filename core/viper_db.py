@@ -11,7 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-DB_PATH = Path(__file__).parent.parent / "data" / "viper.db"
+try:
+    from .config import get_config
+    DB_PATH = get_config().db_path
+except Exception:
+    DB_PATH = Path(__file__).parent.parent / "data" / "viper.db"
 
 
 class ViperDB:
@@ -308,7 +312,7 @@ class ViperDB:
         memory_file = memory_dir / "viper_memory.json"
         if memory_file.exists():
             try:
-                data = json.loads(memory_file.read_text())
+                data = json.loads(memory_file.read_text(encoding="utf-8"))
                 for attack in data.get("successful_attacks", []):
                     url = attack.get("target", "")
                     if not url:
@@ -344,7 +348,7 @@ class ViperDB:
         kb_file = memory_dir / "viper_kb.json"
         if kb_file.exists():
             try:
-                data = json.loads(kb_file.read_text())
+                data = json.loads(kb_file.read_text(encoding="utf-8"))
                 for program, info in data.get("programs", {}).items():
                     for finding in info.get("findings", []):
                         url = finding.get("url", f"https://{program}")

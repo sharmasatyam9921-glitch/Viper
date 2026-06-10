@@ -127,6 +127,14 @@ class Profile:
     # Default = time_budget_s / number_of_phases when set to None.
     per_phase_budget_s: Optional[float] = None
 
+    # Mythos-style finding-driven chaining. When > 0, after each iteration's
+    # linear phase pass HackMode re-dispatches vuln→exploit→post against the
+    # NEW attack surface revealed by confirmed findings, up to this depth.
+    # Terminates on convergence (no new surface), not on a timer.
+    # 0 = disabled → legacy linear behavior (keeps older Profiles/tests intact).
+    max_chain_depth: int = 0
+    max_chain_tasks: int = 24
+
     def get_phase_budget(self, phase_count: int) -> float:
         """Compute the per-phase budget, falling back to time_budget/N."""
         if self.per_phase_budget_s is not None and self.per_phase_budget_s > 0:
@@ -160,6 +168,7 @@ class Profile:
             "use_scope_reasoner": self.use_scope_reasoner,
             "max_concurrent": self.max_concurrent,
             "per_worker_timeout": self.per_worker_timeout,
+            "max_chain_depth": self.max_chain_depth,
             "stop_conditions": [c.name for c in self.stop_conditions],
         }
 
@@ -188,6 +197,7 @@ def CTFProfile(*, time_budget_s: float = 1800.0, allow_destructive: bool = True)
         ],
         max_concurrent=16,
         per_worker_timeout=90.0,
+        max_chain_depth=4,
     )
 
 
@@ -219,6 +229,7 @@ def BugBountyProfile(*, time_budget_s: float = 3600.0,
         ],
         max_concurrent=12,
         per_worker_timeout=60.0,
+        max_chain_depth=3,
     )
 
 
@@ -243,6 +254,7 @@ def LabProfile(*, time_budget_s: float = 900.0, allow_destructive: bool = True) 
         ],
         max_concurrent=12,
         per_worker_timeout=60.0,
+        max_chain_depth=3,
     )
 
 

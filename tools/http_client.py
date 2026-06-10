@@ -243,7 +243,19 @@ class HackerHTTPClient:
         """Close session."""
         if self.session:
             await self.session.close()
-    
+            self.session = None
+
+    # Async context manager — one-shot callers can use
+    #   async with HackerHTTPClient() as client: ...
+    # and the session closes automatically (no "Unclosed client session"
+    # warnings).
+    async def __aenter__(self):
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
     def _get_headers(self, custom_headers: Optional[Dict] = None) -> Dict:
         """Get request headers with optional rotation."""
         headers = {

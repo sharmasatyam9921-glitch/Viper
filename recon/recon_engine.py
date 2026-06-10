@@ -151,7 +151,8 @@ class ReconEngine:
                 result = subprocess.run(
                     ['where' if sys.platform == 'win32' else 'which', tool],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    timeout=5
                 )
                 self.tools[tool] = result.returncode == 0
             except Exception as e:  # noqa: BLE001

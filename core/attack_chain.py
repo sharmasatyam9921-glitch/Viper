@@ -289,7 +289,7 @@ class VulnScanner:
                                     cwe="CWE-79"
                                 )
         except Exception as e:  # noqa: BLE001
-            pass
+            logger.debug(f"XSS probe failed for {url} param={param}: {e}")
         return None
 
 
@@ -653,7 +653,7 @@ class VIPER:
     """
     
     def __init__(self, output_dir: Path = None):
-        self.output_dir = output_dir or Path("skills/hackagent/reports")
+        self.output_dir = output_dir or (Path(__file__).resolve().parent.parent / "reports")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.findings: List[Finding] = []
         self.chains: List[AttackChain] = []

@@ -119,7 +119,7 @@ class TorProxy:
     def __enter__(self):
         """Set up SOCKS5 proxy environment."""
         if not is_tor_running(port=self.socks_port):
-            print("[!][Tor] Tor is not running on port {self.socks_port}")
+            print(f"[!][Tor] Tor is not running on port {self.socks_port}")
             return self
 
         # Save current proxy env vars

@@ -473,7 +473,7 @@ async def enrich_ips_smart(ips: list, concurrency: int = 5,
         # Full API — sequential with rate limiting (1 req/s on free plan)
         results = []
         for ip in ips:
-            results.append(enrich_ip_full(ip, api_key))
+            results.append(await asyncio.to_thread(enrich_ip_full, ip, api_key))
             await asyncio.sleep(max(delay, 1.0))
         return results
     else:

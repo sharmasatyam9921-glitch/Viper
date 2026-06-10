@@ -168,8 +168,8 @@ async def phase_recon(
                         if wap_techs:
                             target.technologies.update(wap_techs)
                             log_fn(f"  [Wappalyzer] Detected on {url_key}: {wap_techs}")
-            except Exception:
-                pass
+            except Exception as e:
+                log_fn(f"  [Wappalyzer] Tech detection on recon data failed: {e}", "DEBUG")
 
         # Populate knowledge graph from recon
         if graph_engine and recon_result:

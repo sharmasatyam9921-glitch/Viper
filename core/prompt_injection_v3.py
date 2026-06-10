@@ -22,6 +22,7 @@ import logging
 logger = logging.getLogger("viper.prompt_injection_v3")
 import random
 import json
+from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
@@ -377,7 +378,9 @@ class AdaptiveInjector:
     Tracks what works against specific targets.
     """
     
-    def __init__(self, knowledge_file: str = "injection_knowledge.json"):
+    def __init__(self, knowledge_file: str = None):
+        if knowledge_file is None:
+            knowledge_file = str(Path(__file__).parent.parent / "memory" / "injection_knowledge.json")
         self.knowledge_file = knowledge_file
         self.knowledge = self._load_knowledge()
     

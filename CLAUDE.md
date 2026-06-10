@@ -7,9 +7,11 @@ Autonomous bug bounty hunting bot with multi-agent architecture. Pure Python, $0
 ```bash
 python viper.py http://target.com --full              # Full hunt (recon → exploit → report)
 python viper.py http://target.com --full --stealth 2   # Stealth mode
-python viper_autonomous.py --continuous --interval=60  # Continuous hunting
+python viper.py hack <target> --profile bugbounty       # Continuous hunting via daemon
 python viper_daemon.py                                  # 24/7 daemon
-python dashboard/server.py                              # Dashboard at localhost:8080
+python dashboard/launch.py                              # Dashboard: UI :3000 + API :8080 (one command)
+python dashboard/launch.py --prod                       # Same, production UI build
+python dashboard/server.py                              # Headless API only (:8080)
 ```
 
 ## Directory Structure
@@ -18,7 +20,7 @@ python dashboard/server.py                              # Dashboard at localhost
 hackagent/
 ├── viper.py                  # Main CLI entry point
 ├── viper_core.py             # Hunt orchestrator (ViperCore class)
-├── viper_autonomous.py       # Continuous hunting mode
+├── viper_daemon.py           # 24/7 daemon (continuous hunting)
 ├── viper_daemon.py           # 24/7 daemon
 ├── mcp_server.py             # MCP tool server for Clawdbot integration
 │
@@ -46,7 +48,7 @@ hackagent/
 │   ├── mitre_mapper.py       #   CWE→CAPEC→ATT&CK (hardcoded + offline DB)
 │   ├── rate_limiter.py       #   Token bucket + human-like Gaussian timing
 │   ├── key_rotation.py       #   API key round-robin rotation
-│   ├── notifier.py           #   Telegram alerts via Clawdbot gateway
+│   ├── finding_stream.py     #   Telegram + Discord + email alert dispatch (replaces notifier.py)
 │   ├── codefix_engine.py     #   Tree-sitter ReACT fix loop + GitHub PR
 │   ├── codefix_tools.py      #   11 code nav tools (symbols, find_def, repo_map)
 │   ├── report_narrative.py   #   CISO 6-section report generator

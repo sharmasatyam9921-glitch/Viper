@@ -252,7 +252,7 @@ class GVMScanner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             return b"gvm" in stdout.lower()
         except Exception:
             return False

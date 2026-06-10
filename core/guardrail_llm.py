@@ -306,11 +306,17 @@ async def check_target_allowed(
     if all_private:
         return True, "All targets are private/internal IPs."
 
-    # Resolve public IPs
+    # Resolve public IPs. Reverse-DNS is best-effort enrichment, and
+    # socket.gethostbyaddr has no timeout — a hung PTR query could block the
+    # guardrail (and the whole hunt) indefinitely. Bound it; on timeout/error
+    # proceed with no hostnames rather than re-running the lookup unbounded.
     try:
-        hostnames = await asyncio.to_thread(resolve_ips, target_ips)
-    except Exception:
-        hostnames = resolve_ips(target_ips)
+        hostnames = await asyncio.wait_for(
+            asyncio.to_thread(resolve_ips, target_ips), timeout=10.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        logger.debug("Guardrail: reverse-DNS resolution timed out or failed")
+        hostnames = []
 
     if not hostnames:
         return True, "No recognizable hostnames resolved from target IPs."

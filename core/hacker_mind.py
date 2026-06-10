@@ -543,16 +543,15 @@ class HackerMind:
                 ])
         
         elif vuln_type == "idor":
-            base_id = context.get("base_id", "1")
-            payloads = [
-                str(int(base_id) + 1),
-                str(int(base_id) - 1),
-                "0",
-                "-1",
-                base_id + "1",
-                "admin",
-                "../" + base_id,
-            ]
+            base_id = str(context.get("base_id", "1"))
+            payloads = ["0", "-1", base_id + "1", "admin", "../" + base_id]
+            # Sequential-ID payloads only make sense for numeric base IDs;
+            # int() on a non-numeric id (e.g. "admin") would raise ValueError.
+            try:
+                n = int(base_id)
+                payloads[:0] = [str(n + 1), str(n - 1)]
+            except (ValueError, TypeError):
+                pass
         
         return payloads
     

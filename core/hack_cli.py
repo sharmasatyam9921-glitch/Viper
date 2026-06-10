@@ -80,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--quiet", action="store_true",
                    help="Suppress terminal narration")
+    p.add_argument("--log-level", default=None,
+                   help="Log level: DEBUG/INFO/WARNING/ERROR (default: config)")
+    p.add_argument("--log-json", action="store_true",
+                   help="Emit structured JSON logs (for shippers/files)")
     p.add_argument("--no-dashboard", action="store_true",
                    help="Don't auto-launch the dashboard")
     p.add_argument(
@@ -112,6 +116,15 @@ def run_hack_cli(argv: list[str]) -> int:
     """Parse `argv` (already stripped of the leading "hack"), run, return exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # 0. Config + structured logging (single bootstrap for the hunt process).
+    from .config import get_config
+    from .logging_setup import bind_hunt_id, configure_logging
+    cfg = get_config()
+    configure_logging(
+        level=args.log_level or cfg.log_level,
+        json_output=args.log_json or cfg.log_json,
+    )
 
     # 1. Preflight
     if args.resume:
@@ -162,7 +175,19 @@ def run_hack_cli(argv: list[str]) -> int:
     )
     if need_scope:
         try:
-            scope_reasoner = _build_scope_reasoner(args.scope, args.db_path)
+            if args.scope:
+                scope_reasoner = _build_scope_reasoner(args.scope, args.db_path)
+            elif args.target:
+                # Scope-aware profile but no scope file: auto-scope to the
+                # target's own domain so the fail-closed worker gate permits the
+                # intended target (+subdomains) and denies everything else.
+                scope_reasoner = _auto_scope_reasoner(args.target, args.db_path)
+                if not args.quiet:
+                    print(
+                        f"[i] no --scope given — auto-scoped to {args.target} "
+                        f"(+subdomains); off-scope hosts are blocked.",
+                        file=sys.stderr,
+                    )
         except Exception as e:  # noqa: BLE001
             print(f"[WARN] scope reasoner unavailable: {e}", file=sys.stderr)
 
@@ -202,7 +227,8 @@ def run_hack_cli(argv: list[str]) -> int:
             scope_reasoner=scope_reasoner,
         )
     try:
-        result = asyncio.run(hm.run())
+        with bind_hunt_id(audit.hunt_id):
+            result = asyncio.run(hm.run())
     except KeyboardInterrupt:
         print("\n[INTERRUPTED] hack cancelled by user", file=sys.stderr)
         audit.event("hunt.completed", outcome="interrupted")
@@ -254,6 +280,30 @@ def _build_scope_reasoner(scope_file: Optional[str], db_path: str) -> Optional[S
         if not ok:
             print(f"[WARN] failed to load scope file: {scope_file}", file=sys.stderr)
             return None
+    return ScopeReasoner(scope_manager=sm, db_path=Path(db_path))
+
+
+def _auto_scope_reasoner(target: str, db_path: str) -> ScopeReasoner:
+    """Build a reasoner scoped to the target's own domain (+ subdomains).
+
+    Used when a scope-aware profile runs without an explicit --scope file:
+    rather than denying everything (unusable) or allowing everything (unsafe),
+    permit exactly the target and its subdomains and deny all else.
+    """
+    from urllib.parse import urlparse
+
+    from scope.scope_manager import BugBountyScope, ScopeEntry, ScopeManager
+
+    host = target.strip()
+    if "://" in host:
+        host = urlparse(host).hostname or host
+    host = host.split("/", 1)[0].split(":", 1)[0].strip().rstrip(".")
+
+    sm = ScopeManager(verbose=False)
+    scope = BugBountyScope(program_name=f"auto:{host}")
+    # A 'domain' entry matches the host and all of its subdomains.
+    scope.in_scope.append(ScopeEntry(target=host, asset_type="domain"))
+    sm.active_scope = scope
     return ScopeReasoner(scope_manager=sm, db_path=Path(db_path))
 
 

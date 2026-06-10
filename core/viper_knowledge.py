@@ -951,7 +951,7 @@ class ViperKnowledge:
                 self.successful_chains = data.get("successful_chains", [])
                 self.target_history = data.get("target_history", {})
             except Exception as e:  # noqa: BLE001
-                pass
+                logger.debug("Failed to load saved knowledge from %s: %s", KNOWLEDGE_FILE, e)
 
     def save(self):
         """Save knowledge"""

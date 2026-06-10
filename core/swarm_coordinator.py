@@ -878,7 +878,15 @@ class PostSwarmCoordinator(SwarmCoordinator):
         from .swarm_workers import get_worker_runner  # lazy
 
         findings = context.get("findings") or []
-        has_foothold = any(f.get("foothold") for f in findings)
+        # A foothold is an explicit `foothold:True` flag OR any confirmed
+        # exploit primitive (sqli_exploited, ssti_exploited, …). Previously
+        # only cmdi/auth_bypass set the flag, so a confirmed SQLi/XSS/IDOR
+        # never engaged the post-exploit workers — chains dead-ended here.
+        has_foothold = any(
+            f.get("foothold")
+            or str(f.get("type", "")).lower().endswith(("_exploited", "_confirmed"))
+            for f in findings
+        )
         techniques = (
             context.get("techniques")
             or (self._FOOTHOLD_TECHNIQUES if has_foothold else self._DEFAULT_TECHNIQUES)

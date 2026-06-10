@@ -243,3 +243,6 @@ archive/tests_root/
 archive/viper_v2/
 archive/*.txt
 archive/requirements.txt
+
+# Runtime locks (session state, never commit)
+.claude/*.lock

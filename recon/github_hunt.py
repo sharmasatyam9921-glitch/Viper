@@ -274,8 +274,8 @@ def _get_file_content_api(owner: str, repo: str, path: str, token: Optional[str]
     if content_b64:
         try:
             return base64.b64decode(content_b64).decode("utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[GitHubHunt] Failed to decode file content: {e}")
     return None
 
 

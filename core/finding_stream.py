@@ -269,7 +269,7 @@ class FindingStream:
             msg["To"] = self.config.email_to
 
             def _send():
-                with smtplib.SMTP(self.config.email_smtp_host, self.config.email_smtp_port) as server:
+                with smtplib.SMTP(self.config.email_smtp_host, self.config.email_smtp_port, timeout=30) as server:
                     server.starttls()
                     server.login(self.config.email_from, self.config.email_password)
                     server.send_message(msg)

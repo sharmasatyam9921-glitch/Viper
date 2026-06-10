@@ -45,7 +45,7 @@ class FindingType(Enum):
     NETWORK_ACCESS = "network_access"
     SECRET_FOUND = "secret_found"
     MISCONFIGURATION = "misconfiguration"
-    # Extended types from RedAmon
+    # Extended finding types for advanced attack chains
     DATA_EXFILTRATION = "data_exfiltration"
     DENIAL_OF_SERVICE = "denial_of_service_success"
     SOCIAL_ENGINEERING = "social_engineering_success"

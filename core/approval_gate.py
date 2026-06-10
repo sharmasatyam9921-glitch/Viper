@@ -233,6 +233,8 @@ class ApprovalGate:
         if self.auto_approve:
             return ("approve", "")
 
+        request = request_or_from_phase
+
         print()
         print(_separator("="))
         print(_bold(_yellow("  PHASE TRANSITION REQUEST")))

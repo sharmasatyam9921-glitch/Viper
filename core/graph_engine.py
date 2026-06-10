@@ -473,14 +473,14 @@ class NetworkxBackend(GraphBackend):
                     nid = row["id"]
                     data = json.loads(row["data"]) if row["data"] else {}
                     self.graph.add_node(nid, **data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load graph nodes from {self._db_path}: {e}")
             try:
                 for row in conn.execute("SELECT * FROM graph_edges"):
                     data = json.loads(row["data"]) if row["data"] else {}
                     self.graph.add_edge(row["src"], row["dst"], **data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load graph edges from {self._db_path}: {e}")
         finally:
             conn.close()
 

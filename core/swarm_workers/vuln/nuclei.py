@@ -22,6 +22,29 @@ logger = logging.getLogger("viper.swarm_workers.vuln.nuclei")
 
 TECHNIQUE = "nuclei"
 
+# Module-level scanner cache. NucleiScanner's constructor logs "Found
+# nuclei + Discovered N templates" — without caching that ran on every
+# single dispatch (14 log lines per invocation, hundreds of times per
+# hunt).
+_SCANNER = None
+_SCANNER_INIT_FAILED = False
+
+
+def _get_scanner():
+    global _SCANNER, _SCANNER_INIT_FAILED
+    if _SCANNER is not None:
+        return _SCANNER
+    if _SCANNER_INIT_FAILED:
+        return None
+    try:
+        from scanners.nuclei_scanner import NucleiScanner  # type: ignore
+        _SCANNER = NucleiScanner(verbose=False)
+        return _SCANNER
+    except Exception as e:  # noqa: BLE001
+        logger.debug("NucleiScanner unavailable: %s", e)
+        _SCANNER_INIT_FAILED = True
+        return None
+
 
 async def _run_nuclei_subprocess(url: str, timeout: float) -> List[dict]:
     """Direct nuclei subprocess. Uses -jsonl + -silent. Streams findings."""
@@ -79,14 +102,20 @@ async def run(agent: SwarmAgent) -> List[dict]:
         return []
     timeout = max(min(agent.timeout_s, 90.0), 5.0)
 
-    # Path A — NucleiScanner module if present
+    # Path A — NucleiScanner module if present.
+    # NucleiScanner.scan is `async def` (see scanners/nuclei_scanner.py),
+    # so we must await it directly. Earlier code wrapped it in
+    # asyncio.to_thread, which returned an un-awaited coroutine — the
+    # scan never ran and emitted "coroutine 'NucleiScanner.scan' was
+    # never awaited" at GC time.
+    #
+    # We also cache the scanner instance at module level so we don't
+    # rediscover templates + re-print 12 log lines on every dispatch.
     try:
-        from scanners.nuclei_scanner import NucleiScanner  # type: ignore
-        scanner = NucleiScanner()
-        result = await asyncio.wait_for(
-            asyncio.to_thread(scanner.scan, url),
-            timeout=timeout,
-        )
+        scanner = _get_scanner()
+        if scanner is None:
+            raise RuntimeError("NucleiScanner unavailable")
+        result = await asyncio.wait_for(scanner.scan(url), timeout=timeout)
         # NucleiScanner returns its own shape; normalize.
         out: list[dict] = []
         for r in result.findings if hasattr(result, "findings") else (result or []):

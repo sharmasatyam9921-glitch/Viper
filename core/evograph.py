@@ -19,7 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("viper.evograph")
 
-DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "evograph.db"
+try:
+    from .config import get_config
+    DEFAULT_DB_PATH = get_config().evograph_db_path
+except Exception:
+    # Config must never block evograph (e.g. partial import during tests).
+    DEFAULT_DB_PATH = Path(__file__).parent.parent / "data" / "evograph.db"
 
 
 class EvoGraph:
@@ -295,7 +300,10 @@ class EvoGraph:
     def get_sessions(self) -> List[Dict]:
         """List all recorded sessions."""
         cursor = self.conn.execute(
-            "SELECT * FROM sessions ORDER BY start_time DESC"
+            # id is the tiebreaker: two sessions started in the same clock
+            # tick share an ISO start_time, so fall back to insertion order
+            # (higher rowid = more recent) to keep "most recent first" stable.
+            "SELECT * FROM sessions ORDER BY start_time DESC, id DESC"
         )
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -647,7 +655,8 @@ class EvoGraph:
                 }
                 for row in rows
             ]
-        except Exception:
+        except Exception as exc:
+            logger.debug("get_top_bypasses failed for %s: %s", attack_type, exc)
             return []
 
     def get_payload_fitness_history(self, payload_hash: str) -> List[Dict[str, Any]]:
@@ -663,7 +672,8 @@ class EvoGraph:
                 (f"%{payload_hash}%",),
             ).fetchall()
             return [dict(r) for r in rows]
-        except Exception:
+        except Exception as exc:
+            logger.debug("get_payload_fitness_history failed for %s: %s", payload_hash, exc)
             return []
 
     def export_attack_evolution(self) -> Dict[str, Any]:

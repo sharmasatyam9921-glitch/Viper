@@ -56,24 +56,44 @@ async def run(agent: SwarmAgent) -> List[dict]:
     url = _http_url(agent.target)
     asset = urlparse(url).hostname or agent.target
 
-    # Path A — full wappalyzer module
+    # Path A — full wappalyzer module.
+    # ``recon.wappalyzer.Wappalyzer`` exposes ``fingerprint(url, headers,
+    # body, ...)``, NOT ``fingerprint_url``. An earlier version called the
+    # non-existent method, which raised AttributeError and silently fell
+    # through to Path B — making the 3,920-fingerprint database dead code.
     try:
+        import urllib.request as _urlreq
         from recon.wappalyzer import Wappalyzer  # type: ignore
         wa = Wappalyzer()
+
+        def _fp_via_wappalyzer():
+            req = _urlreq.Request(url, headers={"User-Agent": "viper-swarm/1.0"})
+            with _urlreq.urlopen(req, timeout=8) as resp:
+                body_text = resp.read(256 * 1024).decode("utf-8", errors="replace")
+                resp_headers = {k: v for k, v in resp.headers.items()}
+            return wa.fingerprint(url, resp_headers, body_text)
+
         techs = await asyncio.wait_for(
-            asyncio.to_thread(wa.fingerprint_url, url),
+            asyncio.to_thread(_fp_via_wappalyzer),
             timeout=min(agent.timeout_s, 15.0),
         )
         return [
             {
                 "type": "technology",
-                "title": t,
+                "title": (
+                    f"{t.get('name')}"
+                    + (f" {t['version']}" if isinstance(t, dict)
+                       and t.get("version") else "")
+                ) if isinstance(t, dict) else str(t),
                 "asset": asset,
                 "url": url,
                 "severity": "info",
-                "evidence": "wappalyzer signature match",
+                "evidence": "wappalyzer fingerprint match",
+                "confidence": (t.get("confidence", 70) / 100.0)
+                              if isinstance(t, dict) else 0.7,
+                "categories": t.get("categories", []) if isinstance(t, dict) else [],
             }
-            for t in techs
+            for t in (techs or [])
         ]
     except Exception as e:  # noqa: BLE001
         logger.debug("wappalyzer module unavailable: %s", e)

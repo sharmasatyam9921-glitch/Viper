@@ -216,7 +216,7 @@ class GmailAliasProvider:
         )
 
     def _connect(self) -> imaplib.IMAP4_SSL:
-        m = imaplib.IMAP4_SSL("imap.gmail.com")
+        m = imaplib.IMAP4_SSL("imap.gmail.com", timeout=30)
         assert self._user and self._app_pw  # narrowed by __init__
         m.login(self._user, self._app_pw)
         return m

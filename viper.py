@@ -109,6 +109,15 @@ def main():
     parser.add_argument("--train-port", type=int, default=9999, help="Port for training vuln server (default: 9999)")
     args = parser.parse_args()
 
+    # ── Structured logging bootstrap ──
+    try:
+        from core.config import get_config
+        from core.logging_setup import configure_logging
+        _cfg = get_config()
+        configure_logging(level=_cfg.log_level, json_output=_cfg.log_json)
+    except Exception:
+        pass  # logging setup must never block a scan
+
     # ── Preflight checks ──
     if not args.skip_preflight:
         from core.preflight import run_preflight

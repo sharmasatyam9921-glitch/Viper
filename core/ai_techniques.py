@@ -780,7 +780,7 @@ class CollectiveMemoryV2:
             try:
                 return json.loads(self.path.read_text())
             except Exception as e:  # noqa: BLE001
-                pass
+                logger.warning("Failed to load collective memory from %s: %s", self.path, e)
         return {
             "techniques": {},
             "stats": {

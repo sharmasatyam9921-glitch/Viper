@@ -8,15 +8,48 @@ redirects optionally, and tolerates the usual network errors with `None`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("viper.swarm_workers.vuln._http")
+
+
+# --- Scope gate -------------------------------------------------------------
+# A hunt installs a predicate here so every worker request is checked against
+# the engagement scope BEFORE it leaves the box. It lives in a ContextVar so
+# concurrent hunts (daemon / dashboard) don't clobber each other's scope, and
+# defaults to None → unrestricted (legacy behavior; lab/CTF run without a gate
+# and the existing test-suite is unaffected). The gate FAILS CLOSED: any error
+# evaluating the predicate denies the request.
+_scope_guard_var: contextvars.ContextVar[Optional[Callable[[str], bool]]] = \
+    contextvars.ContextVar("viper_scope_guard", default=None)
+
+
+def set_scope_guard(fn: Optional[Callable[[str], bool]]) -> None:
+    """Install a predicate `fn(url) -> bool` (True = in scope). None clears it."""
+    _scope_guard_var.set(fn)
+
+
+def clear_scope_guard() -> None:
+    _scope_guard_var.set(None)
+
+
+def is_in_scope(url: str) -> bool:
+    """True if `url` may be requested. No guard installed → unrestricted."""
+    guard = _scope_guard_var.get()
+    if guard is None:
+        return True
+    try:
+        return bool(guard(url))
+    except Exception as e:  # noqa: BLE001 — fail closed on any guard error
+        logger.warning("scope guard raised for %s (%s) — denying", url, e)
+        return False
 
 
 @dataclass
@@ -100,7 +133,13 @@ async def fetch(
     Token-bucket rate-limited per host by default (30 req/s, burst 60).
     Pass `rate_limit=False` to bypass — only useful for the rate-limiter
     own tests.
+
+    Every request is checked against the installed scope guard first; an
+    off-scope URL returns None without touching the network.
     """
+    if url and not is_in_scope(url):
+        logger.warning("scope gate blocked off-scope request: %s %s", method, url)
+        return None
     if rate_limit and url:
         # Lazy import to keep this module dependency-light at top of file
         from ._rate_limit import wait_for_token

@@ -52,6 +52,8 @@ EVENT_TYPES = (
     "approval.granted",
     "approval.denied",
     "llm.called",
+    "report.generated",
+    "report.failed",
     "error",
 )
 
@@ -128,6 +130,9 @@ class AuditLogger:
         self._jsonl_lock = threading.Lock()
         self._closed = False
         self._t0 = time.time()
+        # Guards a strictly-increasing event clock (see event()).
+        self._ts_lock = threading.Lock()
+        self._last_ts = 0.0
         # Prepare parent dirs
         self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         # Open SQLite if requested; the connection is per-logger, but a
@@ -161,9 +166,13 @@ class AuditLogger:
         """Build the default JSONL path + DB and instantiate."""
         ts = ts if ts is not None else time.time()
         hunt_id = make_hunt_id(target, ts=ts)
-        hunts_dir = Path(hunts_dir or "state/hunts")
+        # Defaults resolve against the central config (absolute, CWD-independent)
+        # instead of fragile relative "state/hunts" / "data/viper.db" strings.
+        from .config import get_config
+        cfg = get_config()
+        hunts_dir = Path(hunts_dir) if hunts_dir else cfg.hunts_dir
         jsonl = hunts_dir / hunt_id / "audit.jsonl"
-        db = Path(db_path) if db_path else Path("data/viper.db")
+        db = Path(db_path) if db_path else cfg.db_path
         return cls(hunt_id=hunt_id, jsonl_path=jsonl, db_path=db)
 
     # ------------------------------------------------------------------
@@ -217,8 +226,18 @@ class AuditLogger:
         """Record one event. Returns the AuditEvent for caller reference."""
         if self._closed:
             raise RuntimeError("AuditLogger is closed")
+        # Strictly-increasing clock: time.time() has coarse resolution on
+        # some platforms (≈16 ms on Windows), so events emitted in a tight
+        # loop can share a timestamp. An audit log must preserve order, and
+        # ts-ordered dashboard reads (e.g. `since=` filters) rely on
+        # distinct values, so nudge any collision forward by 1 µs.
+        with self._ts_lock:
+            ts = time.time()
+            if ts <= self._last_ts:
+                ts = self._last_ts + 1e-6
+            self._last_ts = ts
         ev = AuditEvent(
-            ts=time.time(),
+            ts=ts,
             action=action,
             hunt_id=self.hunt_id,
             phase=phase,
@@ -297,10 +316,16 @@ class AuditLogger:
         return events
 
     def query(self, *, since: float = 0.0, action: str = "", limit: int = 1000) -> list[dict]:
-        """Read from the SQLite mirror. Used by the dashboard."""
+        """Read from the SQLite mirror.
+
+        `since` is exclusive: only events strictly newer than the given
+        timestamp are returned. Paired with the strictly-increasing event
+        clock (see event()), a caller can poll with the last ts it saw and
+        never re-receive that boundary event.
+        """
         if not self._db:
             return []
-        sql = "SELECT * FROM audit_log WHERE hunt_id = ? AND ts >= ?"
+        sql = "SELECT * FROM audit_log WHERE hunt_id = ? AND ts > ?"
         args: list[Any] = [self.hunt_id, since]
         if action:
             sql += " AND action = ?"
@@ -320,8 +345,11 @@ class AuditLogger:
         return rows
 
     @staticmethod
-    def list_hunts(hunts_dir: Union[str, Path] = "state/hunts") -> list[str]:
+    def list_hunts(hunts_dir: Union[str, Path, None] = None) -> list[str]:
         """Enumerate hunt_ids on disk (used by --resume)."""
+        if hunts_dir is None:
+            from .config import get_config
+            hunts_dir = get_config().hunts_dir
         p = Path(hunts_dir)
         if not p.exists():
             return []
