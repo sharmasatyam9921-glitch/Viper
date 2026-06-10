@@ -207,6 +207,108 @@ class TestCTFFlagLoop:
 
 
 # ---------------------------------------------------------------------------
+# Hard guardrail: blocked targets never run
+# ---------------------------------------------------------------------------
+
+
+class TestHardGuardrail:
+    def test_blocked_target_aborts_before_work(self, tmp_path):
+        # A protected domain must fail the run closed, with no phases/findings.
+        hm = _make_hackmode(tmp_path, target="chase.com")
+        result = asyncio.run(hm.run())
+        assert result.stop_reason == "guardrail_blocked"
+        assert result.findings_count == 0
+        assert result.phase_results == {}
+        actions = [e.action for e in hm.audit.read_jsonl()]
+        assert "guardrail.blocked" in actions
+        # never advanced into the loop
+        assert "loop.iteration" not in actions
+
+    def test_gov_tld_blocked(self, tmp_path):
+        hm = _make_hackmode(tmp_path, target="nasa.gov")
+        result = asyncio.run(hm.run())
+        assert result.stop_reason == "guardrail_blocked"
+
+
+# ---------------------------------------------------------------------------
+# Mythos-style chaining: a confirmed exploit drives a deeper round
+# ---------------------------------------------------------------------------
+
+
+async def _exploit_runner(agent: SwarmAgent) -> List[dict]:
+    """Emit a confirmed-exploit finding with a URL → should trigger chaining."""
+    return [{
+        "type": "sqli_exploited",
+        "vuln_type": f"sqli_exploited:{agent.target}",
+        "title": "SQL injection confirmed",
+        "severity": "critical",
+        "url": "http://example.com/item?id=1",
+    }]
+
+
+class TestChaining:
+    def test_confirmed_exploit_expands_chain(self, tmp_path):
+        # LabProfile(--go) enables exploit/post + max_chain_depth>0.
+        hm = _make_hackmode(
+            tmp_path,
+            profile=LabProfile(allow_destructive=True),
+            technique_runner=_exploit_runner,
+        )
+        result = asyncio.run(hm.run())
+        # A chain round produced scoped phase-results …
+        assert any(k.startswith("vuln@chain") for k in result.phase_results)
+        # … and the audit log recorded the expansion + completion.
+        actions = [e.action for e in hm.audit.read_jsonl()]
+        assert "chain.expanded" in actions
+        assert "chain.completed" in actions
+        # Findings carry a verdict annotation for the report.
+        assert any(f.get("chain_verdict") for f in result.findings)
+
+    def test_chain_scope_gate_fails_closed(self, tmp_path):
+        # A scope reasoner that denies everything must block chain expansion
+        # even when a confirmed exploit is present — fail closed.
+        class _DenyAll:
+            def decide(self, target, **kw):
+                from core.scope_reasoner import ScopeDecision
+                return ScopeDecision(target=target, allowed=False,
+                                     reason="test deny", source="default-deny")
+
+        audit = AuditLogger.for_hunt(
+            "example.com", hunts_dir=tmp_path / "hunts", db_path=tmp_path / "v.db")
+        hm = HackMode(
+            target="example.com",
+            profile=LabProfile(allow_destructive=True),
+            narrator=Narrator(quiet=True),
+            audit=audit,
+            scope_reasoner=_DenyAll(),
+        )
+
+        def factory(phase, common):
+            coord = _StubCoord(technique_runner=_exploit_runner, **common)
+            coord.PHASE = phase
+            return coord
+
+        hm._coord_factory = factory
+        result = asyncio.run(hm.run())
+        actions = [e.action for e in hm.audit.read_jsonl()]
+        # The off-scope confirmed-exploit URL was blocked, so no expansion ran.
+        assert "chain.scope_blocked" in actions
+        assert not any(k.startswith("vuln@chain") for k in result.phase_results)
+
+    def test_no_chain_when_findings_are_info(self, tmp_path):
+        # info-severity findings are DOWNGRADE → never chain, even with --go.
+        hm = _make_hackmode(
+            tmp_path,
+            profile=LabProfile(allow_destructive=True),
+            technique_runner=_good_runner,
+        )
+        result = asyncio.run(hm.run())
+        assert not any(k.startswith("vuln@chain") for k in result.phase_results)
+        actions = [e.action for e in hm.audit.read_jsonl()]
+        assert "chain.expanded" not in actions
+
+
+# ---------------------------------------------------------------------------
 # Bug-bounty: exhaustion stop after 3 zero-iterations
 # ---------------------------------------------------------------------------
 
