@@ -157,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="Don't tear targets down (debugging).")
     p.add_argument("--dry-run", action="store_true",
                    help="List challenges and exit; start/run nothing.")
+    p.add_argument("--mode", choices=("full", "hack"), default="full",
+                   help="VIPER pipeline: 'full' (legacy ViperCore) or 'hack' "
+                        "(swarm HackMode — the app-logic worker pipeline).")
     args = p.parse_args(argv)
 
     suite_path = Path(args.suite)
@@ -183,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     runner = ViperRunner(python=args.python, time_minutes=args.time,
-                         extra_args=args.viper_arg)
+                         extra_args=args.viper_arg, mode=args.mode)
     scores: list[Score] = []
     t0 = time.time()
 

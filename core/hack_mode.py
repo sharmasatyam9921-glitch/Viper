@@ -91,6 +91,22 @@ class HackResult:
             "stop_reason": self.stop_reason,
             "timed_out": self.timed_out,
             "findings_count": self.findings_count,
+            # Normalized findings list so consumers (reports, the benchmark
+            # scorer) can read individual findings, not just the count.
+            "findings": [
+                {
+                    "vuln_type": f.get("vuln_type") or f.get("type") or "finding",
+                    "type": f.get("type"),
+                    "severity": str(f.get("severity") or "info"),
+                    "title": f.get("title"),
+                    "url": f.get("url"),
+                    "parameter": f.get("parameter"),
+                    "payload": f.get("payload"),
+                    "evidence": f.get("evidence"),
+                    "confidence": f.get("confidence"),
+                }
+                for f in self.findings
+            ],
             "phase_results": {
                 phase: {
                     "workers_dispatched": r.workers_dispatched,

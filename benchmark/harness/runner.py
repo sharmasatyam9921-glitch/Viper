@@ -70,11 +70,15 @@ class ViperRunner:
         time_minutes: int = 10,
         extra_args: Optional[list[str]] = None,
         verbose: bool = True,
+        mode: str = "full",
     ):
         self.python = python or sys.executable
         self.time_minutes = time_minutes
         self.extra_args = list(extra_args or [])
         self.verbose = verbose
+        # "full" -> legacy ViperCore.full_hunt (viper.py <url> --full)
+        # "hack" -> swarm HackMode (viper.py hack <url>), the app-logic pipeline
+        self.mode = mode
 
     def _log(self, msg: str) -> None:
         if self.verbose:
@@ -82,12 +86,21 @@ class ViperRunner:
 
     def build_cmd(self, target_url: str, output_path: str,
                   challenge: Challenge) -> list[str]:
-        cmd = [
-            self.python, str(VIPER_PY), target_url,
-            "--full", "--no-guardrail",
-            "--output", output_path,
-            "--time", str(self.time_minutes),
-        ]
+        if self.mode == "hack":
+            # Swarm HackMode: app-logic vuln workers run in the vuln phase.
+            cmd = [
+                self.python, str(VIPER_PY), "hack", target_url,
+                "--output", output_path,
+                "--time", str(self.time_minutes),
+                "--no-dashboard", "--quiet",
+            ]
+        else:
+            cmd = [
+                self.python, str(VIPER_PY), target_url,
+                "--full", "--no-guardrail",
+                "--output", output_path,
+                "--time", str(self.time_minutes),
+            ]
         cmd += self.extra_args
         cmd += list(challenge.viper_args)
         return cmd
