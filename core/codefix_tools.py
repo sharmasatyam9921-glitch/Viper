@@ -289,7 +289,9 @@ def _validate_path(file_path: str, base_path: str = None) -> Path:
     p = Path(file_path).resolve()
     if base_path:
         base = Path(base_path).resolve()
-        if not str(p).startswith(str(base)):
+        # Component-wise containment check. A naive str.startswith would let a
+        # sibling like `<base>-evil` slip past (it shares the string prefix).
+        if not p.is_relative_to(base):
             raise ValueError(f"Path traversal blocked: {file_path} escapes {base_path}")
     return p
 
