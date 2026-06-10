@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
-import ssl
 import urllib.parse
-import urllib.request
 from typing import List
 from urllib.parse import urlparse
 
+from core import tool_gateway as gateway
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
@@ -38,12 +37,15 @@ def _domain_from_target(target: str) -> str:
 async def _crtsh_query(domain: str, *, timeout: float = 15.0) -> set[str]:
     """Cheap HTTPS query to crt.sh — works without API keys."""
     url = f"https://crt.sh/?q=%25.{urllib.parse.quote(domain)}&output=json"
-    ctx = ssl.create_default_context()
+    # crt.sh is third-party OSINT infrastructure, not the target → is_infra=True.
+    resp = await gateway.http(
+        "GET", url, is_infra=True, timeout=timeout,
+        headers={"User-Agent": "viper-swarm/1.0"},
+    )
+    if resp is None:  # scope-denied or network error
+        return set()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "viper-swarm/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            data = r.read()
-        rows = json.loads(data.decode("utf-8", errors="replace"))
+        rows = json.loads(resp.body)
     except Exception as e:  # noqa: BLE001
         logger.debug("crt.sh query failed for %s: %s", domain, e)
         return set()

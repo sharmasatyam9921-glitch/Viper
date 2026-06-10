@@ -6,14 +6,13 @@ finding forgotten endpoints, parameters, and exposed admin paths.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import urllib.parse
-import urllib.request
 from typing import List
 from urllib.parse import urlparse
 
+from core import tool_gateway as gateway
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
@@ -29,19 +28,24 @@ def _domain(target: str) -> str:
     return t.split(":", 1)[0].rstrip(".")
 
 
-def _wayback_urls(domain: str, *, limit: int = 500, timeout: float = 15.0) -> list[str]:
+async def _wayback_urls(domain: str, *, limit: int = 500, timeout: float = 15.0) -> list[str]:
     """Hit the CDX API. Returns deduplicated URLs."""
     url = (
         f"https://web.archive.org/cdx/search/cdx?"
         f"url={urllib.parse.quote(f'*.{domain}/*')}"
         f"&output=json&fl=original&collapse=urlkey&limit={limit}"
     )
+    # web.archive.org is third-party OSINT infrastructure, not the target.
+    resp = await gateway.http(
+        "GET", url, is_infra=True, timeout=timeout,
+        headers={"User-Agent": "viper-swarm/1.0"},
+    )
+    if resp is None:  # scope-denied or network error
+        return []
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "viper-swarm/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8", errors="replace"))
+        data = json.loads(resp.body)
     except Exception as e:  # noqa: BLE001
-        logger.debug("wayback CDX query failed for %s: %s", domain, e)
+        logger.debug("wayback CDX parse failed for %s: %s", domain, e)
         return []
     if not data or len(data) < 2:
         return []
@@ -61,8 +65,8 @@ async def run(agent: SwarmAgent) -> List[dict]:
     if not domain:
         return []
 
-    urls = await asyncio.to_thread(
-        _wayback_urls, domain, limit=500, timeout=min(agent.timeout_s, 20.0),
+    urls = await _wayback_urls(
+        domain, limit=500, timeout=min(agent.timeout_s, 20.0),
     )
 
     findings: list[dict] = []

@@ -14,10 +14,10 @@ import asyncio
 import json
 import logging
 import socket
-import urllib.request
 from typing import List
 from urllib.parse import urlparse
 
+from core import tool_gateway as gateway
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
@@ -39,14 +39,18 @@ def _resolve(target: str) -> list[str]:
         return []
 
 
-def _internetdb(ip: str, *, timeout: float = 8.0) -> dict:
-    req = urllib.request.Request(
-        f"https://internetdb.shodan.io/{ip}",
+async def _internetdb(ip: str, *, timeout: float = 8.0) -> dict:
+    # Shodan InternetDB is third-party OSINT infrastructure, not the target
+    # → is_infra=True (exempt from the target scope check, still rate-limited).
+    resp = await gateway.http(
+        "GET", f"https://internetdb.shodan.io/{ip}",
+        is_infra=True, timeout=timeout,
         headers={"User-Agent": "viper-swarm/1.0"},
     )
+    if resp is None:  # scope-denied or network error
+        return {}
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8", errors="replace"))
+        return json.loads(resp.body)
     except Exception as e:  # noqa: BLE001
         logger.debug("internetdb miss for %s: %s", ip, e)
         return {}
@@ -59,7 +63,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
 
     findings: list[dict] = []
     for ip in ips:
-        data = await asyncio.to_thread(_internetdb, ip, timeout=min(agent.timeout_s, 8.0))
+        data = await _internetdb(ip, timeout=min(agent.timeout_s, 8.0))
         if not data:
             continue
         for cve in data.get("vulns", []) or []:

@@ -10,12 +10,12 @@ Output:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from typing import List
 from urllib.parse import urlparse
 
+from core import tool_gateway as gateway
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
@@ -62,21 +62,19 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # non-existent method, which raised AttributeError and silently fell
     # through to Path B — making the 3,920-fingerprint database dead code.
     try:
-        import urllib.request as _urlreq
         from recon.wappalyzer import Wappalyzer  # type: ignore
         wa = Wappalyzer()
 
-        def _fp_via_wappalyzer():
-            req = _urlreq.Request(url, headers={"User-Agent": "viper-swarm/1.0"})
-            with _urlreq.urlopen(req, timeout=8) as resp:
-                body_text = resp.read(256 * 1024).decode("utf-8", errors="replace")
-                resp_headers = {k: v for k, v in resp.headers.items()}
-            return wa.fingerprint(url, resp_headers, body_text)
-
-        techs = await asyncio.wait_for(
-            asyncio.to_thread(_fp_via_wappalyzer),
+        # The HTTP fetch hits the TARGET host (we feed its headers/body to the
+        # fingerprint DB) → is_infra=False so the hunt's scope predicate applies.
+        resp = await gateway.http(
+            "GET", url, is_infra=False,
             timeout=min(agent.timeout_s, 15.0),
+            headers={"User-Agent": "viper-swarm/1.0"},
         )
+        if resp is None:  # scope-denied or network error
+            raise RuntimeError("target fetch denied or failed")
+        techs = wa.fingerprint(url, resp.headers, resp.body)
         return [
             {
                 "type": "technology",
@@ -98,18 +96,20 @@ async def run(agent: SwarmAgent) -> List[dict]:
     except Exception as e:  # noqa: BLE001
         logger.debug("wappalyzer module unavailable: %s", e)
 
-    # Path B — quick header + html signature scan via stdlib
-    try:
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "viper-swarm/1.0"})
-        with urllib.request.urlopen(req, timeout=min(agent.timeout_s, 10.0)) as resp:
-            body = resp.read(64 * 1024).decode("utf-8", errors="replace")
-            server = resp.headers.get("Server", "")
-            powered = resp.headers.get("X-Powered-By", "")
-            text = " ".join([server, powered, body])
-    except Exception as e:  # noqa: BLE001
-        logger.debug("fingerprint fetch failed for %s: %s", url, e)
+    # Path B — quick header + html signature scan via the egress gateway.
+    # This fetch hits the TARGET host → is_infra=False (scope predicate applies).
+    resp = await gateway.http(
+        "GET", url, is_infra=False,
+        timeout=min(agent.timeout_s, 10.0),
+        headers={"User-Agent": "viper-swarm/1.0"},
+    )
+    if resp is None:  # scope-denied or network error
+        logger.debug("fingerprint fetch failed for %s (scope-denied or network)", url)
         return []
+    body = resp.body
+    server = resp.headers.get("server", "")
+    powered = resp.headers.get("x-powered-by", "")
+    text = " ".join([server, powered, body])
 
     found: dict[str, str] = {}
     for pat, name in _BANNER_PATTERNS:

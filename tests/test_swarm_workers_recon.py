@@ -210,26 +210,30 @@ class TestPortScanWorker:
 # ---------------------------------------------------------------------------
 
 
-class _Resp:
-    def __init__(self, body, headers):
-        self._body = body.encode()
-        self.headers = headers
-
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
-    def read(self, n=None): return self._body
+def _gw_stub(resp):
+    """Async stub for core.tool_gateway.http returning a canned HttpResp | None."""
+    async def _http(method, url, *, is_infra=False, timeout=None,
+                    rate_limit=True, **kw):
+        return resp
+    return _http
 
 
 class TestWappalyzerWorker:
     def test_detects_from_response_signatures(self):
+        # The worker's egress now flows through core.tool_gateway.http; patch
+        # that single chokepoint with a canned HttpResp instead of urlopen.
+        from core.swarm_workers.vuln._http import HttpResp
+
+        resp = HttpResp(
+            status=200,
+            headers={"server": "nginx/1.18.0", "x-powered-by": "PHP/7.4.30"},
+            body="<html>WordPress 5.8 React</html>",
+            final_url="https://example.com",
+        )
+
         async def go():
-            with patch("urllib.request.urlopen",
-                       return_value=_Resp(
-                           "<html>WordPress 5.8 React</html>",
-                           {"Server": "nginx/1.18.0", "X-Powered-By": "PHP/7.4.30"},
-                       )):
-                # Patch the import path so module-not-found returns None and we
-                # fall to the stdlib signature scan
+            with patch("core.tool_gateway.http", new=_gw_stub(resp)):
+                # Force the full-DB path to be absent → stdlib signature scan.
                 with patch.dict(sys.modules, {"recon.wappalyzer": None}):
                     runner = get_worker_runner("recon", "wappalyzer")
                     return await runner(_agent("example.com", technique="wappalyzer"))
@@ -240,8 +244,9 @@ class TestWappalyzerWorker:
         assert any(name in t for t in tech_names for name in ("nginx", "php", "wordpress"))
 
     def test_handles_network_failure(self):
+        # gateway.http returns None on scope-denial or network error.
         async def go():
-            with patch("urllib.request.urlopen", side_effect=OSError("no net")):
+            with patch("core.tool_gateway.http", new=_gw_stub(None)):
                 with patch.dict(sys.modules, {"recon.wappalyzer": None}):
                     runner = get_worker_runner("recon", "wappalyzer")
                     return await runner(_agent("example.com", technique="wappalyzer"))

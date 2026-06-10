@@ -59,19 +59,18 @@ async def _run_nuclei_subprocess(url: str, timeout: float) -> List[dict]:
         "-tags", "cve,exposure,misconfig,xss,sqli,ssrf,rce,oast",
         "-rate-limit", "30",
     ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except (asyncio.TimeoutError, FileNotFoundError, OSError) as e:
-        logger.debug("nuclei subprocess error on %s: %s", url, e)
+    # Route through the typed egress gateway so the spawn is scope-checked,
+    # audited, and timeout-bounded under the active hunt. With no hunt context
+    # installed (tests / standalone) the gateway runs in permissive passthrough.
+    from core.tool_gateway import run_subprocess
+    res = await run_subprocess(cmd, scope_target=url, timeout=timeout)
+    if res is None:
+        logger.debug("nuclei egress scope-denied for %s", url)
         return []
+    out_text = res.stdout
 
     findings: list[dict] = []
-    for line in out.decode("utf-8", errors="replace").splitlines():
+    for line in out_text.splitlines():
         line = line.strip()
         if not line:
             continue
