@@ -1,9 +1,12 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useApi } from "@/hooks/useApi";
 import { apiGet, apiPost } from "@/lib/api";
-import type { Session, Finding } from "@/lib/types";
+import { FolderKanban, Play } from "lucide-react";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card, CardHeader } from "@/components/ui/Card";
+import { EmptyState } from "@/components/ui/EmptyState";
 
 interface ProjectInfo {
   target: string;
@@ -12,244 +15,244 @@ interface ProjectInfo {
   total_findings: number;
   total_sessions: number;
 }
+// Rows from GET /api/sessions/list — the evograph hunt history (distinct from
+// the live-hunt Session state machine in lib/types.ts).
+interface HistSession {
+  id: number; target: string; tech_stack?: string;
+  start_time?: string; end_time?: string;
+  findings_count: number; total_reward?: number;
+}
+// One ReACT step from GET /api/sessions/:id → traces[].
+interface Trace {
+  id: number; step_num: number;
+  thought?: string; action?: string; observation?: string;
+  reward?: number; timestamp?: string;
+}
+interface SessionDetail extends HistSession { traces?: Trace[] }
 
-interface SessionDetail extends Session {
-  findings?: Finding[];
+// History rows carry no explicit state; derive one from the timestamps.
+function statusOf(s: { start_time?: string; end_time?: string }): string {
+  if (s.end_time) return "completed";
+  if (s.start_time) return "running";
+  return "pending";
 }
 
-/* ---------- phase badge ---------- */
-const PHASE_STYLE: Record<string, string> = {
-  recon: "bg-blue-500/20 text-blue-400",
-  scan: "bg-cyan-500/20 text-cyan-400",
-  exploit: "bg-orange-500/20 text-orange-400",
-  report: "bg-emerald-500/20 text-emerald-400",
-  complete: "bg-emerald-500/20 text-emerald-400",
-  idle: "bg-zinc-600/20 text-zinc-400",
-};
-
-function PhaseBadge({ phase }: { phase: string }) {
-  const p = phase.toLowerCase();
+function StatePill({ state }: { state: string }) {
+  const map = {
+    running:   { bg: "var(--brand-soft)",    fg: "var(--brand)" },
+    completed: { bg: "var(--success-soft)",  fg: "var(--success)" },
+    error:     { bg: "var(--critical-soft)", fg: "var(--critical)" },
+    pending:   { bg: "var(--surface-2)",     fg: "var(--ink-3)" },
+  };
+  const t = map[(state ?? "").toLowerCase() as keyof typeof map] ?? map.pending;
   return (
-    <span
-      className={`inline-block rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${PHASE_STYLE[p] ?? PHASE_STYLE.idle}`}
-    >
-      {phase}
+    <span className="pill" style={{ background: t.bg, color: t.fg, textTransform: "capitalize" }}>
+      {state}
     </span>
   );
 }
 
-/* ---------- state badge ---------- */
-function StateBadge({ state }: { state: string }) {
-  const s = state.toLowerCase();
-  const color =
-    s === "running"
-      ? "text-cyan-400"
-      : s === "completed"
-        ? "text-emerald-400"
-        : s === "error"
-          ? "text-red-400"
-          : "text-zinc-400";
-  return <span className={`text-xs font-semibold ${color}`}>{state}</span>;
-}
-
-/* ---------- page ---------- */
 export default function ProjectsPage() {
-  const { data: project } = useApi<ProjectInfo>(
-    "project-info",
-    "/api/project",
-    10000,
-  );
-  const { data: sessions, refetch: refetchSessions } = useApi<Session[]>(
-    "sessions",
-    "/api/sessions/list",
-    5000,
-  );
-
+  // Backend wraps the response in {project: {...}}; unwrap defensively
+  // so we accept both shapes.
+  const { data: projectRaw } =
+    useApi<ProjectInfo | { project: ProjectInfo }>("project-info", "/api/projects", 10000);
+  const project: ProjectInfo | null =
+    projectRaw && "project" in projectRaw
+      ? (projectRaw.project as ProjectInfo)
+      : (projectRaw as ProjectInfo | null);
+  const { data: sessionsRaw, refetch } = useApi<
+    HistSession[] | { sessions: HistSession[] }
+  >("sessions", "/api/sessions/list", 5000);
+  const sessions: HistSession[] = Array.isArray(sessionsRaw)
+    ? sessionsRaw
+    : (sessionsRaw?.sessions ?? []);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [starting, setStarting] = useState(false);
 
-  /* load session detail */
   useEffect(() => {
-    if (selectedId == null) {
-      setDetail(null);
-      return;
-    }
-    apiGet<SessionDetail>(`/api/sessions/${selectedId}`).then((d) => {
-      if (d) setDetail(d);
-    });
+    if (selectedId == null) { setDetail(null); return; }
+    apiGet<SessionDetail>(`/api/sessions/${selectedId}`).then((d) => d && setDetail(d));
   }, [selectedId]);
 
-  /* start new scan */
   const startScan = async () => {
     setStarting(true);
     await apiPost("/api/scan/start", {});
     setStarting(false);
-    refetchSessions();
+    refetch();
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-zinc-100">Project</h1>
-        <button
-          onClick={startScan}
-          disabled={starting}
-          className="rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 px-4 py-2 text-sm font-semibold text-white transition-colors"
-        >
-          {starting ? "Starting..." : "New Scan"}
-        </button>
-      </div>
+      <PageHeader
+        kicker="Workspace"
+        title="Project"
+        subtitle="Active engagement — target, scope, sessions, findings."
+        actions={
+          <button onClick={startScan} disabled={starting} className="btn-primary">
+            <Play size={13} fill="currentColor" />
+            {starting ? "Starting" : "New scan"}
+          </button>
+        }
+      />
 
-      {/* project info card */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-        <div className="grid grid-cols-4 gap-6">
+      <Card>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
           <div>
-            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              Target
-            </p>
-            <p className="text-sm font-semibold text-cyan-400 mt-1">
+            <div className="kicker">Target</div>
+            <div
+              className="display mt-1"
+              style={{ fontSize: "1.125rem", color: "var(--brand)", fontFamily: "var(--font-geist-sans)" }}
+            >
               {project?.target ?? "Not configured"}
-            </p>
+            </div>
           </div>
           <div>
-            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              Domain
-            </p>
-            <p className="text-sm text-zinc-200 mt-1">
-              {project?.domain ?? "-"}
-            </p>
+            <div className="kicker">Domain</div>
+            <div
+              className="mt-1 text-sm"
+              style={{ color: "var(--ink-1)", fontFamily: "var(--font-geist-mono)" }}
+            >
+              {project?.domain ?? "—"}
+            </div>
           </div>
           <div>
-            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              Findings
-            </p>
-            <p className="text-sm font-bold text-zinc-200 mt-1">
+            <div className="kicker">Findings</div>
+            <div className="display mt-1" style={{ fontSize: "1.5rem" }}>
               {project?.total_findings ?? 0}
-            </p>
+            </div>
           </div>
           <div>
-            <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              Sessions
-            </p>
-            <p className="text-sm font-bold text-zinc-200 mt-1">
+            <div className="kicker">Sessions</div>
+            <div className="display mt-1" style={{ fontSize: "1.5rem" }}>
               {project?.total_sessions ?? sessions?.length ?? 0}
-            </p>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* session list + detail */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* list */}
-        <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-            Scan History
-          </h2>
-          <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-            {(!sessions || sessions.length === 0) && (
-              <p className="text-xs text-zinc-600">No sessions yet.</p>
-            )}
-            {(sessions ?? []).map((s) => (
+        {(project?.scope?.length ?? 0) > 0 && (
+          <div className="mt-5" style={{ borderTop: "1px solid var(--border-1)", paddingTop: 16 }}>
+            <div className="kicker mb-2">Scope</div>
+            <div className="flex flex-wrap gap-1.5">
+              {project?.scope.map((s) => (
+                <span key={s} className="pill" style={{ background: "var(--surface-2)", color: "var(--ink-2)", fontFamily: "var(--font-geist-mono)" }}>
+                  {s}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <Card padding="none" className="lg:col-span-1 overflow-hidden flex flex-col" style={{ maxHeight: 540 }}>
+          <CardHeader title="Sessions" kicker={`${sessions?.length ?? 0} total`} />
+          <div className="flex-1 overflow-y-auto">
+            {(sessions ?? []).length === 0 ? (
+              <div className="p-6 text-sm text-center" style={{ color: "var(--ink-3)" }}>
+                No sessions yet
+              </div>
+            ) : (sessions ?? []).map((s) => (
               <button
                 key={s.id}
                 onClick={() => setSelectedId(s.id)}
-                className={`w-full text-left rounded-lg px-3 py-2.5 transition-colors ${
-                  selectedId === s.id
-                    ? "bg-zinc-800 border border-zinc-700"
-                    : "hover:bg-zinc-800/50 border border-transparent"
-                }`}
+                className="w-full text-left px-5 py-3 transition-colors"
+                style={{
+                  background: selectedId === s.id ? "var(--surface-2)" : "transparent",
+                  borderBottom: "1px solid var(--border-1)",
+                }}
               >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-zinc-200 truncate">
-                    {s.target}
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-medium" style={{ color: "var(--ink-1)" }}>
+                    Session #{s.id}
                   </span>
-                  <StateBadge state={s.state} />
+                  <StatePill state={statusOf(s)} />
                 </div>
-                <div className="flex items-center gap-2 mt-1">
-                  <PhaseBadge phase={s.phase} />
-                  <span className="text-[10px] text-zinc-500">
-                    Iter {s.iteration} &middot; {s.findings_count} findings
-                  </span>
+                <div className="text-xs flex items-center gap-2" style={{ color: "var(--ink-3)" }}>
+                  <span className="truncate" style={{ maxWidth: 130 }}>{s.tech_stack || s.target}</span>
+                  <span>·</span>
+                  <span>{s.findings_count} findings</span>
+                  {typeof s.total_reward === "number" && (
+                    <>
+                      <span>·</span>
+                      <span>rwd {s.total_reward.toFixed(0)}</span>
+                    </>
+                  )}
                 </div>
-                <p className="text-[10px] text-zinc-600 mt-0.5">
-                  {s.created_at}
-                </p>
               </button>
             ))}
           </div>
-        </div>
+        </Card>
 
-        {/* detail */}
-        <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-            Session Detail
-          </h2>
+        <Card className="lg:col-span-2" padding="none">
           {!detail ? (
-            <p className="text-xs text-zinc-600">
-              Select a session to view details.
-            </p>
+            <EmptyState
+              title="Pick a session"
+              hint="Select a session on the left to see findings and details."
+              icon={<FolderKanban size={20} />}
+            />
           ) : (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <p className="text-[10px] text-zinc-500 uppercase">State</p>
-                  <StateBadge state={detail.state} />
+            <div>
+              <div className="px-5 py-4" style={{ borderBottom: "1px solid var(--border-1)" }}>
+                <div className="kicker">Session #{detail.id}</div>
+                <div className="display mt-0.5" style={{ fontSize: "1.25rem", fontFamily: "var(--font-geist-mono)" }}>
+                  {detail.target}
                 </div>
-                <div>
-                  <p className="text-[10px] text-zinc-500 uppercase">Phase</p>
-                  <PhaseBadge phase={detail.phase} />
-                </div>
-                <div>
-                  <p className="text-[10px] text-zinc-500 uppercase">
-                    Iteration
-                  </p>
-                  <p className="text-sm text-zinc-200">{detail.iteration}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] text-zinc-500 uppercase">
-                    Findings
-                  </p>
-                  <p className="text-sm text-zinc-200">
-                    {detail.findings_count}
-                  </p>
+                <div className="text-xs mt-1 flex items-center gap-2" style={{ color: "var(--ink-3)" }}>
+                  {detail.tech_stack && (
+                    <>
+                      <span className="pill" style={{ background: "var(--brand-soft)", color: "var(--brand-ink)" }}>{detail.tech_stack}</span>
+                      <span>·</span>
+                    </>
+                  )}
+                  <span>{detail.findings_count} findings</span>
+                  {typeof detail.total_reward === "number" && (
+                    <>
+                      <span>·</span>
+                      <span>reward {detail.total_reward.toFixed(1)}</span>
+                    </>
+                  )}
+                  <span>·</span>
+                  <StatePill state={statusOf(detail)} />
                 </div>
               </div>
 
-              {/* session findings */}
-              {detail.findings && detail.findings.length > 0 && (
-                <div>
-                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
-                    Findings
-                  </p>
-                  <div className="space-y-1 max-h-64 overflow-y-auto">
-                    {detail.findings.map((f) => (
-                      <div
-                        key={f.id}
-                        className="flex items-center gap-2 px-2 py-1.5 rounded bg-zinc-800/50 text-xs"
-                      >
-                        <span
-                          className={`font-semibold ${
-                            f.severity === "critical"
-                              ? "text-red-400"
-                              : f.severity === "high"
-                                ? "text-orange-400"
-                                : "text-zinc-400"
-                          }`}
-                        >
-                          {f.severity.toUpperCase()}
-                        </span>
-                        <span className="text-zinc-300 truncate">
-                          {f.title}
-                        </span>
+              <div className="p-5">
+                <div className="kicker mb-3">Reasoning trace</div>
+                {!detail.traces || detail.traces.length === 0 ? (
+                  <div className="text-sm" style={{ color: "var(--ink-3)" }}>
+                    No reasoning trace recorded for this session.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {detail.traces.map((t) => (
+                      <div key={t.id} className="p-3 rounded-lg" style={{ background: "var(--surface-2)" }}>
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="pill" style={{ background: "var(--surface-1)", color: "var(--ink-3)", fontFamily: "var(--font-geist-mono)", fontSize: 11 }}>
+                            #{t.step_num}
+                          </span>
+                          {t.action && (
+                            <span className="pill" style={{ background: "var(--brand-soft)", color: "var(--brand-ink)", fontFamily: "var(--font-geist-mono)" }}>
+                              {t.action}
+                            </span>
+                          )}
+                          {typeof t.reward === "number" && (
+                            <span className="text-xs ml-auto" style={{ color: t.reward > 0 ? "var(--success)" : "var(--ink-3)", fontWeight: 600 }}>
+                              {t.reward > 0 ? "+" : ""}{t.reward}
+                            </span>
+                          )}
+                        </div>
+                        {t.thought && <div className="text-sm" style={{ color: "var(--ink-1)" }}>{t.thought}</div>}
+                        {t.observation && <div className="text-xs mt-1.5" style={{ color: "var(--ink-3)" }}>{t.observation}</div>}
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           )}
-        </div>
+        </Card>
       </div>
     </div>
   );

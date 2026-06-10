@@ -14,6 +14,7 @@ Usage:
 import base64
 import csv
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -63,18 +64,35 @@ class MessageType:
     RESUME = 'resume'
 
 # ── Path resolution ──
+# Resolved through the central config so VIPER_DB_PATH / VIPER_EVOGRAPH_DB /
+# VIPER_DATA_DIR overrides apply to the dashboard too (one source of truth).
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-VIPER_DB = DATA_DIR / "viper.db"
-EVOGRAPH_DB = DATA_DIR / "evograph.db"
-LOGS_DIR = PROJECT_ROOT / "logs"
-REPORTS_DIR = PROJECT_ROOT / "reports"
+try:
+    from core.config import get_config as _get_config
+    _CFG = _get_config()
+    DATA_DIR = _CFG.data_dir
+    VIPER_DB = _CFG.db_path
+    EVOGRAPH_DB = _CFG.evograph_db_path
+    LOGS_DIR = _CFG.logs_dir
+    REPORTS_DIR = _CFG.reports_dir
+except Exception:
+    DATA_DIR = PROJECT_ROOT / "data"
+    VIPER_DB = DATA_DIR / "viper.db"
+    EVOGRAPH_DB = DATA_DIR / "evograph.db"
+    LOGS_DIR = PROJECT_ROOT / "logs"
+    REPORTS_DIR = PROJECT_ROOT / "reports"
 METRICS_FILE = PROJECT_ROOT / "core" / "viper_metrics.json"
 STATE_FILE = PROJECT_ROOT / "core" / "viper_state.json"
 DASHBOARD_DIR = Path(__file__).resolve().parent
 STATE_DIR = PROJECT_ROOT / "state"
 EVENT_QUEUE_FILE = STATE_DIR / "event_queue.json"
+# Port of the Next.js UI that this headless API backs. Browser hits to the
+# API root are redirected here. Override with VIPER_UI_PORT.
+try:
+    UI_PORT = _CFG.ui_port
+except Exception:
+    UI_PORT = int(os.environ.get("VIPER_UI_PORT", "3000"))
 
 # VIPER 4.0 imports
 try:
@@ -319,15 +337,139 @@ def _hack_hunt_snapshot(db_path: str, hunt_id: str) -> dict:
             else:
                 d.pop("payload_json", None)
             findings.append(d)
+        # Lifecycle — surface WHY a hunt stopped (terminal status + reason).
+        life_rows = con.execute(
+            """
+            SELECT ts, action, outcome, payload_json
+            FROM audit_log
+            WHERE hunt_id = ?
+              AND action IN ('hunt.started','hunt.completed',
+                             'stop_condition.met','error')
+            ORDER BY ts ASC
+            """,
+            (hunt_id,),
+        ).fetchall()
+        started_at = ended_at = None
+        status, reason = "running", ""
+        for r in life_rows:
+            d = dict(r)
+            act = d.get("action")
+            pl = {}
+            if d.get("payload_json"):
+                try:
+                    pl = json.loads(d["payload_json"])
+                except Exception:
+                    pl = {}
+            if act == "hunt.started" and started_at is None:
+                started_at = d.get("ts")
+            elif act == "stop_condition.met":
+                reason = (pl.get("reason") or pl.get("message")
+                          or d.get("outcome") or reason or "stop condition met")
+            elif act == "hunt.completed":
+                status, ended_at = "completed", d.get("ts")
+                if not reason:
+                    reason = d.get("outcome") or pl.get("reason") or "completed"
+            elif act == "error":
+                status, ended_at = "error", d.get("ts")
+                reason = (pl.get("error") or pl.get("message")
+                          or d.get("outcome") or reason or "error")
+        # Detect a crashed/abandoned hunt: running but no recent activity.
+        last_ts = con.execute(
+            "SELECT MAX(ts) FROM audit_log WHERE hunt_id = ?", (hunt_id,)
+        ).fetchone()[0]
+        if status == "running" and last_ts and (time.time() - last_ts) > 180:
+            status = "stalled"
+            reason = reason or "no activity for >3m — the hunt process may have exited"
+        # Locate a generated report for this hunt, if any.
+        report = None
+        try:
+            for ext in ("html", "md"):
+                cands = sorted(REPORTS_DIR.glob(f"*{hunt_id}*.{ext}"))
+                if cands:
+                    report = cands[-1].name
+                    break
+        except Exception:
+            report = None
         return {
             "hunt_id": hunt_id,
             "found": True,
+            "status": status,
+            "reason": reason,
+            "started_at": started_at,
+            "ended_at": ended_at,
             "phases": [dict(r) for r in phase_rows],
             "workers": [dict(r) for r in worker_rows],
             "findings": findings,
+            "report": report,
         }
     finally:
         con.close()
+
+
+def _generate_hunt_report(db_path: str, hunt_id: str) -> dict:
+    """Render an HTML report for a hunt straight from audit_log data.
+
+    Swarm hunts persist findings to audit_log (not the legacy `findings`
+    table), so the report is assembled from finding.published events.
+    Offline-safe: generate_report_sync passes no model_router, so no LLM
+    is invoked and this is safe to call from the HTTP request thread."""
+    snap = _hack_hunt_snapshot(db_path, hunt_id)
+    if not snap.get("found"):
+        return {"ok": False, "error": "hunt not found"}
+    # Resolve the primary target for the hunt (first non-empty target row).
+    target = ""
+    con = _hack_db_connect(db_path)
+    if con is not None:
+        try:
+            row = con.execute(
+                "SELECT target FROM audit_log "
+                "WHERE hunt_id = ? AND target IS NOT NULL AND target != '' "
+                "ORDER BY ts ASC LIMIT 1",
+                (hunt_id,),
+            ).fetchone()
+            if row and row[0]:
+                target = row[0]
+        except Exception:
+            pass
+        finally:
+            con.close()
+    if not target:
+        target = hunt_id
+    # Map audit findings → html_reporter finding-dicts (tolerant of missing
+    # keys; report builders use .get() with sane defaults).
+    report_findings = []
+    for f in snap.get("findings", []):
+        pl = f.get("payload") or {}
+        report_findings.append({
+            "severity": str(f.get("severity") or "info").lower(),
+            "vuln_type": pl.get("title") or pl.get("technique") or "Finding",
+            "url": pl.get("url") or target,
+            "source": pl.get("technique") or f.get("actor") or "swarm",
+            "phase": f.get("phase") or "",
+            "validated": True,
+        })
+    started = snap.get("started_at")
+    ended = snap.get("ended_at") or time.time()
+    elapsed = max(0.0, ended - started) if started else 0.0
+    # start_time must be an ISO string — _build_header slices ts[:19].
+    start_iso = (datetime.fromtimestamp(started).isoformat()
+                 if started else datetime.now().isoformat())
+    metadata = {
+        "start_time": start_iso,
+        "elapsed_seconds": elapsed,
+        "hunt_id": hunt_id,
+        "status": snap.get("status"),
+        "phases": {p.get("phase"): {} for p in snap.get("phases", [])
+                   if p.get("phase")},
+    }
+    try:
+        from core.html_reporter import generate_report_sync, save_report
+        html = generate_report_sync(report_findings, target, metadata)
+        path = save_report(html, f"hunt_{hunt_id}.html")
+        return {"ok": True, "report": path.name,
+                "findings": len(report_findings), "target": target}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 def _hack_audit_query(db_path: str, hunt_id: str, *, since: float,
@@ -364,6 +506,100 @@ def _hack_audit_query(db_path: str, hunt_id: str, *, since: float,
         return {"hunt_id": hunt_id, "events": events, "count": len(events)}
     finally:
         con.close()
+
+
+# ── Attack-graph builder (audit_log is the hack-mode source of truth) ──
+# Swarm hunts write findings to audit_log, NOT the legacy `findings` table,
+# so the graph must be built from there to be non-empty after a hunt.
+
+_GRAPH_SEV_COLOR = {
+    "critical": "#f43f5e",
+    "high": "#fb923c",
+    "medium": "#fbbf24",
+    "low": "#34d399",
+    "info": "#38bdf8",
+}
+_GRAPH_NODE_COLOR = {
+    "target": "#ef4444",
+    "technique": "#a78bfa",
+    "finding": "#fbbf24",
+}
+
+
+def _build_graph_from_audit(db_path: str, hunt_id: str = "",
+                            max_findings: int = 600) -> dict:
+    """Force-graph {nodes, edges} built from audit_log finding.published
+    events. Shape matches the 3D force-graph component:
+      node: {id, name, label, type, color, val, severity?, phase?}
+      edge: {source, target, rel}
+    """
+    con = _hack_db_connect(db_path)
+    if con is None:
+        return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0,
+                "node_types": {}, "edge_types": {}}
+    try:
+        import json as _json
+        base = ("SELECT event_id, hunt_id, ts, phase, target, severity, "
+                "payload_json FROM audit_log WHERE action='finding.published'")
+        if hunt_id:
+            rows = con.execute(base + " AND hunt_id=? ORDER BY ts DESC LIMIT ?",
+                               (hunt_id, max_findings)).fetchall()
+        else:
+            rows = con.execute(base + " ORDER BY ts DESC LIMIT ?",
+                               (max_findings,)).fetchall()
+    finally:
+        con.close()
+
+    nodes: dict = {}
+    edges: list = []
+    edge_seen: set = set()
+    node_types: dict = {}
+    edge_types: dict = {}
+
+    def _node(nid, name, ntype, color, val, **extra):
+        if nid not in nodes:
+            nodes[nid] = {"id": nid, "name": name, "label": name,
+                          "type": ntype, "color": color, "val": val, **extra}
+            node_types[ntype] = node_types.get(ntype, 0) + 1
+        return nid
+
+    def _edge(src, dst, rel):
+        key = (src, dst, rel)
+        if key in edge_seen:
+            return
+        edge_seen.add(key)
+        edges.append({"source": src, "target": dst, "rel": rel})
+        edge_types[rel] = edge_types.get(rel, 0) + 1
+
+    for r in rows:
+        d = dict(r)
+        payload = {}
+        if d.get("payload_json"):
+            try:
+                payload = _json.loads(d["payload_json"])
+            except Exception:
+                payload = {}
+        target = (d.get("target") or payload.get("url") or payload.get("host")
+                  or d.get("hunt_id") or "unknown")
+        sev = (d.get("severity") or payload.get("severity") or "info").lower()
+        title = (payload.get("title") or payload.get("technique")
+                 or payload.get("name") or sev)
+        vuln_type = (payload.get("vuln_type") or payload.get("technique")
+                     or payload.get("type") or "finding")
+
+        tgt_id = _node(f"target:{target}", target, "target",
+                       _GRAPH_NODE_COLOR["target"], 12)
+        tech_id = _node(f"tech:{vuln_type}", vuln_type, "technique",
+                        _GRAPH_NODE_COLOR["technique"], 7)
+        _edge(tgt_id, tech_id, "surfaces")
+        fid = _node(f"finding:{d.get('event_id')}", title, "finding",
+                    _GRAPH_SEV_COLOR.get(sev, _GRAPH_NODE_COLOR["finding"]), 5,
+                    severity=sev, phase=d.get("phase", ""))
+        _edge(tech_id, fid, "found")
+
+    return {"nodes": list(nodes.values()), "edges": edges,
+            "node_count": len(nodes), "edge_count": len(edges),
+            "node_types": node_types, "edge_types": edge_types}
 
 
 def _get_graph_engine():
@@ -718,6 +954,19 @@ def _handle_websocket(handler):
         f"http://localhost:{bind_port}",
         f"http://127.0.0.1:{bind_port}",
     }
+    # Mirror the REST allowlist — the Next.js webapp runs on a separate
+    # port (dev = 3000, Docker also 3000 via the webapp container) and
+    # the browser issues `Origin: http://localhost:3000` on WS upgrades.
+    # Without this the dashboard's "Live" indicator never turns green.
+    for p in ("3000", "3001", "3002", "3010"):
+        allowed_ws_origins.add(f"http://localhost:{p}")
+        allowed_ws_origins.add(f"http://127.0.0.1:{p}")
+    extra = os.environ.get("VIPER_WEBAPP_ORIGINS", "").strip()
+    if extra:
+        for o in extra.split(","):
+            o = o.strip().rstrip("/")
+            if o:
+                allowed_ws_origins.add(o)
     origin = handler.headers.get("Origin", "")
     # Origin may be absent for non-browser clients (curl, wscat) — allow
     # those because the dashboard binds to 127.0.0.1 only and a remote
@@ -964,7 +1213,132 @@ def _emit_typed_agent_event(line, ts):
             break
 
 
+_AGENT_DEFS = [
+    {"name": "recon_agent", "label": "RECON AGENT", "topic": "recon"},
+    {"name": "vuln_agent", "label": "VULN AGENT", "topic": "vuln"},
+    {"name": "exploit_agent", "label": "EXPLOIT AGENT", "topic": "exploit"},
+    {"name": "chain_agent", "label": "CHAIN AGENT", "topic": "chain"},
+]
+# Which audit_log phases roll up under each agent topic.
+_AGENT_TOPIC_PHASES = {
+    "recon": ("recon", "surface", "enum"),
+    "vuln": ("vuln", "nuclei", "scan"),
+    "exploit": ("exploit", "manual"),
+    "chain": ("chain", "report", "post_exploit"),
+}
+
+
+def _audit_agent_overlay(db_path):
+    """Agent roster derived from the latest hunt in audit_log.
+
+    Swarm hunts persist worker/finding events to audit_log (not the legacy
+    log file the original monitor parsed), so the Agents page only lights up
+    when the roster is computed here. Returns None when no hunt exists yet so
+    the caller can fall back to the legacy log-based monitor."""
+    con = _hack_db_connect(db_path)
+    if con is None:
+        return None
+    try:
+        row = con.execute(
+            "SELECT hunt_id, MAX(ts) AS last FROM audit_log "
+            "WHERE hunt_id IS NOT NULL AND hunt_id != '' "
+            "GROUP BY hunt_id ORDER BY last DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        hunt_id, last_ts = row["hunt_id"], row["last"]
+        started = con.execute(
+            "SELECT MIN(ts) FROM audit_log WHERE hunt_id=?", (hunt_id,)
+        ).fetchone()[0]
+        completed = con.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE hunt_id=? "
+            "AND action='hunt.completed'", (hunt_id,)
+        ).fetchone()[0]
+        trow = con.execute(
+            "SELECT target FROM audit_log WHERE hunt_id=? "
+            "AND target IS NOT NULL AND target!='' ORDER BY ts LIMIT 1",
+            (hunt_id,)
+        ).fetchone()
+        target = trow[0] if trow else hunt_id
+        prows = con.execute(
+            "SELECT phase, "
+            "SUM(CASE WHEN action='worker.dispatched' THEN 1 ELSE 0 END) AS dispatched, "
+            "SUM(CASE WHEN action='worker.completed' THEN 1 ELSE 0 END) AS completed, "
+            "SUM(CASE WHEN action='worker.failed' THEN 1 ELSE 0 END) AS failed, "
+            "SUM(CASE WHEN action='finding.published' THEN 1 ELSE 0 END) AS findings, "
+            "MAX(ts) AS last_seen "
+            "FROM audit_log WHERE hunt_id=? AND phase IS NOT NULL AND phase!='' "
+            "GROUP BY phase", (hunt_id,)
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+    now = time.time()
+    running = (not completed) and bool(last_ts) and (now - last_ts) < 180
+    by_phase = {r["phase"]: dict(r) for r in prows}
+    current_phase = "idle"
+    if by_phase:
+        current_phase = max(
+            by_phase.values(), key=lambda d: d["last_seen"] or 0)["phase"]
+
+    agents, total_activity = [], 0
+    for ad in _AGENT_DEFS:
+        dispatched = comp = failed = findings = 0
+        last_seen = 0.0
+        for ph in _AGENT_TOPIC_PHASES[ad["topic"]]:
+            d = by_phase.get(ph)
+            if not d:
+                continue
+            dispatched += d.get("dispatched") or 0
+            comp += d.get("completed") or 0
+            failed += d.get("failed") or 0
+            findings += d.get("findings") or 0
+            last_seen = max(last_seen, d.get("last_seen") or 0)
+        activity = dispatched + comp + failed
+        total_activity += activity
+        recent = running and last_seen and (now - last_seen) < 60
+        in_flight = dispatched > (comp + failed)
+        status = "active" if (recent and in_flight) else (
+            "thinking" if recent else "idle")
+        agents.append({
+            "name": ad["name"], "label": ad["label"], "topic": ad["topic"],
+            "status": status,
+            "current_task": current_phase if recent else None,
+            "phase": current_phase if recent else None,
+            "progress": 0,
+            "findings": findings,
+            "uptime": int(now - started) if (running and started) else 0,
+            "activity_count": activity,
+        })
+    return {
+        "agents": agents,
+        "bus_messages": total_activity,
+        "active_scans": 1 if running else 0,
+        "current_target": target,
+        "current_phase": current_phase if running else "idle",
+        "status": "running" if running else "completed",
+        "progress": 0,
+        "uptime": int(now - started) if (running and started) else 0,
+        "hunt_id": hunt_id,
+    }
+
+
 def get_agent_monitor():
+    """Agent monitor: prefer the audit_log overlay (swarm hunts); fall back to
+    the legacy log parser, but keep legacy if a non-swarm hunt is live."""
+    overlay = _audit_agent_overlay(str(VIPER_DB))
+    legacy = _legacy_agent_monitor()
+    if overlay is None:
+        return legacy
+    if (legacy.get("status") in ("running", "waiting")
+            and overlay.get("status") != "running"):
+        return legacy
+    return overlay
+
+
+def _legacy_agent_monitor():
     """Build real-time agent monitor data from logs and DB."""
     state = get_state()
     metrics = state.get("metrics", {})
@@ -1161,6 +1535,14 @@ def get_react_current():
                     break
         except Exception:
             pass
+
+    # If the planned total is unknown (state file lacks max_steps), fall back to
+    # the current step so the UI renders "Step N of N" instead of "Step N of 0".
+    try:
+        if int(result.get("total_steps") or 0) < int(result.get("step") or 0):
+            result["total_steps"] = result["step"]
+    except (TypeError, ValueError):
+        pass
 
     return result
 
@@ -1440,6 +1822,47 @@ def get_target_detail(domain):
     return target
 
 
+def _audit_attack_rollup():
+    """Per-phase attack rollup from audit_log (hack-mode source of truth).
+
+    Swarm hunts write to audit_log, not the legacy `attack_history` table,
+    so the insights charts derive their data from worker/finding events here.
+    Each row carries both `phase` and `attack_type` (= phase) so it satisfies
+    the kill-chain and attack-stats endpoints from one shape. success_rate is
+    the worker completion ratio per phase (a "reach per stage" metric)."""
+    rows = _query(
+        VIPER_DB,
+        "SELECT phase, "
+        "SUM(CASE WHEN action='worker.dispatched' THEN 1 ELSE 0 END) AS dispatched, "
+        "SUM(CASE WHEN action='worker.completed' THEN 1 ELSE 0 END) AS completed, "
+        "SUM(CASE WHEN action='worker.failed' THEN 1 ELSE 0 END) AS failed, "
+        "SUM(CASE WHEN action='finding.published' THEN 1 ELSE 0 END) AS findings "
+        "FROM audit_log WHERE phase IS NOT NULL AND phase != '' "
+        "GROUP BY phase ORDER BY findings DESC, dispatched DESC",
+    )
+    out = []
+    for r in rows:
+        dispatched = r.get("dispatched") or 0
+        completed = r.get("completed") or 0
+        failed = r.get("failed") or 0
+        findings = r.get("findings") or 0
+        total = dispatched or (completed + failed)
+        if total:
+            sr = round(completed / total * 100, 1)
+        else:
+            sr = 100.0 if findings else 0.0
+        out.append({
+            "phase": r["phase"],
+            "attack_type": r["phase"],
+            "total": total,
+            "completed": completed,
+            "failed": failed,
+            "findings": findings,
+            "success_rate": sr,
+        })
+    return out
+
+
 def get_attack_stats():
     """Attack type success rates."""
     rows = _query(
@@ -1448,6 +1871,8 @@ def get_attack_stats():
         "ROUND(AVG(response_time_ms), 1) as avg_time_ms "
         "FROM attack_history GROUP BY attack_type ORDER BY total DESC",
     )
+    if not rows:
+        return _audit_attack_rollup()
     for d in rows:
         d["success_rate"] = round((d["wins"] or 0) / max(d["total"], 1) * 100, 1)
     return rows
@@ -1474,6 +1899,8 @@ def get_attack_kill_chain():
         "FROM attack_history GROUP BY attack_type "
         "ORDER BY total DESC",
     )
+    if not rows:
+        return _audit_attack_rollup()
     # Build funnel: ordered by volume descending
     funnel = []
     for r in rows:
@@ -1533,26 +1960,38 @@ def get_evograph_sessions():
 
 
 def get_evograph_tech_map():
-    """Tech stack to attack success rate mapping."""
-    # Derive from viper.db: technologies x attack success
+    """Per-technology attack success map.
+
+    Sourced from the evograph ``tech_attack_map`` table, whose
+    ``tech_signature`` is the comma-joined stack a session ran against
+    (e.g. ``"java,nginx"``). We split each signature into individual
+    technologies so the Insights table shows one row per tech rather than
+    per whole stack. (The legacy join on ``viper.db targets.technologies``
+    returned nothing because that column is empty for hack-mode targets.)
+    """
+    if not EVOGRAPH_DB.exists():
+        return []
     rows = _query(
-        VIPER_DB,
-        "SELECT t.technologies, ah.attack_type, ah.success "
-        "FROM attack_history ah JOIN targets t ON ah.target_id=t.id "
-        "WHERE t.technologies IS NOT NULL AND t.technologies != '[]'",
+        EVOGRAPH_DB,
+        "SELECT tech_signature, attempts, successes FROM tech_attack_map",
     )
 
     tech_map = {}
     for r in rows:
-        try:
-            techs = json.loads(r.get("technologies") or "[]")
-        except Exception:
+        sig = (r.get("tech_signature") or "").strip()
+        if not sig:
             continue
-        for tech in techs:
-            if tech not in tech_map:
-                tech_map[tech] = {"tech": tech, "attacks": 0, "successes": 0}
-            tech_map[tech]["attacks"] += 1
-            tech_map[tech]["successes"] += (r["success"] or 0)
+        attempts = r.get("attempts") or 0
+        successes = r.get("successes") or 0
+        for tech in sig.split(","):
+            tech = tech.strip().lower()
+            if not tech:
+                continue
+            entry = tech_map.setdefault(
+                tech, {"tech": tech, "attacks": 0, "successes": 0}
+            )
+            entry["attacks"] += attempts
+            entry["successes"] += successes
 
     result = list(tech_map.values())
     for item in result:
@@ -2030,11 +2469,49 @@ def get_codefix_status():
     return codefix
 
 
+def _audit_sessions(limit=50):
+    """Recent hunts from audit_log → frontend Session shape.
+
+    Swarm hunts live in audit_log, so the Insights "Recent sessions" table
+    reads them here. started_at is emitted as an ISO string (the frontend
+    feeds it to new Date())."""
+    rows = _query(
+        VIPER_DB,
+        "SELECT a.hunt_id, MIN(a.ts) AS started_at, "
+        "MAX(CASE WHEN a.action='hunt.completed' THEN 1 ELSE 0 END) AS completed, "
+        "SUM(CASE WHEN a.action='finding.published' THEN 1 ELSE 0 END) AS findings_count, "
+        "(SELECT b.target FROM audit_log b WHERE b.hunt_id=a.hunt_id "
+        "  AND b.target IS NOT NULL AND b.target!='' ORDER BY b.ts LIMIT 1) AS target, "
+        "(SELECT c.phase FROM audit_log c WHERE c.hunt_id=a.hunt_id "
+        "  AND c.phase IS NOT NULL AND c.phase!='' ORDER BY c.ts DESC LIMIT 1) AS phase "
+        "FROM audit_log a WHERE a.hunt_id IS NOT NULL AND a.hunt_id!='' "
+        "GROUP BY a.hunt_id ORDER BY started_at DESC LIMIT ?",
+        (limit,),
+    )
+    out = []
+    for r in rows:
+        ts = r.get("started_at")
+        out.append({
+            "id": r.get("hunt_id"),
+            "target": r.get("target") or r.get("hunt_id"),
+            "phase": r.get("phase") or "—",
+            "state": "completed" if r.get("completed") else "running",
+            "findings_count": r.get("findings_count") or 0,
+            "started_at": (datetime.fromtimestamp(ts).isoformat()
+                           if ts else None),
+        })
+    return out
+
+
 def get_sessions_list():
     """All past hunt sessions."""
     sessions = get_evograph_sessions()
     if sessions:
         return {"sessions": sessions, "total": len(sessions)}
+
+    audit = _audit_sessions()
+    if audit:
+        return {"sessions": audit, "total": len(audit)}
 
     session_dir = STATE_DIR / "sessions"
     result = []
@@ -2609,13 +3086,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             f"http://localhost:{bind_port}",
             f"http://127.0.0.1:{bind_port}",
         }
+        # The Next.js webapp runs on a separate port (dev = 3000, Docker
+        # also = 3000 in the webapp container). Trust localhost on any
+        # of the common dev ports; allow more via VIPER_WEBAPP_ORIGINS.
+        for port in ("3000", "3001", "3002", "3010"):
+            allowed_origins.add(f"http://localhost:{port}")
+            allowed_origins.add(f"http://127.0.0.1:{port}")
+        extra = os.environ.get("VIPER_WEBAPP_ORIGINS", "").strip()
+        if extra:
+            for o in extra.split(","):
+                o = o.strip().rstrip("/")
+                if o:
+                    allowed_origins.add(o)
         origin = self.headers.get("Origin", "")
         if origin in allowed_origins:
             self.send_header("Access-Control-Allow-Origin", origin)
         # else: omit the header — browser blocks the cross-origin response
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Authorization allowed so a browser on the webapp port can send the
+        # dashboard bearer token cross-origin; credentials so the auth cookie
+        # rides along for SSE/WebSocket.
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        # Security headers (defense in depth).
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
 
     def _enforce_same_origin_post(self) -> bool:
         """Defense in depth — for state-changing requests, also check
@@ -2630,6 +3127,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             f"http://localhost:{bind_port}",
             f"http://127.0.0.1:{bind_port}",
         }
+        # The Next.js webapp runs on a separate port (dev = 3000, Docker
+        # also = 3000 in the webapp container). Trust localhost on any
+        # of the common dev ports; allow more via VIPER_WEBAPP_ORIGINS.
+        for port in ("3000", "3001", "3002", "3010"):
+            allowed_origins.add(f"http://localhost:{port}")
+            allowed_origins.add(f"http://127.0.0.1:{port}")
+        extra = os.environ.get("VIPER_WEBAPP_ORIGINS", "").strip()
+        if extra:
+            for o in extra.split(","):
+                o = o.strip().rstrip("/")
+                if o:
+                    allowed_origins.add(o)
         origin = self.headers.get("Origin", "")
         # Same-origin browser POSTs may omit Origin (esp. for top-level form
         # POSTs to same host); accept missing Origin from localhost only.
@@ -2643,6 +3152,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # this far came from a local socket.
             return True
         return origin in allowed_origins
+
+    # Paths reachable without auth even on a public bind (liveness probes,
+    # CORS preflight is handled separately in do_OPTIONS).
+    _AUTH_EXEMPT_PATHS = frozenset({"/api/health", "/health"})
+
+    def _authorized(self) -> bool:
+        """True if this request may touch the API. See module-level policy."""
+        token = _dashboard_token()
+        if not token:
+            # No token configured: open only on a loopback bind; a public
+            # bind with no token is never authorized (fail closed).
+            return not _is_public_bind()
+        # Token configured: accept it as a Bearer header (API clients) or a
+        # `viper_token` cookie (browser UI — rides along on fetch/SSE/WS).
+        hdr = self.headers.get("Authorization", "")
+        if hdr.startswith("Bearer "):
+            if hmac.compare_digest(hdr[7:].strip(), token):
+                return True
+        cookie = self.headers.get("Cookie", "") or ""
+        for part in cookie.split(";"):
+            part = part.strip()
+            if part.startswith("viper_token="):
+                if hmac.compare_digest(part[len("viper_token="):], token):
+                    return True
+        return False
+
+    def _reject_unauthorized(self):
+        self._json_response({"error": "unauthorized"}, status=401)
 
     def _json_response(self, data, status=200):
         body = json.dumps(data, default=str).encode("utf-8")
@@ -2750,6 +3287,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length else b""
 
+        # SECURITY: authentication gate (token/cookie when configured; fail
+        # closed on a public bind without a token). All POSTs are mutating.
+        if not self._authorized():
+            self._reject_unauthorized()
+            return
+
         # SECURITY: server-side Origin check on state-changing endpoints
         # (defense in depth on top of CORS). Browser CSRF + the terminal
         # endpoint was a critical drive-by RCE chain.
@@ -2769,6 +3312,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = _hack_start_subprocess(data)
             status = 200 if result.get("ok") else 400
             self._json_response(result, status=status)
+            return
+
+        # ── POST /api/hack/report ─ render an HTML report for a hunt ──
+        if path == "/api/hack/report":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                data = {}
+            hunt_id = (data.get("hunt_id")
+                       or parse_qs(urlparse(self.path).query).get("hunt_id", [""])[0])
+            if not hunt_id:
+                self._json_response({"ok": False, "error": "hunt_id required"},
+                                    status=400)
+                return
+            result = _generate_hunt_report(str(VIPER_DB), hunt_id)
+            self._json_response(result, status=200 if result.get("ok") else 400)
             return
 
         if path == "/api/settings":
@@ -2846,13 +3405,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 entry = {
                     "conversation_id": conv_id,
                     "role": "user",
-                    "message": msg,
+                    "message": msg,    # legacy field, retained for old clients
+                    "content": msg,    # canonical field for the Next.js dashboard
                     "timestamp": time.time(),
                 }
                 with _chat_lock:
                     _chat_history.append(entry)
 
-                # Route through model_router for real AI response
+                # Route through model_router for real AI response. Bounded
+                # by a hard timeout so the HTTP request can't block the UI
+                # for more than ~30s if the LLM provider is slow.
                 ai_response = None
                 try:
                     from ai.model_router import ModelRouter
@@ -2867,11 +3429,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         )
                         loop = asyncio.new_event_loop()
                         try:
-                            resp = loop.run_until_complete(router.complete(msg, system=system))
+                            resp = loop.run_until_complete(
+                                asyncio.wait_for(
+                                    router.complete(msg, system=system),
+                                    timeout=30.0,
+                                )
+                            )
                             if resp and resp.text:
                                 ai_response = resp.text
                         finally:
                             loop.close()
+                except asyncio.TimeoutError:
+                    logger.warning("LLM chat timed out after 30s")
+                    ai_response = ("(LLM timed out after 30s — provider may be "
+                                   "unreachable or overloaded. Check /settings.)")
                 except Exception as llm_err:
                     logger.debug("LLM chat failed: %s", llm_err)
 
@@ -2880,7 +3451,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ai_entry = {
                     "conversation_id": conv_id,
                     "role": "assistant",
-                    "message": ai_response,
+                    "message": ai_response,    # legacy
+                    "content": ai_response,    # canonical
                     "timestamp": time.time(),
                 }
                 with _chat_lock:
@@ -3120,7 +3692,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/terminal/nlp":
             try:
                 data = json.loads(body) if body else {}
-                query = data.get("query", "").strip()
+                # Frontend sends `text`; older clients send `query`/`command`.
+                query = (data.get("query") or data.get("text")
+                         or data.get("command") or "").strip()
                 if not query:
                     self._json_response({"error": "Empty query"}, status=400)
                     return
@@ -3129,7 +3703,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response({"error": str(e)}, status=400)
 
-        # ── Recon Pipeline endpoints (redamon-style multi-tool parallel) ──
+        # ── Recon Pipeline endpoints (multi-tool parallel pipeline) ──
         elif path == "/api/recon/pipeline/start":
             try:
                 data = json.loads(body) if body else {}
@@ -3589,6 +4163,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             vals = qs.get(name, [])
             return vals[0] if vals else default
 
+        # SECURITY: authentication gate for the API surface (data + streams).
+        # Static UI assets and the liveness probe stay open; the WS/SSE paths
+        # authenticate via the viper_token cookie (sent same-origin).
+        if (path.startswith("/api/") or path == "/ws") \
+                and path not in self._AUTH_EXEMPT_PATHS \
+                and not self._authorized():
+            self._reject_unauthorized()
+            return
+
         # ── WebSocket Upgrade ──
         if path == "/ws":
             upgrade = (self.headers.get("Upgrade") or "").lower()
@@ -3602,6 +4185,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # ── SSE Stream ──
         if path in ("/api/stream", "/api/events"):
             self._handle_sse()
+            return
+
+        # ── Health (cheap liveness probe for the UI status badge) ──
+        if path == "/api/health":
+            self._json_response({"ok": True, "ts": time.time()})
             return
 
         # ── Overview ──
@@ -3823,19 +4411,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # ── VIPER 4.0 API endpoints ──
 
         elif path == "/api/graph":
-            ge = _get_graph_engine()
-            if ge:
-                graph_data = ge.to_vis_json()
-                self._json_response(graph_data)
-            else:
-                self._json_response({"nodes": [], "edges": []})
+            # audit_log is the hack-mode source of truth; fall back to the
+            # legacy GraphEngine (viper.db) only when it yields nothing.
+            g = _build_graph_from_audit(str(VIPER_DB), qp("hunt_id", ""))
+            if not g["nodes"]:
+                ge = _get_graph_engine()
+                if ge:
+                    g = ge.to_vis_json()
+            self._json_response(g)
 
         elif path == "/api/graph/stats":
-            ge = _get_graph_engine()
-            if ge:
-                self._json_response(ge.stats())
+            g = _build_graph_from_audit(str(VIPER_DB), qp("hunt_id", ""))
+            if g["nodes"]:
+                self._json_response({
+                    "node_count": g["node_count"], "edge_count": g["edge_count"],
+                    "node_types": g["node_types"], "edge_types": g["edge_types"],
+                })
             else:
-                self._json_response({"total_nodes": 0, "total_edges": 0})
+                ge = _get_graph_engine()
+                s = ge.stats() if ge else {}
+                self._json_response({
+                    "node_count": s.get("total_nodes", 0),
+                    "edge_count": s.get("total_edges", 0),
+                    "node_types": s.get("node_types", {}),
+                    "edge_types": s.get("edge_types", {}),
+                })
 
         elif path == "/api/graph/query":
             ge = _get_graph_engine()
@@ -4035,19 +4635,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"remediations": []})
 
         elif path == "/api/reports":
-            # List HTML + Markdown reports in reports/ directory
+            # List the 50 most-recent HTML/MD reports.
+            # Earlier code did Path.glob(...) → two stat() calls per file ×
+            # 25k+ files = 2+ seconds per request. Use os.scandir which
+            # carries cached stat info, then sort by mtime and slice.
             reports = []
             if REPORTS_DIR.exists():
-                for ext in ("*.html", "*.md"):
-                    for f in sorted(REPORTS_DIR.glob(ext), reverse=True):
+                try:
+                    with os.scandir(REPORTS_DIR) as it:
+                        candidates = []
+                        for entry in it:
+                            if not entry.is_file():
+                                continue
+                            name = entry.name
+                            if not (name.endswith(".html") or name.endswith(".md")):
+                                continue
+                            try:
+                                st = entry.stat()
+                            except OSError:
+                                continue
+                            candidates.append((st.st_mtime, st.st_size, name))
+                    candidates.sort(reverse=True)
+                    for mtime, size, name in candidates[:50]:
                         reports.append({
-                            "name": f.name,
-                            "size": f.stat().st_size,
-                            "modified": f.stat().st_mtime,
-                            "type": f.suffix.lstrip("."),
+                            "name": name, "size": size, "modified": mtime,
+                            "type": "html" if name.endswith(".html") else "md",
                         })
-            reports.sort(key=lambda x: x["modified"], reverse=True)
-            self._json_response({"reports": reports[:50]})
+                except OSError as e:
+                    logger.warning("scandir REPORTS_DIR failed: %s", e)
+            self._json_response({"reports": reports})
 
         elif path.startswith("/api/reports/") and path != "/api/reports/":
             filename = path.split("/api/reports/", 1)[1]
@@ -4061,15 +4677,73 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json_response({"error": "Report not found"}, 404)
 
         elif path == "/api/projects":
-            # Current project config (single-project mode)
-            settings = {}
+            # Single-project mode. Start from any saved override
+            # (project_settings.json) then enrich with live aggregates from
+            # the DB, so the page is populated even when nothing has been
+            # explicitly configured. Without this the card reads
+            # "Not configured" despite a DB full of targets/findings/sessions.
+            project = {}
             settings_file = STATE_DIR / "project_settings.json"
             if settings_file.exists():
                 try:
-                    settings = json.loads(settings_file.read_text(encoding="utf-8"))
+                    saved = json.loads(settings_file.read_text(encoding="utf-8"))
+                    if isinstance(saved, dict):
+                        project = dict(saved)
                 except Exception:
                     pass
-            self._json_response({"project": settings})
+
+            try:
+                total_findings = _query(
+                    VIPER_DB, "SELECT COUNT(*) AS c FROM findings", one=True
+                ).get("c", 0)
+            except Exception:
+                total_findings = 0
+            try:
+                total_sessions = (
+                    _query(
+                        EVOGRAPH_DB,
+                        "SELECT COUNT(*) AS c FROM sessions",
+                        one=True,
+                    ).get("c", 0)
+                    if EVOGRAPH_DB.exists()
+                    else 0
+                )
+            except Exception:
+                total_sessions = 0
+
+            # Headline target = most-active (most findings), unless overridden.
+            if not project.get("target"):
+                try:
+                    top = _query(
+                        VIPER_DB,
+                        "SELECT t.url, t.domain, COUNT(f.id) AS fc FROM targets t "
+                        "LEFT JOIN findings f ON f.target_id=t.id "
+                        "GROUP BY t.id ORDER BY fc DESC LIMIT 1",
+                        one=True,
+                    )
+                    if top:
+                        project.setdefault("target", top.get("url") or top.get("domain"))
+                        project.setdefault("domain", top.get("domain"))
+                except Exception:
+                    pass
+
+            # Scope = distinct domains we have findings on, unless overridden.
+            if not project.get("scope"):
+                try:
+                    doms = _query(
+                        VIPER_DB,
+                        "SELECT DISTINCT t.domain AS domain FROM targets t "
+                        "JOIN findings f ON f.target_id=t.id "
+                        "WHERE t.domain IS NOT NULL AND t.domain != '' "
+                        "ORDER BY t.domain LIMIT 12",
+                    )
+                    project["scope"] = [d["domain"] for d in doms]
+                except Exception:
+                    project["scope"] = []
+
+            project["total_findings"] = total_findings
+            project["total_sessions"] = total_sessions
+            self._json_response({"project": project})
 
         # ── Sessions (legacy) ──
         elif path == "/api/sessions":
@@ -4090,7 +4764,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/chat/history":
             with _chat_lock:
                 msgs = list(_chat_history[-100:])
-            self._json_response({"messages": msgs, "total": len(msgs)})
+            # Normalize to the shape the Next.js dashboard expects:
+            # ChatMessage[] = [{role, content, timestamp, tool_name?}]
+            normalized = [
+                {
+                    "role": m.get("role", "system"),
+                    # backend stores under "message"; frontend reads "content"
+                    "content": m.get("content") or m.get("message", ""),
+                    "timestamp": (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                       time.gmtime(m.get("timestamp", 0)))
+                        if isinstance(m.get("timestamp"), (int, float))
+                        else m.get("timestamp")
+                    ),
+                    **({"tool_name": m["tool_name"]} if m.get("tool_name") else {}),
+                }
+                for m in msgs
+            ]
+            self._json_response(normalized)
 
         elif path == "/api/insights/charts":
             self._json_response(get_insights_charts())
@@ -4132,26 +4823,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/settings":
             self._serve_file(DASHBOARD_DIR / "settings_ui.html", "text/html")
 
-        # ── Static files / index ──
+        # ── Root / static files ──
+        # :8080 is now a headless API. The single UI lives on the Next.js app
+        # at :3000 (see dashboard/launch.py). Browser hits to the root are
+        # bounced there; the legacy Preact SPA is retired.
         elif path == "/":
-            index = DASHBOARD_DIR / "index.html"
-            if index.is_file():
-                self._serve_static("index.html")
-            else:
-                self._html_response(_fallback_index())
+            self._html_response(_headless_landing())
         else:
-            # Try to serve static file
+            # Serve report/static assets that genuinely live under dashboard/,
+            # but never fall back to the retired SPA for unknown routes.
             rel = path.lstrip("/")
             candidate = DASHBOARD_DIR / rel
-            if candidate.is_file():
+            if candidate.is_file() and rel != "index.html":
                 self._serve_static(rel)
             else:
-                # SPA fallback: serve index.html for non-API routes
-                index = DASHBOARD_DIR / "index.html"
-                if index.is_file() and not path.startswith("/api/"):
-                    self._serve_static("index.html")
-                else:
-                    self.send_error(404)
+                self.send_error(404)
 
 
 def get_target_detail_by_id(target_id):
@@ -4182,19 +4868,21 @@ def get_target_detail_by_id(target_id):
     return target
 
 
-def _fallback_index():
-    """Minimal fallback HTML if no index.html exists yet."""
-    return """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>VIPER Dashboard</title>
-<style>body{background:#0a0e17;color:#e2e8f0;font-family:system-ui;display:flex;
-align-items:center;justify-content:center;height:100vh;margin:0}
-.box{text-align:center;padding:40px;border:1px solid #1e293b;border-radius:12px;
-background:#111827}h1{color:#6366f1;margin-bottom:16px}
-p{color:#94a3b8;margin:8px 0}a{color:#818cf8}</style></head>
-<body><div class="box"><h1>VIPER Dashboard</h1>
-<p>Backend is running. Frontend not deployed yet.</p>
-<p>API available at <a href="/api/overview">/api/overview</a></p>
-<p>SSE stream at <a href="/api/stream">/api/stream</a></p>
+def _headless_landing():
+    """:8080 is the headless API. Bounce browsers to the :3000 UI."""
+    ui = f"http://localhost:{UI_PORT}/"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VIPER API</title>
+<meta http-equiv="refresh" content="0; url={ui}">
+<style>body{{background:#0a0e17;color:#e2e8f0;font-family:system-ui;display:flex;
+align-items:center;justify-content:center;height:100vh;margin:0}}
+.box{{text-align:center;padding:40px;border:1px solid #1e293b;border-radius:12px;
+background:#111827}}h1{{color:#6366f1;margin-bottom:16px}}
+p{{color:#94a3b8;margin:8px 0}}a{{color:#818cf8}}</style></head>
+<body><div class="box"><h1>VIPER API</h1>
+<p>This port serves the headless API only.</p>
+<p>The dashboard lives at <a href="{ui}">{ui}</a> — redirecting…</p>
+<p>Health: <a href="/api/health">/api/health</a></p>
 </div></body></html>"""
 
 
@@ -4246,6 +4934,22 @@ def _resolve_bind_host(default: str = "127.0.0.1") -> str:
     return os.environ.get("VIPER_BIND_HOST", default).strip() or default
 
 
+# --- Dashboard authentication ----------------------------------------------
+# The control plane can launch hunts and run a sandboxed terminal, so it must
+# not be reachable unauthenticated on a public interface. Policy:
+#   * loopback bind + no token  → open (local-dev convenience, unchanged).
+#   * token set (VIPER_DASHBOARD_TOKEN) → bearer/cookie required on every /api.
+#   * public bind + no token    → fail closed (deny all /api), with a loud warn.
+
+def _dashboard_token() -> str:
+    return (os.environ.get("VIPER_DASHBOARD_TOKEN") or "").strip()
+
+
+def _is_public_bind() -> bool:
+    host = _resolve_bind_host()
+    return host not in ("127.0.0.1", "localhost", "::1", "")
+
+
 def start_dashboard(port=8080):
     """Start the dashboard in a background daemon thread (for integration with viper.py)."""
     server = ThreadedHTTPServer((_resolve_bind_host(), port), DashboardHandler)
@@ -4255,6 +4959,15 @@ def start_dashboard(port=8080):
 
 
 def main():
+    # Config (loads .env) + structured logging bootstrap for the dashboard.
+    try:
+        from core.config import get_config
+        from core.logging_setup import configure_logging
+        _cfg = get_config()
+        configure_logging(level=_cfg.log_level, json_output=_cfg.log_json)
+    except Exception:
+        pass
+
     port = int(os.environ.get("VIPER_PORT") or 8080)
     for flag in ("--dashboard-port", "--port"):
         if flag in sys.argv:
@@ -4265,6 +4978,14 @@ def main():
 
     bind_host = _resolve_bind_host()
     server = ThreadedHTTPServer((bind_host, port), DashboardHandler)
+    if _dashboard_token():
+        print("[auth] dashboard token REQUIRED (bearer header or viper_token cookie)")
+    elif _is_public_bind():
+        print(f"[auth] WARNING: bound to public interface {bind_host} with NO "
+              f"VIPER_DASHBOARD_TOKEN — the API is LOCKED (all /api requests "
+              f"denied). Set VIPER_DASHBOARD_TOKEN to enable access.")
+    else:
+        print("[auth] localhost bind, no token — open for local use")
     print(f"VIPER 5.0 Dashboard running at http://{bind_host}:{port}")
     print(f"  DB: {VIPER_DB} ({'exists' if VIPER_DB.exists() else 'not found'})")
     print(f"  EvoGraph: {EVOGRAPH_DB} ({'exists' if EVOGRAPH_DB.exists() else 'not found'})")

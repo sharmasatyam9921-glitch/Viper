@@ -231,9 +231,18 @@ export interface HuntFinding {
   payload: Record<string, unknown>;
 }
 
+export type HuntStatus = "running" | "completed" | "error" | "stalled";
+
 export interface HuntSnapshot {
   hunt_id: string;
   found: boolean;
+  // Terminal-status fields — surface WHY a hunt stopped. Present only when
+  // `found` is true; older snapshots / pure-legacy installs may omit them.
+  status?: HuntStatus;
+  reason?: string;
+  started_at?: number | null;
+  ended_at?: number | null;
+  report?: string | null;
   phases: PhaseStats[];
   workers: WorkerSnapshot[];
   findings: HuntFinding[];

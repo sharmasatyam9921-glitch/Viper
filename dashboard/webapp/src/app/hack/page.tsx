@@ -1,22 +1,8 @@
 "use client";
 
 /**
- * /hack — live swarm-hunt dashboard.
- *
- * Three panes:
- *   ┌────────────────────────────────────────────────────────────┐
- *   │   PHASE RIBBON  (recon → vuln → exploit → post → report)   │
- *   ├──────────────────────┬─────────────────────────────────────┤
- *   │  HUNTS LIST          │  HUNT DETAIL                        │
- *   │  (polls /hunts every │   - WorkerGrid                      │
- *   │   5s, click to       │   - FindingsStream                  │
- *   │   select)            │   - (polls /hunt every 1.5s)        │
- *   └──────────────────────┴─────────────────────────────────────┘
- *
- * Backed by the Phase 4 endpoints:
- *   GET /api/hack/hunts         → recent hunts list
- *   GET /api/hack/hunt?hunt_id  → phases + workers + findings snapshot
- *   GET /api/hack/audit         → (used by AuditTimeline — deferred)
+ * /hack — live swarm-hunt dashboard. Picks up runs started via
+ * `python viper.py hack <target>` or via the HuntPanel on /overview.
  */
 
 import { useState, useMemo } from "react";
@@ -24,68 +10,68 @@ import { useHunts, useHuntSnapshot } from "@/hooks/useSwarm";
 import { apiPost } from "@/lib/api";
 import {
   HACK_PHASES,
-  SEVERITY_COLORS,
-  type HackPhase,
   type HuntSummary,
+  type HuntSnapshot,
   type PhaseStats,
   type WorkerSnapshot,
   type HuntFinding,
-  type Severity,
 } from "@/lib/types";
+import {
+  Play, ShieldAlert, Activity, CheckCircle, FileText, AlertTriangle,
+} from "lucide-react";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card, CardHeader } from "@/components/ui/Card";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { SeverityPill } from "@/components/ui/SeverityPill";
 
-// ────────────────────────────────────────────────────────────────────────
-// PhaseRibbon
-// ────────────────────────────────────────────────────────────────────────
+// ─── PhaseRibbon ────────────────────────────────────────────────────────
 
 function PhaseRibbon({ phases }: { phases: PhaseStats[] }) {
   const byPhase = useMemo(
     () => Object.fromEntries(phases.map((p) => [p.phase, p])),
     [phases],
   );
-
   return (
-    <div className="flex items-stretch gap-2 mb-6">
+    <div className="flex items-stretch gap-2">
       {HACK_PHASES.map((p, idx) => {
-        const stats = byPhase[p];
-        const running = stats && stats.completed_at == null;
-        const done = stats && stats.completed_at != null;
-        const pending = !stats;
+        const s = byPhase[p] as PhaseStats | undefined;
+        const running = s && s.completed_at == null;
+        const done = s && s.completed_at != null;
+        const state = done ? "done" : running ? "running" : "pending";
+        const tone =
+          state === "done"
+            ? { bg: "var(--success-soft)", fg: "var(--success)", border: "var(--success)" }
+            : state === "running"
+              ? { bg: "var(--brand-soft)", fg: "var(--brand)", border: "var(--brand)" }
+              : { bg: "var(--surface-2)", fg: "var(--ink-3)", border: "var(--border-1)" };
         return (
           <div
             key={p}
-            className={[
-              "flex-1 rounded-lg border px-4 py-3 transition-colors",
-              done
-                ? "border-emerald-700/50 bg-emerald-900/30"
-                : running
-                  ? "border-blue-600/60 bg-blue-900/30 animate-pulse"
-                  : "border-zinc-800 bg-zinc-900/50",
-            ].join(" ")}
+            className="flex-1 rounded-lg px-4 py-3 transition-all"
+            style={{
+              background: tone.bg,
+              border: `1px solid ${tone.border}`,
+            }}
           >
             <div className="flex items-center gap-2">
               <span
-                className={[
-                  "h-2 w-2 rounded-full",
-                  done
-                    ? "bg-emerald-500"
-                    : running
-                      ? "bg-blue-500"
-                      : "bg-zinc-700",
-                ].join(" ")}
+                className={`relative w-1.5 h-1.5 rounded-full ${running ? "pulse-ring" : ""}`}
+                style={{ background: tone.fg }}
               />
-              <span className="uppercase text-xs tracking-wider text-zinc-400">
-                {idx + 1}/{HACK_PHASES.length}
+              <span className="kicker">{idx + 1}/{HACK_PHASES.length}</span>
+              <span
+                className="font-medium capitalize text-sm"
+                style={{ color: tone.fg }}
+              >
+                {p}
               </span>
-              <span className="font-semibold text-zinc-100 capitalize">{p}</span>
+              {done && <CheckCircle size={11} style={{ color: tone.fg, marginLeft: "auto" }} />}
             </div>
-            <div className="mt-1 text-xs text-zinc-500">
-              {pending ? (
-                <span>pending</span>
+            <div className="mt-1 text-xs" style={{ color: tone.fg, opacity: 0.85 }}>
+              {!s ? (
+                "pending"
               ) : (
-                <span>
-                  {stats!.workers_completed}/{stats!.workers_dispatched} workers ·{" "}
-                  {stats!.findings_count} findings
-                </span>
+                `${s.workers_completed}/${s.workers_dispatched} workers · ${s.findings_count} findings`
               )}
             </div>
           </div>
@@ -95,104 +81,110 @@ function PhaseRibbon({ phases }: { phases: PhaseStats[] }) {
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// WorkerGrid
-// ────────────────────────────────────────────────────────────────────────
-
-function WorkerCard({ w }: { w: WorkerSnapshot }) {
-  const failed = w.last_action === "worker.failed" || w.outcome === "failure";
-  const completed = w.last_action === "worker.completed" && !failed;
-  const running = w.last_action === "worker.dispatched" && !completed;
-  const color = failed
-    ? "border-red-700/60 bg-red-900/20 text-red-200"
-    : completed
-      ? "border-emerald-700/40 bg-emerald-900/15 text-emerald-100"
-      : running
-        ? "border-blue-600/50 bg-blue-900/15 text-blue-100 animate-pulse"
-        : "border-zinc-800 bg-zinc-900/50 text-zinc-300";
-  const duration =
-    w.duration_ms != null
-      ? w.duration_ms < 1000
-        ? `${w.duration_ms}ms`
-        : `${(w.duration_ms / 1000).toFixed(1)}s`
-      : "—";
-  return (
-    <div className={`rounded-md border px-3 py-2 text-xs ${color}`}>
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-mono truncate">{w.worker_id}</span>
-        <span className="uppercase text-[9px] tracking-wider text-zinc-500">
-          {w.phase}
-        </span>
-      </div>
-      <div className="mt-1 flex items-center justify-between text-zinc-400">
-        <span>{duration}</span>
-        <span>
-          {w.findings_count > 0 ? `${w.findings_count} findings` : "—"}
-        </span>
-      </div>
-    </div>
-  );
-}
+// ─── WorkerGrid ─────────────────────────────────────────────────────────
 
 function WorkerGrid({ workers }: { workers: WorkerSnapshot[] }) {
   if (!workers.length) {
     return (
-      <div className="text-zinc-500 text-sm italic py-4">No workers yet.</div>
+      <div className="text-sm py-4 px-2" style={{ color: "var(--ink-3)" }}>
+        No workers yet.
+      </div>
     );
   }
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2">
-      {workers.map((w) => (
-        <WorkerCard key={w.worker_id} w={w} />
-      ))}
+      {workers.map((w) => {
+        const running = !w.outcome;
+        const failed = w.outcome === "error";
+        const dur = w.duration_ms != null ? `${(w.duration_ms / 1000).toFixed(1)}s` : "—";
+        return (
+          <div
+            key={w.worker_id}
+            className="rounded-lg p-2 transition-colors"
+            style={{
+              background: running
+                ? "var(--brand-soft)"
+                : failed
+                  ? "var(--critical-soft)"
+                  : "var(--success-soft)",
+              border: "1px solid var(--border-1)",
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${running ? "pulse-ring" : ""}`}
+                style={{
+                  background: running
+                    ? "var(--brand)"
+                    : failed
+                      ? "var(--critical)"
+                      : "var(--success)",
+                }}
+              />
+              <span
+                className="text-xs font-medium truncate"
+                style={{ color: "var(--ink-1)", fontFamily: "var(--font-geist-mono)" }}
+                title={w.worker_id}
+              >
+                {w.worker_id.slice(0, 12)}
+              </span>
+            </div>
+            <div className="mt-1 text-[10px] capitalize" style={{ color: "var(--ink-3)" }}>
+              {w.phase} · {dur}
+            </div>
+            <div className="mt-0.5 text-[10px] truncate" style={{ color: "var(--ink-2)" }}>
+              {w.last_action || "…"}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// FindingsStream
-// ────────────────────────────────────────────────────────────────────────
-
-function severityChip(sev: string) {
-  const s = (sev || "info") as Severity;
-  const color = SEVERITY_COLORS[s] ?? SEVERITY_COLORS.info;
-  return (
-    <span
-      className="inline-block rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
-      style={{ color, borderColor: color, border: "1px solid" }}
-    >
-      {s}
-    </span>
-  );
-}
+// ─── FindingsStream ─────────────────────────────────────────────────────
 
 function FindingsStream({ findings }: { findings: HuntFinding[] }) {
   if (!findings.length) {
     return (
-      <div className="text-zinc-500 text-sm italic py-4">No findings yet.</div>
+      <div className="text-sm py-4 px-2" style={{ color: "var(--ink-3)" }}>
+        Nothing found yet.
+      </div>
     );
   }
-  // Newest first
-  const ordered = [...findings].sort((a, b) => b.ts - a.ts);
   return (
-    <div className="divide-y divide-zinc-800 max-h-[440px] overflow-y-auto">
-      {ordered.map((f, i) => {
-        const title = (f.payload?.title as string) ?? "(no title)";
-        const technique = (f.payload?.technique as string) ?? "";
-        const url = (f.payload?.url as string) ?? "";
+    <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
+      {findings.map((f, i) => {
+        const title =
+          (typeof f.payload?.title === "string" && f.payload.title) ||
+          (typeof f.payload?.vuln_type === "string" && f.payload.vuln_type) ||
+          "Finding";
+        const url = typeof f.payload?.url === "string" ? f.payload.url : null;
         return (
-          <div key={i} className="py-2 flex items-start gap-3">
-            {severityChip(f.severity)}
-            <div className="min-w-0 flex-1">
-              <p className="text-sm text-zinc-100 truncate">{title}</p>
-              <p className="text-xs text-zinc-500 truncate">
-                <span className="text-zinc-400">{f.phase}</span>
-                {technique ? <span> · via {technique}</span> : null}
-                {url ? <span> · {url}</span> : null}
-              </p>
+          <div
+            key={i}
+            className="flex items-center gap-3 p-2.5 rounded-lg fade-in"
+            style={{ background: "var(--surface-2)" }}
+          >
+            <SeverityPill severity={f.severity as never} />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm truncate" style={{ color: "var(--ink-1)" }}>
+                {title}
+              </div>
+              {url && (
+                <div
+                  className="text-xs truncate mt-0.5"
+                  style={{ color: "var(--ink-3)", fontFamily: "var(--font-geist-mono)" }}
+                >
+                  {url}
+                </div>
+              )}
             </div>
-            <span className="text-[10px] text-zinc-600 whitespace-nowrap">
-              {new Date(f.ts * 1000).toLocaleTimeString()}
+            <span
+              className="pill"
+              style={{ background: "var(--surface-1)", color: "var(--ink-2)" }}
+            >
+              {f.phase}
             </span>
           </div>
         );
@@ -201,14 +193,10 @@ function FindingsStream({ findings }: { findings: HuntFinding[] }) {
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// HuntsList
-// ────────────────────────────────────────────────────────────────────────
+// ─── HuntsList ──────────────────────────────────────────────────────────
 
 function HuntsList({
-  hunts,
-  selectedId,
-  onSelect,
+  hunts, selectedId, onSelect,
 }: {
   hunts: HuntSummary[];
   selectedId: string | null;
@@ -216,49 +204,61 @@ function HuntsList({
 }) {
   if (!hunts.length) {
     return (
-      <div className="text-zinc-500 text-sm italic py-4 px-3">
+      <div className="p-4 text-sm" style={{ color: "var(--ink-3)" }}>
         No hunts recorded yet. Run{" "}
-        <code className="rounded bg-zinc-800 px-1 py-0.5 text-xs">
+        <code
+          className="px-1.5 py-0.5 rounded text-xs"
+          style={{
+            background: "var(--surface-2)",
+            fontFamily: "var(--font-geist-mono)",
+          }}
+        >
           python viper.py hack &lt;target&gt;
-        </code>{" "}
-        to create one.
+        </code>
+        .
       </div>
     );
   }
   return (
-    <ul className="divide-y divide-zinc-800">
+    <div>
       {hunts.map((h) => {
         const active = h.hunt_id === selectedId;
         const ago = Math.max(0, Math.round(Date.now() / 1000 - h.last_event_at));
         const agoLabel =
-          ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago / 3600)}h ago`;
+          ago < 60 ? `${ago}s ago`
+          : ago < 3600 ? `${Math.round(ago / 60)}m ago`
+          : `${Math.round(ago / 3600)}h ago`;
         return (
-          <li key={h.hunt_id}>
-            <button
-              onClick={() => onSelect(h.hunt_id)}
-              className={`w-full text-left px-3 py-2 hover:bg-zinc-800/60 transition-colors ${active ? "bg-zinc-800/80" : ""}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-xs text-zinc-100 truncate">
-                  {h.target ?? h.hunt_id}
-                </span>
-                <span className="text-[10px] text-zinc-500 whitespace-nowrap">{agoLabel}</span>
-              </div>
-              <div className="mt-0.5 text-[11px] text-zinc-500 flex gap-3">
-                <span>{h.event_count} events</span>
-                <span>{h.finding_count} findings</span>
-              </div>
-            </button>
-          </li>
+          <button
+            key={h.hunt_id}
+            onClick={() => onSelect(h.hunt_id)}
+            className="w-full text-left px-4 py-3 transition-colors"
+            style={{
+              background: active ? "var(--surface-2)" : "transparent",
+              borderBottom: "1px solid var(--border-1)",
+            }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className="text-xs font-medium truncate"
+                style={{ color: "var(--ink-1)", fontFamily: "var(--font-geist-mono)" }}
+              >
+                {h.target ?? h.hunt_id}
+              </span>
+              <span className="text-[10px]" style={{ color: "var(--ink-3)" }}>{agoLabel}</span>
+            </div>
+            <div className="mt-1 text-[11px] flex gap-3" style={{ color: "var(--ink-3)" }}>
+              <span>{h.event_count} events</span>
+              <span>{h.finding_count} findings</span>
+            </div>
+          </button>
         );
       })}
-    </ul>
+    </div>
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// NewHuntForm
-// ────────────────────────────────────────────────────────────────────────
+// ─── NewHuntForm ────────────────────────────────────────────────────────
 
 interface StartResp {
   ok: boolean;
@@ -271,218 +271,275 @@ function NewHuntForm({ onStarted }: { onStarted: () => void }) {
   const [target, setTarget] = useState("");
   const [profile, setProfile] = useState<"" | "ctf" | "bugbounty" | "lab">("");
   const [go, setGo] = useState(false);
-  const [timeMin, setTimeMin] = useState<string>("");
-  const [workers, setWorkers] = useState<string>("");
+  const [timeMin, setTimeMin] = useState("");
+  const [workers, setWorkers] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [lastResult, setLastResult] = useState<StartResp | null>(null);
+  const [last, setLast] = useState<StartResp | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!target.trim()) {
-      setLastResult({ ok: false, error: "target required" });
+      setLast({ ok: false, error: "Target required" });
       return;
     }
     setSubmitting(true);
-    setLastResult(null);
+    setLast(null);
     const payload: Record<string, unknown> = { target: target.trim(), go };
     if (profile) payload.profile = profile;
     if (timeMin) payload.time = Number(timeMin);
     if (workers) payload.workers = Number(workers);
-
     const r = await apiPost<StartResp>("/api/hack/start", payload);
     setSubmitting(false);
-    setLastResult(r ?? { ok: false, error: "network error" });
-    if (r?.ok) {
-      // Clear the target so a fresh hunt doesn't accidentally repeat
-      setTarget("");
-      onStarted();
-    }
+    setLast(r ?? { ok: false, error: "Network error" });
+    if (r?.ok) { setTarget(""); onStarted(); }
   }
 
   return (
-    <form
-      onSubmit={submit}
-      className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 mb-4 space-y-3"
-    >
-      <header className="flex items-center justify-between">
-        <h2 className="font-semibold">New hunt</h2>
-        <span className="text-xs text-zinc-500">
-          POSTs to /api/hack/start
-        </span>
-      </header>
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex-1 min-w-[260px]">
-          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
-            Target
-          </span>
-          <input
-            type="text"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-            placeholder="http://127.0.0.1:9999  or  example.com  or  10.10.10.5"
-            className="w-full rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-blue-600"
-            spellCheck={false}
-            autoComplete="off"
-          />
-        </label>
-        <label>
-          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
-            Profile
-          </span>
-          <select
-            value={profile}
-            onChange={(e) =>
-              setProfile(e.target.value as "" | "ctf" | "bugbounty" | "lab")
-            }
-            className="rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-blue-600"
-          >
-            <option value="">auto</option>
-            <option value="ctf">ctf</option>
-            <option value="bugbounty">bugbounty</option>
-            <option value="lab">lab</option>
-          </select>
-        </label>
-        <label>
-          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
-            Time (min)
-          </span>
-          <input
-            type="number"
-            min={1}
-            max={120}
-            value={timeMin}
-            onChange={(e) => setTimeMin(e.target.value)}
-            placeholder="default"
-            className="w-24 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-blue-600"
-          />
-        </label>
-        <label>
-          <span className="block text-xs uppercase tracking-wider text-zinc-500 mb-1">
-            Workers
-          </span>
-          <input
-            type="number"
-            min={1}
-            max={64}
-            value={workers}
-            onChange={(e) => setWorkers(e.target.value)}
-            placeholder="12"
-            className="w-20 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-blue-600"
-          />
-        </label>
-        <label className="flex items-center gap-2 pb-2">
-          <input
-            type="checkbox"
-            checked={go}
-            onChange={(e) => setGo(e.target.checked)}
-            className="h-4 w-4 rounded bg-zinc-800 border-zinc-700 text-blue-600 focus:ring-blue-600 focus:ring-offset-zinc-900"
-          />
-          <span className="text-sm text-zinc-300" title="Enable exploit + post phases (destructive workers)">
-            --go
-          </span>
-        </label>
-        <button
-          type="submit"
-          disabled={submitting || !target.trim()}
-          className="ml-auto rounded-md bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:cursor-not-allowed px-5 py-2 text-sm font-semibold text-zinc-50 transition-colors"
-        >
-          {submitting ? "Launching…" : "Hack"}
-        </button>
-      </div>
-      {lastResult && (
-        <div
-          className={[
-            "text-xs px-3 py-2 rounded-md border",
-            lastResult.ok
-              ? "border-emerald-700/60 bg-emerald-900/30 text-emerald-200"
-              : "border-red-700/60 bg-red-900/30 text-red-200",
-          ].join(" ")}
-        >
-          {lastResult.ok ? (
-            <>
-              Launched (pid {lastResult.pid}).{" "}
-              <code className="font-mono opacity-80">
-                viper.py {lastResult.command_preview}
-              </code>
-            </>
-          ) : (
-            <>Error: {lastResult.error}</>
-          )}
+    <Card>
+      <form onSubmit={submit} className="space-y-3">
+        <div className="flex items-center gap-2 mb-2">
+          <ShieldAlert size={14} style={{ color: "var(--brand)" }} />
+          <span className="kicker">New hunt</span>
         </div>
-      )}
-    </form>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex-1 min-w-[260px]">
+            <span className="kicker">Target</span>
+            <input
+              type="text"
+              required
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              placeholder="https://example.com"
+              className="w-full mt-1 px-3 py-2 rounded-lg outline-none text-sm"
+              style={{
+                background: "var(--surface-2)",
+                border: "1px solid var(--border-1)",
+                color: "var(--ink-1)",
+                fontFamily: "var(--font-geist-mono)",
+              }}
+            />
+          </label>
+          <label>
+            <span className="kicker">Profile</span>
+            <select
+              value={profile}
+              onChange={(e) => setProfile(e.target.value as "" | "ctf" | "bugbounty" | "lab")}
+              className="block mt-1 px-3 py-2 rounded-lg text-sm outline-none"
+              style={{
+                background: "var(--surface-2)",
+                border: "1px solid var(--border-1)",
+                color: "var(--ink-1)",
+              }}
+            >
+              <option value="">auto</option>
+              <option value="ctf">CTF</option>
+              <option value="bugbounty">Bug Bounty</option>
+              <option value="lab">Lab</option>
+            </select>
+          </label>
+          <label>
+            <span className="kicker">Time (min)</span>
+            <input
+              type="number"
+              min="1"
+              value={timeMin}
+              onChange={(e) => setTimeMin(e.target.value)}
+              className="block w-24 mt-1 px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "var(--surface-2)", color: "var(--ink-1)" }}
+            />
+          </label>
+          <label>
+            <span className="kicker">Workers</span>
+            <input
+              type="number"
+              min="1"
+              value={workers}
+              onChange={(e) => setWorkers(e.target.value)}
+              className="block w-24 mt-1 px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "var(--surface-2)", color: "var(--ink-1)" }}
+            />
+          </label>
+          <label className="flex items-center gap-2 text-sm" style={{ color: "var(--ink-2)" }}>
+            <input type="checkbox" checked={go} onChange={(e) => setGo(e.target.checked)} />
+            --go (high concurrency)
+          </label>
+          <button type="submit" disabled={submitting} className="btn-primary">
+            <Play size={13} fill="currentColor" />
+            {submitting ? "Launching" : "Hunt"}
+          </button>
+        </div>
+        {last && (
+          <div
+            className="text-xs px-3 py-2 rounded-lg fade-in"
+            style={{
+              background: last.ok ? "var(--success-soft)" : "var(--critical-soft)",
+              color: last.ok ? "var(--success)" : "var(--critical)",
+            }}
+          >
+            {last.ok ? (
+              <>Launched (pid {last.pid}) · <code style={{ fontFamily: "var(--font-geist-mono)" }}>viper.py {last.command_preview}</code></>
+            ) : (
+              <>Error: {last.error}</>
+            )}
+          </div>
+        )}
+      </form>
+    </Card>
   );
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// Page
-// ────────────────────────────────────────────────────────────────────────
+// ─── HuntStatusBanner ───────────────────────────────────────────────────
+// Surfaces WHY a hunt stopped (status + reason) and the report link/button.
+// Directly answers the operator question "it stopped — why, and where's the
+// report?" that the bare phase ribbon never explained.
+
+const STATUS_TONE = {
+  completed: { bg: "var(--success-soft)", fg: "var(--success)", Icon: CheckCircle, label: "Completed" },
+  error: { bg: "var(--critical-soft)", fg: "var(--critical)", Icon: ShieldAlert, label: "Error" },
+  stalled: { bg: "var(--medium-soft)", fg: "var(--medium)", Icon: AlertTriangle, label: "Stalled" },
+  running: { bg: "var(--brand-soft)", fg: "var(--brand)", Icon: Activity, label: "Running" },
+} as const;
+
+function fmtTs(t?: number | null): string | null {
+  return t ? new Date(t * 1000).toLocaleString() : null;
+}
+
+function HuntStatusBanner({
+  snapshot, onGenerate, generating,
+}: {
+  snapshot: HuntSnapshot;
+  onGenerate: () => void;
+  generating: boolean;
+}) {
+  const status = snapshot.status ?? "running";
+  const tone = STATUS_TONE[status] ?? STATUS_TONE.running;
+  const running = status === "running";
+  const started = fmtTs(snapshot.started_at);
+  const ended = fmtTs(snapshot.ended_at);
+  return (
+    <Card>
+      <div className="flex items-center gap-3 flex-wrap">
+        <span
+          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium"
+          style={{ background: tone.bg, color: tone.fg }}
+        >
+          <tone.Icon size={14} className={running ? "pulse-ring" : ""} />
+          {tone.label}
+        </span>
+        {snapshot.reason && (
+          <span className="text-sm" style={{ color: "var(--ink-2)" }}>
+            {snapshot.reason}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-3">
+          {started && (
+            <span className="text-xs" style={{ color: "var(--ink-3)" }}>
+              {started}{ended ? ` → ${ended}` : ""}
+            </span>
+          )}
+          {snapshot.report ? (
+            <a
+              href={`/api/reports/${snapshot.report}`}
+              target="_blank"
+              rel="noreferrer"
+              className="btn-primary"
+            >
+              <FileText size={13} /> View report
+            </a>
+          ) : (
+            <button onClick={onGenerate} disabled={generating} className="btn-ghost">
+              <FileText size={13} />
+              {generating ? "Generating…" : "Generate report"}
+            </button>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ─── Page ───────────────────────────────────────────────────────────────
 
 export default function HackPage() {
   const huntsQuery = useHunts();
   const hunts = huntsQuery.data?.hunts ?? [];
-
-  // Default selection: most recent hunt
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const effectiveSelectedId = selectedId ?? hunts[0]?.hunt_id ?? null;
-
   const snapshotQuery = useHuntSnapshot(effectiveSelectedId);
   const snapshot = snapshotQuery.data;
 
+  const [generating, setGenerating] = useState(false);
+  async function generateReport() {
+    if (!effectiveSelectedId) return;
+    setGenerating(true);
+    await apiPost("/api/hack/report", { hunt_id: effectiveSelectedId });
+    setGenerating(false);
+    // Re-poll the snapshot so the freshly written report link appears.
+    snapshotQuery.refetch();
+  }
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
-      <header className="mb-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Hack</h1>
-          <p className="text-sm text-zinc-500">
-            Live swarm-hunt dashboard. Picks up runs started via{" "}
-            <code className="rounded bg-zinc-800 px-1 py-0.5 text-xs">
-              python viper.py hack
-            </code>
-            .
-          </p>
-        </div>
-        <div className="text-xs text-zinc-500">
-          {huntsQuery.isFetching ? "Refreshing…" : `${hunts.length} hunts`}
-        </div>
-      </header>
+    <div className="space-y-5">
+      <PageHeader
+        kicker="Live"
+        title="Hunt"
+        subtitle="Real-time swarm dashboard. Picks up runs from the CLI or HuntPanel."
+        actions={
+          <div className="text-xs flex items-center gap-2" style={{ color: "var(--ink-3)" }}>
+            <Activity size={12} />
+            {huntsQuery.isFetching ? "Refreshing…" : `${hunts.length} hunts`}
+          </div>
+        }
+      />
 
       <NewHuntForm onStarted={() => huntsQuery.refetch()} />
+
+      {snapshot?.found && (
+        <HuntStatusBanner
+          snapshot={snapshot}
+          onGenerate={generateReport}
+          generating={generating}
+        />
+      )}
 
       <PhaseRibbon phases={snapshot?.phases ?? []} />
 
       <div className="grid grid-cols-12 gap-4">
-        <aside className="col-span-12 lg:col-span-3 rounded-xl border border-zinc-800 bg-zinc-900/40">
-          <header className="px-3 py-2 border-b border-zinc-800 text-xs uppercase tracking-wider text-zinc-500">
-            Hunts
-          </header>
-          <HuntsList
-            hunts={hunts}
-            selectedId={effectiveSelectedId}
-            onSelect={setSelectedId}
-          />
-        </aside>
+        <Card padding="none" className="col-span-12 lg:col-span-3 overflow-hidden flex flex-col" style={{ maxHeight: 620 }}>
+          <CardHeader title="Hunts" kicker={`${hunts.length} recent`} />
+          <div className="flex-1 overflow-y-auto">
+            <HuntsList
+              hunts={hunts}
+              selectedId={effectiveSelectedId}
+              onSelect={setSelectedId}
+            />
+          </div>
+        </Card>
 
         <section className="col-span-12 lg:col-span-9 space-y-4">
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-            <header className="mb-3 flex items-center justify-between">
-              <h2 className="font-semibold">Workers</h2>
-              <span className="text-xs text-zinc-500">
-                {snapshot?.workers?.length ?? 0} total
-              </span>
-            </header>
-            <WorkerGrid workers={snapshot?.workers ?? []} />
-          </div>
+          <Card padding="none">
+            <CardHeader
+              title="Workers"
+              kicker={`${snapshot?.workers?.length ?? 0} total`}
+            />
+            <div className="p-4">
+              <WorkerGrid workers={snapshot?.workers ?? []} />
+            </div>
+          </Card>
 
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-            <header className="mb-3 flex items-center justify-between">
-              <h2 className="font-semibold">Findings</h2>
-              <span className="text-xs text-zinc-500">
-                {snapshot?.findings?.length ?? 0} streamed
-              </span>
-            </header>
-            <FindingsStream findings={snapshot?.findings ?? []} />
-          </div>
+          <Card padding="none">
+            <CardHeader
+              title="Findings"
+              kicker={`${snapshot?.findings?.length ?? 0} streamed`}
+            />
+            <div className="p-4">
+              {(snapshot?.findings?.length ?? 0) === 0 ? (
+                <EmptyState title="Waiting for findings" hint="The swarm will publish findings here in real time." />
+              ) : (
+                <FindingsStream findings={snapshot?.findings ?? []} />
+              )}
+            </div>
+          </Card>
         </section>
       </div>
     </div>

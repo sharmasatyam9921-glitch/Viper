@@ -2,249 +2,219 @@
 
 import { useApi } from "@/hooks/useApi";
 import type { AgentMonitor, ReACTStep } from "@/lib/types";
+import { Bot, Cpu, Activity, Zap } from "lucide-react";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card } from "@/components/ui/Card";
+import { ActivityStream } from "@/components/ui/ActivityStream";
+import { EmptyState } from "@/components/ui/EmptyState";
 
-/* ---------- agent status badge ---------- */
-function AgentStatusBadge({ status }: { status: string }) {
-  const cls =
-    status === "active"
-      ? "bg-emerald-500/20 text-emerald-400"
-      : status === "thinking"
-        ? "bg-cyan-500/20 text-cyan-400 animate-pulse"
-        : status === "idle"
-          ? "bg-zinc-700/30 text-zinc-400"
-          : status === "error"
-            ? "bg-red-500/20 text-red-400"
-            : "bg-zinc-700/30 text-zinc-400";
+const AGENT_TONE: Record<string, { fg: string; bg: string; label: string }> = {
+  active:   { fg: "var(--success)",  bg: "var(--success-soft)",  label: "Active" },
+  thinking: { fg: "var(--brand)",    bg: "var(--brand-soft)",    label: "Thinking" },
+  idle:     { fg: "var(--ink-3)",    bg: "var(--surface-2)",     label: "Idle" },
+  error:    { fg: "var(--critical)", bg: "var(--critical-soft)", label: "Error" },
+};
+
+function AgentStatusPill({ status }: { status: string }) {
+  const t = AGENT_TONE[status] ?? AGENT_TONE.idle;
   return (
     <span
-      className={`inline-block rounded-full px-2.5 py-0.5 text-[10px] uppercase font-semibold tracking-wider ${cls}`}
+      className="pill"
+      style={{ background: t.bg, color: t.fg }}
     >
-      {status}
+      {status === "thinking" && (
+        <span
+          className="w-1.5 h-1.5 rounded-full pulse-ring"
+          style={{ background: "currentColor" }}
+        />
+      )}
+      {t.label}
     </span>
   );
 }
 
-/* ---------- agent card ---------- */
-function AgentCard({
-  name,
-  status,
-  findings,
-  uptime,
-  activityCount,
-}: {
-  name: string;
-  status: string;
-  findings: number;
-  uptime: number;
-  activityCount: number;
-}) {
-  const hours = Math.floor(uptime / 3600);
-  const mins = Math.floor((uptime % 3600) / 60);
-  const uptimeStr =
-    hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
-
-  return (
-    <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-bold text-zinc-100">{name}</h3>
-        <AgentStatusBadge status={status} />
-      </div>
-      <div className="grid grid-cols-3 gap-3 text-center">
-        <div>
-          <p className="text-lg font-bold text-zinc-100">{findings}</p>
-          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-            Findings
-          </p>
-        </div>
-        <div>
-          <p className="text-lg font-bold text-zinc-100">{activityCount}</p>
-          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-            Actions
-          </p>
-        </div>
-        <div>
-          <p className="text-lg font-bold text-zinc-100">{uptimeStr}</p>
-          <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-            Uptime
-          </p>
-        </div>
-      </div>
-    </div>
-  );
+function fmtUptime(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
-/* ---------- ReACT step display ---------- */
-function ReACTDisplay({ step }: { step: ReACTStep | null }) {
-  if (!step) {
-    return (
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-        <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-          ReACT Engine
-        </h2>
-        <p className="text-sm text-zinc-600">No active ReACT session.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xs uppercase tracking-wider text-zinc-500">
-          ReACT Engine
-        </h2>
-        <div className="flex items-center gap-3 text-xs text-zinc-500">
-          <span>
-            Step{" "}
-            <strong className="text-zinc-200">
-              {step.step}/{step.total_steps}
-            </strong>
-          </span>
-          <span>
-            Reward{" "}
-            <strong className="text-cyan-400">
-              {step.reward.toFixed(2)}
-            </strong>
-          </span>
-          <span>
-            Q-table{" "}
-            <strong className="text-zinc-200">{step.q_table_size}</strong>
-          </span>
-        </div>
-      </div>
-
-      {/* progress bar */}
-      <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500 rounded-full transition-all"
-          style={{
-            width: `${step.total_steps > 0 ? (step.step / step.total_steps) * 100 : 0}%`,
-          }}
-        />
-      </div>
-
-      {/* think / action / observation */}
-      <div className="grid grid-cols-3 gap-4">
-        <StepBlock label="Think" content={step.think} color="text-cyan-400" />
-        <StepBlock
-          label="Action"
-          content={step.action}
-          color="text-emerald-400"
-        />
-        <StepBlock
-          label="Observation"
-          content={step.observation}
-          color="text-yellow-400"
-        />
-      </div>
-
-      {/* deep think */}
-      {step.deep_think && (
-        <div>
-          <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">
-            Deep Think
-          </p>
-          <div className="rounded-lg bg-zinc-950 border border-zinc-800 p-3">
-            <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed">
-              {step.deep_think}
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function StepBlock({
-  label,
-  content,
-  color,
-}: {
-  label: string;
-  content: string;
-  color: string;
-}) {
-  return (
-    <div>
-      <p className={`text-[10px] uppercase tracking-wider mb-1 ${color}`}>
-        {label}
-      </p>
-      <div className="rounded-lg bg-zinc-950 border border-zinc-800 p-3 min-h-[80px]">
-        <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed">
-          {content || "-"}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* ---------- page ---------- */
 export default function AgentsPage() {
   const { data: monitor } = useApi<AgentMonitor>(
-    "agents-monitor",
-    "/api/agents/monitor",
-    5000,
-  );
+    "agents-monitor", "/api/agents/monitor", 5000);
   const { data: react } = useApi<ReACTStep>(
-    "react-current",
-    "/api/react/current",
-    5000,
-  );
+    "react-current", "/api/react/current", 5000);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-zinc-100">Agents</h1>
-        {monitor && (
-          <div className="flex gap-4 text-xs text-zinc-500">
-            <span>
-              Phase:{" "}
-              <strong className="text-zinc-200">
-                {monitor.current_phase || "idle"}
-              </strong>
-            </span>
-            <span>
-              Target:{" "}
-              <strong className="text-zinc-200">
-                {monitor.current_target || "none"}
-              </strong>
-            </span>
-            <span>
-              Bus msgs:{" "}
-              <strong className="text-zinc-200">
-                {monitor.bus_messages}
-              </strong>
-            </span>
-            <span>
-              Active scans:{" "}
-              <strong className="text-zinc-200">
-                {monitor.active_scans}
-              </strong>
-            </span>
+      <PageHeader
+        kicker="Swarm"
+        title="Agents"
+        subtitle={
+          monitor
+            ? `${monitor.agents.length} agents · ${monitor.active_scans} active scan${monitor.active_scans === 1 ? "" : "s"}`
+            : "Loading…"
+        }
+        actions={
+          monitor && (
+            <div className="flex items-center gap-3 text-xs" style={{ color: "var(--ink-3)" }}>
+              <div className="flex items-center gap-1.5">
+                <Activity size={12} />
+                <span>Phase</span>
+                <span
+                  className="pill"
+                  style={{ background: "var(--surface-2)", color: "var(--ink-1)" }}
+                >
+                  {monitor.current_phase || "idle"}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Zap size={12} />
+                <span>Bus</span>
+                <span style={{ color: "var(--ink-1)", fontWeight: 600 }}>
+                  {monitor.bus_messages}
+                </span>
+              </div>
+            </div>
+          )
+        }
+      />
+
+      {/* Agent cards */}
+      {(monitor?.agents ?? []).length === 0 ? (
+        <EmptyState
+          title="No agents running"
+          hint="Agents start when a hunt is launched."
+          icon={<Bot size={20} />}
+        />
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {(monitor?.agents ?? []).map((a) => (
+            <Card key={a.name} hover className="cursor-default">
+              <div className="flex items-start justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <div
+                    className="w-8 h-8 rounded-lg flex items-center justify-center"
+                    style={{
+                      background: "var(--brand-soft)",
+                      color: "var(--brand)",
+                    }}
+                  >
+                    <Bot size={15} />
+                  </div>
+                  <div
+                    className="text-sm font-medium"
+                    style={{ color: "var(--ink-1)" }}
+                  >
+                    {a.name}
+                  </div>
+                </div>
+                <AgentStatusPill status={a.status} />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 mt-3 text-xs">
+                <div>
+                  <div className="kicker">Findings</div>
+                  <div
+                    className="display mt-0.5"
+                    style={{ fontSize: "1.125rem", color: "var(--ink-1)" }}
+                  >
+                    {a.findings}
+                  </div>
+                </div>
+                <div>
+                  <div className="kicker">Uptime</div>
+                  <div
+                    className="display mt-0.5"
+                    style={{ fontSize: "1.125rem", color: "var(--ink-1)" }}
+                  >
+                    {fmtUptime(a.uptime)}
+                  </div>
+                </div>
+              </div>
+
+              <div
+                className="mt-3 pt-3 text-[10px] flex items-center justify-between"
+                style={{ borderTop: "1px solid var(--border-1)", color: "var(--ink-3)" }}
+              >
+                <span className="flex items-center gap-1">
+                  <Activity size={10} />
+                  {a.activity_count} actions
+                </span>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* ReACT step + Activity stream */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <Card padding="none" className="lg:col-span-2 overflow-hidden">
+          <div
+            className="px-5 py-3"
+            style={{ borderBottom: "1px solid var(--border-1)" }}
+          >
+            <div className="kicker flex items-center gap-2">
+              <Cpu size={12} />
+              ReACT — current step
+            </div>
+            {react && (
+              <div className="text-sm mt-1" style={{ color: "var(--ink-2)" }}>
+                Step {react.step} of {react.total_steps} ·
+                <span style={{ color: "var(--ink-1)", fontWeight: 600, marginLeft: 4 }}>
+                  reward {typeof react.reward === "number" ? react.reward.toFixed(2) : "—"}
+                </span>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+          <div className="p-5 space-y-4">
+            {!react ? (
+              <div className="text-sm" style={{ color: "var(--ink-3)" }}>
+                No active ReACT loop.
+              </div>
+            ) : (
+              <>
+                <ReactSection label="Think" text={react.think} />
+                <ReactSection label="Action" text={react.action} mono />
+                <ReactSection label="Observation" text={react.observation} />
+                {react.deep_think && (
+                  <ReactSection
+                    label="Deep think"
+                    text={react.deep_think}
+                    accent
+                  />
+                )}
+              </>
+            )}
+          </div>
+        </Card>
 
-      {/* agent cards grid */}
-      <div className="grid grid-cols-4 gap-4">
-        {(monitor?.agents ?? []).map((a) => (
-          <AgentCard
-            key={a.name}
-            name={a.name}
-            status={a.status}
-            findings={a.findings}
-            uptime={a.uptime}
-            activityCount={a.activity_count}
-          />
-        ))}
-        {(!monitor || monitor.agents.length === 0) && (
-          <p className="col-span-4 text-center text-zinc-600 py-12">
-            No agents registered. Start a hunt to activate agents.
-          </p>
-        )}
+        <ActivityStream limit={25} />
       </div>
+    </div>
+  );
+}
 
-      {/* ReACT engine */}
-      <ReACTDisplay step={react ?? null} />
+function ReactSection({
+  label, text, mono, accent,
+}: { label: string; text: string; mono?: boolean; accent?: boolean }) {
+  if (!text) return null;
+  return (
+    <div>
+      <div className="kicker">{label}</div>
+      <pre
+        className="mt-1 p-3 rounded-lg text-xs whitespace-pre-wrap"
+        style={{
+          background: accent ? "var(--brand-soft)" : "var(--surface-2)",
+          color: accent ? "var(--brand-ink)" : "var(--ink-1)",
+          border: "1px solid var(--border-1)",
+          fontFamily: mono ? "var(--font-geist-mono)" : undefined,
+          maxHeight: 220,
+          overflow: "auto",
+        }}
+      >
+        {text}
+      </pre>
     </div>
   );
 }

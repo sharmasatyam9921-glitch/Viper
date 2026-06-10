@@ -3,122 +3,81 @@
 import { useState } from "react";
 import { useApi } from "@/hooks/useApi";
 import { apiPost } from "@/lib/api";
-import type { ReconJob, ParallelGroup } from "@/lib/types";
+import type { ReconJob } from "@/lib/types";
+import { Play, Radar, CheckCircle, AlertCircle, Clock } from "lucide-react";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card, CardHeader } from "@/components/ui/Card";
+import { EmptyState } from "@/components/ui/EmptyState";
 
 type ReconJobsResponse = { jobs: ReconJob[] };
 
-/* ---------- OSINT source toggles ---------- */
 const OSINT_SOURCES = [
-  "urlscan",
-  "whois",
-  "shodan",
-  "otx",
-  "virustotal",
-  "censys",
-  "fofa",
-  "netlas",
-  "criminalip",
-  "zoomeye",
+  "urlscan", "whois", "shodan", "otx", "virustotal",
+  "censys", "fofa", "netlas", "criminalip", "zoomeye",
 ] as const;
 
-/* ---------- phase badge ---------- */
-const PHASE_COLORS: Record<string, string> = {
-  domain_discovery: "bg-purple-500/20 text-purple-400",
-  passive_intel: "bg-blue-500/20 text-blue-400",
-  port_scanning: "bg-cyan-500/20 text-cyan-400",
-  http_probing: "bg-emerald-500/20 text-emerald-400",
-  resource_enum: "bg-yellow-500/20 text-yellow-400",
-  vuln_scanning: "bg-orange-500/20 text-orange-400",
-  mitre_enrichment: "bg-red-500/20 text-red-400",
+const PHASE_LABELS: Record<string, string> = {
+  domain_discovery: "Domain discovery",
+  passive_intel:    "Passive intel",
+  port_scanning:    "Port scanning",
+  http_probing:     "HTTP probing",
+  resource_enum:    "Resource enum",
+  vuln_scanning:    "Vuln scanning",
+  mitre_enrichment: "MITRE enrichment",
 };
 
-function PhaseBadge({
-  phase,
-  timing,
-}: {
-  phase: string;
-  timing?: number;
-}) {
-  const cls = PHASE_COLORS[phase] ?? "bg-zinc-700/30 text-zinc-400";
+function PhasePill({ phase, timing }: { phase: string; timing?: number }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] uppercase font-semibold tracking-wider ${cls}`}
+      className="pill"
+      style={{
+        background: "var(--brand-soft)",
+        color: "var(--brand-ink)",
+        fontFamily: "var(--font-geist-sans)",
+      }}
     >
-      {phase.replace(/_/g, " ")}
+      {PHASE_LABELS[phase] ?? phase?.replace(/_/g, " ") ?? "—"}
       {timing != null && (
-        <span className="text-zinc-500">{timing.toFixed(1)}s</span>
+        <span style={{ opacity: 0.7, marginLeft: 4 }}>
+          {timing.toFixed(1)}s
+        </span>
       )}
     </span>
   );
 }
 
-/* ---------- job status badge ---------- */
-function StatusBadge({ status }: { status: string }) {
-  const cls =
-    status === "completed"
-      ? "bg-emerald-500/20 text-emerald-400"
-      : status === "running"
-        ? "bg-cyan-500/20 text-cyan-400 animate-pulse"
-        : status === "error"
-          ? "bg-red-500/20 text-red-400"
-          : "bg-zinc-700/30 text-zinc-400";
+function StatusPill({ status }: { status: string }) {
+  const map = {
+    completed: { bg: "var(--success-soft)", fg: "var(--success)", icon: <CheckCircle size={11} /> },
+    running:   { bg: "var(--brand-soft)",   fg: "var(--brand)",   icon: <Clock size={11} /> },
+    error:     { bg: "var(--critical-soft)",fg: "var(--critical)",icon: <AlertCircle size={11} /> },
+    starting:  { bg: "var(--medium-soft)",  fg: "var(--medium)",  icon: <Clock size={11} /> },
+    cancelled: { bg: "var(--info-soft)",    fg: "var(--info)",    icon: null },
+  };
+  const t = map[status as keyof typeof map] ?? map.cancelled;
   return (
     <span
-      className={`inline-block rounded-full px-2.5 py-0.5 text-[10px] uppercase font-semibold tracking-wider ${cls}`}
+      className="pill"
+      style={{ background: t.bg, color: t.fg, textTransform: "capitalize" }}
     >
+      {t.icon}
       {status}
     </span>
   );
 }
 
-/* ---------- parallel group card ---------- */
-function GroupCard({ group }: { group: ParallelGroup }) {
-  return (
-    <div className="rounded-lg bg-zinc-950 border border-zinc-800 p-3">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-medium text-zinc-200">{group.name}</span>
-        <span className="text-[10px] text-zinc-500">
-          {group.duration_sec.toFixed(1)}s
-        </span>
-      </div>
-      <div className="flex flex-wrap gap-1">
-        {group.sources.map((s) => (
-          <span
-            key={s}
-            className="rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400"
-          >
-            {s}
-          </span>
-        ))}
-      </div>
-      <p className="text-[10px] text-zinc-600 mt-1">
-        {group.tasks} tasks
-      </p>
-    </div>
-  );
-}
-
-/* ---------- page ---------- */
 export default function ReconPage() {
   const [target, setTarget] = useState("");
-  const [sources, setSources] = useState<Set<string>>(
-    new Set(OSINT_SOURCES),
-  );
+  const [sources, setSources] = useState<Set<string>>(new Set(OSINT_SOURCES));
   const [masscanRate, setMasscanRate] = useState("1000");
-  const [roeStart, setRoeStart] = useState("00:00");
-  const [roeEnd, setRoeEnd] = useState("23:59");
   const [skipEmpty, setSkipEmpty] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [selectedJob, setSelectedJob] = useState<string | null>(null);
 
   const { data: jobsResp, refetch } = useApi<ReconJobsResponse>(
-    "recon-jobs",
-    "/api/recon/pipeline/list",
-    3000,
-  );
+    "recon-jobs", "/api/recon/pipeline/list", 3000);
   const jobs: ReconJob[] = jobsResp?.jobs ?? [];
 
-  // Poll the full detail for the selected job (list response is trimmed).
   const { data: activeDetail } = useApi<ReconJob>(
     selectedJob ? `recon-job-${selectedJob}` : "recon-job-none",
     selectedJob ? `/api/recon/pipeline/${selectedJob}` : "",
@@ -141,55 +100,63 @@ export default function ReconPage() {
       target: target.trim(),
       osint_sources: Array.from(sources),
       masscan_rate: parseInt(masscanRate, 10) || 1000,
-      roe_window_start: roeStart || null,
-      roe_window_end: roeEnd || null,
       skip_active_on_empty: skipEmpty,
     });
     setLaunching(false);
     refetch();
   };
 
-  const active: ReconJob | null =
-    activeDetail ?? jobs.find((j) => j.id === selectedJob) ?? null;
+  const active = activeDetail ?? jobs.find((j) => j.id === selectedJob) ?? null;
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold text-zinc-100">Recon Pipeline</h1>
+      <PageHeader
+        kicker="Discovery"
+        title="Recon Pipeline"
+        subtitle="Run the 7-phase recon — domain → port → HTTP → resource → vuln → MITRE."
+      />
 
-      {/* launcher */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5 space-y-4">
-        <div className="flex gap-3">
+      {/* Launcher */}
+      <Card>
+        <div className="flex gap-2 items-center">
+          <Radar size={16} style={{ color: "var(--brand)" }} />
           <input
             type="text"
-            placeholder="Target domain (e.g. example.com)"
+            placeholder="example.com"
             value={target}
             onChange={(e) => setTarget(e.target.value)}
-            className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+            onKeyDown={(e) => e.key === "Enter" && startPipeline()}
+            className="flex-1 px-3 py-2 rounded-lg outline-none text-sm"
+            style={{
+              background: "var(--surface-2)",
+              border: "1px solid var(--border-1)",
+              color: "var(--ink-1)",
+              fontFamily: "var(--font-geist-mono)",
+            }}
           />
           <button
             onClick={startPipeline}
+            className="btn-primary"
             disabled={launching || !target.trim()}
-            className="rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-zinc-700 disabled:text-zinc-500 px-5 py-2 text-sm font-medium text-white transition-colors"
           >
-            {launching ? "Starting..." : "Run Pipeline"}
+            <Play size={13} fill="currentColor" />
+            {launching ? "Starting" : "Run"}
           </button>
         </div>
 
-        {/* OSINT toggles */}
-        <div>
-          <p className="text-xs text-zinc-500 uppercase tracking-wider mb-2">
-            OSINT Sources
-          </p>
-          <div className="flex flex-wrap gap-2">
+        <div className="mt-4">
+          <div className="kicker mb-2">OSINT sources</div>
+          <div className="flex flex-wrap gap-1.5">
             {OSINT_SOURCES.map((s) => (
               <button
                 key={s}
                 onClick={() => toggleSource(s)}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                  sources.has(s)
-                    ? "bg-cyan-500/20 text-cyan-400 border-cyan-500/40"
-                    : "bg-zinc-800 text-zinc-500 border-zinc-700 hover:text-zinc-300"
-                }`}
+                className="pill cursor-pointer"
+                style={{
+                  background: sources.has(s) ? "var(--brand-soft)" : "var(--surface-2)",
+                  color:      sources.has(s) ? "var(--brand-ink)" : "var(--ink-2)",
+                  fontWeight: sources.has(s) ? 500 : 400,
+                }}
               >
                 {s}
               </button>
@@ -197,146 +164,116 @@ export default function ReconPage() {
           </div>
         </div>
 
-        {/* options row */}
-        <div className="flex gap-4 items-end">
+        <div className="mt-4 grid grid-cols-2 gap-4">
           <div>
-            <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">
-              Masscan Rate
-            </label>
+            <div className="kicker mb-1">Masscan rate</div>
             <input
               type="number"
               value={masscanRate}
               onChange={(e) => setMasscanRate(e.target.value)}
-              className="w-28 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              className="w-full px-3 py-1.5 rounded-lg outline-none text-sm"
+              style={{
+                background: "var(--surface-2)",
+                border: "1px solid var(--border-1)",
+                color: "var(--ink-1)",
+              }}
             />
           </div>
-          <div>
-            <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">
-              RoE Window Start
-            </label>
-            <input
-              type="time"
-              value={roeStart}
-              onChange={(e) => setRoeStart(e.target.value)}
-              className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            />
-          </div>
-          <div>
-            <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">
-              RoE Window End
-            </label>
-            <input
-              type="time"
-              value={roeEnd}
-              onChange={(e) => setRoeEnd(e.target.value)}
-              className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-            />
-          </div>
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="flex items-center gap-2 text-sm pt-5" style={{ color: "var(--ink-2)" }}>
             <input
               type="checkbox"
               checked={skipEmpty}
               onChange={(e) => setSkipEmpty(e.target.checked)}
-              className="rounded border-zinc-600 bg-zinc-950 text-cyan-500 focus:ring-cyan-500"
             />
-            <span className="text-xs text-zinc-400">Skip empty phases</span>
+            Skip active recon if passive returns nothing
           </label>
         </div>
-      </div>
+      </Card>
 
-      <div className="grid grid-cols-3 gap-4">
-        {/* job history */}
-        <div className="col-span-1 rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-            Job History
-          </h2>
-          <div className="space-y-2 max-h-[500px] overflow-y-auto">
+      {/* Jobs list */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <Card padding="none" className="lg:col-span-1 overflow-hidden flex flex-col" style={{ maxHeight: 540 }}>
+          <CardHeader title="Recent jobs" kicker={`${jobs.length} total`} />
+          <div className="flex-1 overflow-y-auto">
+            {jobs.length === 0 && (
+              <div className="p-6 text-sm text-center" style={{ color: "var(--ink-3)" }}>
+                No jobs yet
+              </div>
+            )}
             {jobs.map((j) => (
-              <div
+              <button
                 key={j.id}
                 onClick={() => setSelectedJob(j.id)}
-                className={`rounded-lg border p-3 cursor-pointer transition-colors ${
-                  selectedJob === j.id
-                    ? "bg-zinc-800 border-cyan-500/40"
-                    : "bg-zinc-950 border-zinc-800 hover:border-zinc-600"
-                }`}
+                className="w-full text-left px-5 py-3 transition-colors"
+                style={{
+                  background: selectedJob === j.id ? "var(--surface-2)" : "transparent",
+                  borderBottom: "1px solid var(--border-1)",
+                }}
               >
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-zinc-200 truncate">
+                  <span className="text-sm" style={{ color: "var(--ink-1)", fontFamily: "var(--font-geist-mono)" }}>
                     {j.target}
                   </span>
-                  <StatusBadge status={j.status} />
+                  <StatusPill status={j.status} />
                 </div>
-                <p className="text-[10px] text-zinc-600">
-                  {new Date(j.started_at * 1000).toLocaleString()}
-                </p>
-              </div>
+                <div className="text-xs flex items-center gap-2" style={{ color: "var(--ink-3)" }}>
+                  <span>{j.phases_done.length}/7 phases</span>
+                  <span>·</span>
+                  <span>{new Date(j.started_at * 1000).toLocaleTimeString()}</span>
+                </div>
+              </button>
             ))}
-            {jobs.length === 0 && (
-              <p className="text-xs text-zinc-600">No jobs yet.</p>
-            )}
           </div>
-        </div>
+        </Card>
 
-        {/* active job detail */}
-        <div className="col-span-2 rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-          {active ? (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-zinc-100">
-                  {active.target}
-                </h2>
-                <StatusBadge status={active.status} />
+        {/* Job detail */}
+        <Card className="lg:col-span-2" padding="none">
+          {!active ? (
+            <EmptyState
+              title="Pick a job"
+              hint="Select a recon job on the left to see its phase timeline."
+            />
+          ) : (
+            <div>
+              <div className="px-5 py-4" style={{ borderBottom: "1px solid var(--border-1)" }}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="kicker">Target</div>
+                    <div
+                      className="display mt-0.5"
+                      style={{ fontSize: "1.25rem", fontFamily: "var(--font-geist-sans)" }}
+                    >
+                      {active.target}
+                    </div>
+                  </div>
+                  <StatusPill status={active.status} />
+                </div>
               </div>
 
-              {/* phase timing badges */}
-              <div>
-                <p className="text-xs text-zinc-500 uppercase tracking-wider mb-2">
-                  Phases
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {(active.phases_done ?? []).map((ph) => (
-                    <PhaseBadge
-                      key={ph}
-                      phase={ph}
-                      timing={active.phase_timings?.[ph]}
-                    />
+              {/* Phase timings */}
+              <div className="p-5 space-y-2">
+                <div className="kicker">Phases completed</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {active.phases_done.map((p) => (
+                    <PhasePill key={p} phase={p} timing={active.phase_timings[p]} />
                   ))}
                 </div>
               </div>
 
-              {/* parallel groups */}
-              {(active.parallel_groups?.length ?? 0) > 0 && (
-                <div>
-                  <p className="text-xs text-zinc-500 uppercase tracking-wider mb-2">
-                    Parallel Groups
-                  </p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {active.parallel_groups.map((g, i) => (
-                      <GroupCard key={i} group={g} />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* summary stats */}
-              {Object.keys(active.summary ?? {}).length > 0 && (
-                <div>
-                  <p className="text-xs text-zinc-500 uppercase tracking-wider mb-2">
-                    Summary
-                  </p>
-                  <div className="grid grid-cols-4 gap-2">
-                    {Object.entries(active.summary ?? {}).map(([k, v]) => (
-                      <div
-                        key={k}
-                        className="rounded-lg bg-zinc-950 border border-zinc-800 p-3 text-center"
-                      >
-                        <p className="text-[10px] text-zinc-500 truncate">
-                          {k.replace(/_/g, " ")}
-                        </p>
-                        <p className="text-sm font-bold text-zinc-200 mt-0.5">
-                          {typeof v === "boolean" ? (v ? "Yes" : "No") : v}
-                        </p>
+              {/* Summary */}
+              {Object.keys(active.summary || {}).length > 0 && (
+                <div className="p-5" style={{ borderTop: "1px solid var(--border-1)" }}>
+                  <div className="kicker mb-2">Summary</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {Object.entries(active.summary).map(([k, v]) => (
+                      <div key={k}>
+                        <div className="kicker">{k.replace(/_/g, " ")}</div>
+                        <div
+                          className="display mt-0.5"
+                          style={{ fontSize: "1.125rem", color: "var(--ink-1)" }}
+                        >
+                          {String(v)}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -344,17 +281,23 @@ export default function ReconPage() {
               )}
 
               {active.error && (
-                <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-3">
-                  <p className="text-xs text-red-400">{active.error}</p>
+                <div className="p-5" style={{ borderTop: "1px solid var(--border-1)" }}>
+                  <div className="kicker mb-2" style={{ color: "var(--critical)" }}>Error</div>
+                  <pre
+                    className="text-xs p-3 rounded-lg whitespace-pre-wrap"
+                    style={{
+                      background: "var(--critical-soft)",
+                      color: "var(--critical)",
+                      fontFamily: "var(--font-geist-mono)",
+                    }}
+                  >
+                    {active.error}
+                  </pre>
                 </div>
               )}
             </div>
-          ) : (
-            <div className="flex items-center justify-center h-64 text-zinc-600 text-sm">
-              Select a job to view details
-            </div>
           )}
-        </div>
+        </Card>
       </div>
     </div>
   );

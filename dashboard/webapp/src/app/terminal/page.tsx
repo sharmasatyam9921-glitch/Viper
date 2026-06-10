@@ -1,18 +1,19 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useApi } from "@/hooks/useApi";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiPost } from "@/lib/api";
+import { Terminal as TerminalIcon, Sparkles, Server } from "lucide-react";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card } from "@/components/ui/Card";
 
 interface TermLine {
-  type: "input" | "output" | "error";
+  type: "input" | "output" | "error" | "nlp";
   text: string;
 }
 
-/* ---------- page ---------- */
 export default function TerminalPage() {
   const [lines, setLines] = useState<TermLine[]>([
-    { type: "output", text: "VIPER 5.0 Terminal - Type commands or toggle NLP mode" },
+    { type: "output", text: "VIPER 6.0 sandboxed terminal — type a command or toggle NLP mode" },
   ]);
   const [input, setInput] = useState("");
   const [history, setHistory] = useState<string[]>([]);
@@ -20,221 +21,186 @@ export default function TerminalPage() {
   const [nlpMode, setNlpMode] = useState(false);
   const [running, setRunning] = useState(false);
 
-  /* SSH state */
+  const [showSsh, setShowSsh] = useState(false);
   const [sshTarget, setSshTarget] = useState("");
   const [sshUser, setSshUser] = useState("");
   const [sshPort, setSshPort] = useState("22");
-  const [showSsh, setShowSsh] = useState(false);
 
   const outputRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  /* auto-scroll */
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
+    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
   }, [lines]);
 
-  /* execute command */
   const execute = async () => {
     const cmd = input.trim();
     if (!cmd || running) return;
-
-    setHistory((prev) => [cmd, ...prev]);
+    setHistory((p) => [cmd, ...p]);
     setHistIdx(-1);
     setInput("");
-    setLines((prev) => [...prev, { type: "input", text: `$ ${cmd}` }]);
+    setLines((p) => [...p, { type: "input", text: `$ ${cmd}` }]);
     setRunning(true);
-
     try {
       let finalCmd = cmd;
-
-      /* NLP translation */
       if (nlpMode) {
-        const nlpResult = await apiPost<{ command: string }>("/api/terminal/nlp", {
-          text: cmd,
-        });
-        if (nlpResult?.command) {
-          finalCmd = nlpResult.command;
-          setLines((prev) => [
-            ...prev,
-            { type: "output", text: `[NLP] Translated: ${finalCmd}` },
-          ]);
+        const r = await apiPost<{ command: string }>("/api/terminal/nlp", { text: cmd });
+        if (r?.command) {
+          finalCmd = r.command;
+          setLines((p) => [...p, { type: "nlp", text: `→ ${finalCmd}` }]);
         }
       }
-
-      /* execute */
-      const result = await apiPost<{ output: string; exit_code: number }>(
-        "/api/terminal/execute",
-        { cmd: finalCmd },
-      );
-
-      if (result) {
-        const lineType = result.exit_code === 0 ? "output" : "error";
-        setLines((prev) => [...prev, { type: lineType, text: result.output }]);
+      const res = await apiPost<{ output: string; exit_code: number }>(
+        "/api/terminal/execute", { cmd: finalCmd });
+      if (res) {
+        setLines((p) => [...p, { type: res.exit_code === 0 ? "output" : "error", text: res.output }]);
       } else {
-        setLines((prev) => [
-          ...prev,
-          { type: "error", text: "Error: no response from server" },
-        ]);
+        setLines((p) => [...p, { type: "error", text: "No response from server" }]);
       }
     } catch {
-      setLines((prev) => [
-        ...prev,
-        { type: "error", text: "Error: request failed" },
-      ]);
+      setLines((p) => [...p, { type: "error", text: "Request failed" }]);
     }
-
     setRunning(false);
   };
 
-  /* SSH connect */
   const connectSsh = async () => {
-    const result = await apiPost<{ output: string }>("/api/terminal/connect", {
-      target: sshTarget,
-      user: sshUser,
-      port: parseInt(sshPort, 10),
+    const r = await apiPost<{ output: string }>("/api/terminal/connect", {
+      target: sshTarget, user: sshUser, port: parseInt(sshPort, 10),
     });
-    if (result) {
-      setLines((prev) => [...prev, { type: "output", text: result.output }]);
-    }
+    if (r) setLines((p) => [...p, { type: "output", text: r.output }]);
     setShowSsh(false);
   };
 
-  /* key handler */
-  const handleKey = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      execute();
-    } else if (e.key === "ArrowUp") {
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") execute();
+    else if (e.key === "ArrowUp" && history.length) {
       e.preventDefault();
-      if (history.length > 0) {
-        const next = Math.min(histIdx + 1, history.length - 1);
-        setHistIdx(next);
-        setInput(history[next]);
-      }
+      const idx = Math.min(histIdx + 1, history.length - 1);
+      setHistIdx(idx);
+      setInput(history[idx]);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      if (histIdx > 0) {
-        const next = histIdx - 1;
-        setHistIdx(next);
-        setInput(history[next]);
-      } else {
-        setHistIdx(-1);
-        setInput("");
-      }
+      const idx = Math.max(histIdx - 1, -1);
+      setHistIdx(idx);
+      setInput(idx === -1 ? "" : history[idx]);
     }
   };
 
-  return (
-    <div className="flex flex-col h-[calc(100vh-6rem)]">
-      {/* header */}
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-bold text-zinc-100">Terminal</h1>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowSsh(!showSsh)}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-cyan-500 transition-colors"
-          >
-            SSH Connect
-          </button>
-          <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
-            <div
-              onClick={() => setNlpMode(!nlpMode)}
-              className={`relative w-9 h-5 rounded-full transition-colors ${nlpMode ? "bg-cyan-600" : "bg-zinc-700"}`}
-            >
-              <div
-                className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${nlpMode ? "translate-x-4" : ""}`}
-              />
-            </div>
-            NLP Mode
-          </label>
-        </div>
-      </div>
+  const lineColor = (t: TermLine["type"]) =>
+    t === "input"  ? "var(--brand)"
+    : t === "error" ? "var(--critical)"
+    : t === "nlp"   ? "var(--medium)"
+    : "var(--ink-1)";
 
-      {/* SSH form */}
-      {showSsh && (
-        <div className="mb-3 rounded-lg border border-zinc-700 bg-zinc-900 p-4 flex gap-3 items-end">
-          <div className="flex-1">
-            <label className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              Target
-            </label>
-            <input
-              type="text"
-              value={sshTarget}
-              onChange={(e) => setSshTarget(e.target.value)}
-              placeholder="192.168.1.1"
-              className="mt-1 w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none focus:border-cyan-500"
-            />
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        kicker="Workspace"
+        title="Terminal"
+        subtitle="Sandboxed pentest tool runner — allowlist enforced, no local system access."
+        actions={
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setNlpMode(!nlpMode)}
+              className="pill cursor-pointer"
+              style={{
+                background: nlpMode ? "var(--brand-soft)" : "var(--surface-2)",
+                color: nlpMode ? "var(--brand-ink)" : "var(--ink-2)",
+              }}
+            >
+              <Sparkles size={11} />
+              NLP {nlpMode ? "on" : "off"}
+            </button>
+            <button onClick={() => setShowSsh(!showSsh)} className="btn-ghost">
+              <Server size={13} />
+              SSH
+            </button>
           </div>
-          <div className="w-32">
-            <label className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              User
-            </label>
+        }
+      />
+
+      {showSsh && (
+        <Card className="fade-in">
+          <div className="kicker mb-2">Connect to target via SSH</div>
+          <div className="grid grid-cols-4 gap-2">
             <input
-              type="text"
+              placeholder="user"
               value={sshUser}
               onChange={(e) => setSshUser(e.target.value)}
-              placeholder="root"
-              className="mt-1 w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none focus:border-cyan-500"
+              className="px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "var(--surface-2)", color: "var(--ink-1)" }}
             />
-          </div>
-          <div className="w-20">
-            <label className="text-[10px] text-zinc-500 uppercase tracking-wider">
-              Port
-            </label>
             <input
-              type="text"
+              placeholder="host"
+              value={sshTarget}
+              onChange={(e) => setSshTarget(e.target.value)}
+              className="px-3 py-2 rounded-lg text-sm outline-none col-span-2"
+              style={{ background: "var(--surface-2)", color: "var(--ink-1)" }}
+            />
+            <input
+              placeholder="22"
               value={sshPort}
               onChange={(e) => setSshPort(e.target.value)}
-              className="mt-1 w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none focus:border-cyan-500"
+              className="px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "var(--surface-2)", color: "var(--ink-1)" }}
             />
           </div>
-          <button
-            onClick={connectSsh}
-            className="rounded-md bg-cyan-600 hover:bg-cyan-500 px-4 py-1.5 text-xs font-semibold text-white transition-colors"
-          >
+          <button onClick={connectSsh} className="btn-primary mt-3">
             Connect
           </button>
-        </div>
+        </Card>
       )}
 
-      {/* terminal output */}
-      <div
-        ref={outputRef}
-        className="flex-1 overflow-y-auto rounded-xl bg-black border border-zinc-800 p-4 font-mono text-sm"
-      >
-        {lines.map((line, i) => (
-          <div
-            key={i}
-            className={
-              line.type === "input"
-                ? "text-cyan-400"
-                : line.type === "error"
-                  ? "text-red-400"
-                  : "text-green-400"
-            }
+      <Card padding="none" className="overflow-hidden">
+        <div
+          ref={outputRef}
+          className="p-4 overflow-y-auto"
+          style={{
+            background: "var(--surface-1)",
+            height: 540,
+            fontFamily: "var(--font-geist-mono)",
+            fontSize: 13,
+            lineHeight: 1.55,
+          }}
+        >
+          {lines.map((l, i) => (
+            <div key={i} style={{ color: lineColor(l.type) }} className="whitespace-pre-wrap fade-in">
+              {l.text}
+            </div>
+          ))}
+          {running && (
+            <div className="flex items-center gap-1 mt-1" style={{ color: "var(--brand)" }}>
+              <span className="w-1 h-1 rounded-full" style={{ background: "currentColor", animation: "pulse 1s infinite" }} />
+              running…
+            </div>
+          )}
+        </div>
+        <div
+          className="px-4 py-3 flex items-center gap-2"
+          style={{ borderTop: "1px solid var(--border-1)", background: "var(--surface-2)" }}
+        >
+          <TerminalIcon size={14} style={{ color: "var(--brand)" }} />
+          <span
+            style={{ color: "var(--ink-3)", fontFamily: "var(--font-geist-mono)", fontSize: 13 }}
           >
-            <pre className="whitespace-pre-wrap">{line.text}</pre>
-          </div>
-        ))}
-        {running && (
-          <span className="text-zinc-500 animate-pulse">Running...</span>
-        )}
-      </div>
-
-      {/* input */}
-      <div className="mt-2 flex items-center gap-2 rounded-lg bg-black border border-zinc-800 px-4 py-2 font-mono">
-        <span className="text-green-400 text-sm">$</span>
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKey}
-          placeholder={nlpMode ? "Describe what you want to do..." : "Enter command..."}
-          className="flex-1 bg-transparent text-sm text-green-400 placeholder-zinc-600 focus:outline-none"
-          autoFocus
-        />
-      </div>
+            {nlpMode ? "nlp›" : "$"}
+          </span>
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKey}
+            placeholder={nlpMode ? "scan example.com for sqli" : "nuclei -u https://target.com -severity high"}
+            className="flex-1 bg-transparent outline-none text-sm"
+            style={{
+              color: "var(--ink-1)",
+              fontFamily: "var(--font-geist-mono)",
+            }}
+            disabled={running}
+            autoFocus
+          />
+        </div>
+      </Card>
     </div>
   );
 }

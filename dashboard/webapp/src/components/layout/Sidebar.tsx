@@ -5,82 +5,159 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Bot, Network, AlertTriangle, Target, Radar,
   BarChart3, Terminal, MessageSquare, Wrench, FileText, FolderKanban,
-  Settings,
+  Settings, ShieldAlert,
 } from "lucide-react";
 import clsx from "clsx";
 
-const ICONS: Record<string, React.ComponentType<{ size?: number }>> = {
+const ICONS = {
   LayoutDashboard, Bot, Network, AlertTriangle, Target, Radar,
   BarChart3, Terminal, MessageSquare, Wrench, FileText, FolderKanban,
-  Settings,
-};
+  Settings, ShieldAlert,
+} as const;
+type IconName = keyof typeof ICONS;
 
-const NAV = [
-  { href: "/overview", icon: "LayoutDashboard", label: "Overview" },
-  { href: "/agents", icon: "Bot", label: "Agents" },
-  { href: "/graph", icon: "Network", label: "Graph" },
-  { href: "/findings", icon: "AlertTriangle", label: "Findings" },
-  { href: "/targets", icon: "Target", label: "Targets" },
-  { href: "/recon", icon: "Radar", label: "Recon" },
-  { href: "/insights", icon: "BarChart3", label: "Insights" },
-  { divider: true, href: "", icon: "", label: "" },
-  { href: "/terminal", icon: "Terminal", label: "Terminal" },
-  { href: "/chat", icon: "MessageSquare", label: "Chat" },
-  { href: "/cypherfix", icon: "Wrench", label: "CypherFix" },
-  { href: "/reports", icon: "FileText", label: "Reports" },
-  { divider: true, href: "", icon: "", label: "" },
-  { href: "/projects", icon: "FolderKanban", label: "Projects" },
-  { href: "/settings", icon: "Settings", label: "Settings" },
+type NavItem =
+  | { kind: "link"; href: string; icon: IconName; label: string; live?: boolean }
+  | { kind: "section"; label: string }
+  | { kind: "divider" };
+
+const NAV: NavItem[] = [
+  { kind: "section", label: "Overview" },
+  { kind: "link", href: "/overview", icon: "LayoutDashboard", label: "Dashboard" },
+  { kind: "link", href: "/agents",   icon: "Bot",             label: "Agents", live: true },
+  { kind: "link", href: "/hack",     icon: "ShieldAlert",     label: "Hunt", live: true },
+
+  { kind: "section", label: "Discovery" },
+  { kind: "link", href: "/recon",    icon: "Radar",           label: "Recon" },
+  { kind: "link", href: "/targets",  icon: "Target",          label: "Targets" },
+  { kind: "link", href: "/graph",    icon: "Network",         label: "Attack Graph" },
+
+  { kind: "section", label: "Findings" },
+  { kind: "link", href: "/findings", icon: "AlertTriangle",   label: "Findings" },
+  { kind: "link", href: "/insights", icon: "BarChart3",       label: "Insights" },
+  { kind: "link", href: "/reports",  icon: "FileText",        label: "Reports" },
+
+  { kind: "section", label: "Workspace" },
+  { kind: "link", href: "/terminal", icon: "Terminal",        label: "Terminal" },
+  { kind: "link", href: "/chat",     icon: "MessageSquare",   label: "Chat" },
+  { kind: "link", href: "/cypherfix",icon: "Wrench",          label: "CypherFix" },
+  { kind: "link", href: "/projects", icon: "FolderKanban",    label: "Projects" },
+  { kind: "divider" },
+  { kind: "link", href: "/settings", icon: "Settings",        label: "Settings" },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="fixed left-0 top-0 h-full w-56 bg-zinc-950 border-r border-zinc-800 flex flex-col z-50">
+    <aside
+      className="fixed left-0 top-0 h-full w-60 flex flex-col z-50"
+      style={{
+        background: "var(--surface-1)",
+        borderRight: "1px solid var(--border-1)",
+      }}
+    >
       {/* Logo */}
-      <div className="px-4 py-4 border-b border-zinc-800">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-emerald-500 flex items-center justify-center text-xs font-bold text-black">
+      <div
+        className="px-5 py-5"
+        style={{ borderBottom: "1px solid var(--border-1)" }}
+      >
+        <Link href="/overview" className="flex items-center gap-3 group">
+          <div
+            className="w-9 h-9 rounded-xl flex items-center justify-center text-sm font-semibold transition-transform group-hover:scale-105"
+            style={{
+              background: "var(--brand)",
+              color: "white",
+              fontFamily: "var(--font-serif)",
+            }}
+          >
             V
           </div>
-          <div>
-            <div className="text-sm font-bold text-white">VIPER</div>
-            <div className="text-[10px] text-zinc-500 tracking-wider">5.0 MULTI-AGENT</div>
+          <div className="leading-tight">
+            <div className="text-sm font-medium" style={{ color: "var(--ink-1)" }}>
+              VIPER
+            </div>
+            <div
+              className="text-[10px] tracking-wider uppercase"
+              style={{ color: "var(--ink-3)" }}
+            >
+              Hunting Engine
+            </div>
           </div>
-        </div>
+        </Link>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 py-2 overflow-y-auto">
-        {NAV.map((item, i) =>
-          item.divider ? (
-            <div key={`d${i}`} className="my-2 mx-3 border-t border-zinc-800" />
-          ) : (
+      {/* Nav */}
+      <nav className="flex-1 px-3 py-3 overflow-y-auto">
+        {NAV.map((item, i) => {
+          if (item.kind === "divider") {
+            return (
+              <div
+                key={`d${i}`}
+                className="my-3"
+                style={{ borderTop: "1px solid var(--border-1)" }}
+              />
+            );
+          }
+          if (item.kind === "section") {
+            return (
+              <div key={`s${i}`} className="kicker px-3 pt-4 pb-1">
+                {item.label}
+              </div>
+            );
+          }
+          const Icon = ICONS[item.icon];
+          const active = pathname === item.href;
+          return (
             <Link
               key={item.href}
               href={item.href}
               className={clsx(
-                "flex items-center gap-3 px-4 py-2 mx-2 rounded-md text-sm transition-colors",
-                pathname === item.href
-                  ? "bg-zinc-800 text-cyan-400"
-                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
+                "flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-sm transition-all"
               )}
+              style={{
+                color: active ? "var(--brand-ink)" : "var(--ink-2)",
+                background: active ? "var(--brand-soft)" : "transparent",
+                fontWeight: active ? 500 : 400,
+              }}
+              onMouseEnter={(e) => {
+                if (!active) {
+                  const el = e.currentTarget as HTMLElement;
+                  el.style.background = "var(--surface-2)";
+                  el.style.color = "var(--ink-1)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!active) {
+                  const el = e.currentTarget as HTMLElement;
+                  el.style.background = "transparent";
+                  el.style.color = "var(--ink-2)";
+                }
+              }}
             >
-              {ICONS[item.icon] &&
-                (() => {
-                  const Icon = ICONS[item.icon];
-                  return <Icon size={16} />;
-                })()}
-              {item.label}
+              <Icon size={15} strokeWidth={1.6} />
+              <span className="flex-1">{item.label}</span>
+              {item.live && (
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full pulse-ring"
+                  style={{ background: "var(--success)" }}
+                  aria-label="live"
+                />
+              )}
             </Link>
-          )
-        )}
+          );
+        })}
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-zinc-800 text-[10px] text-zinc-600">
-        VIPER 5.0 &middot; Next.js Dashboard
+      <div
+        className="px-5 py-3 text-[10px] flex items-center justify-between"
+        style={{ borderTop: "1px solid var(--border-1)", color: "var(--ink-3)" }}
+      >
+        <span>VIPER 6.0</span>
+        <span style={{ fontFamily: "var(--font-geist-mono)" }}>
+          {new Date().getFullYear()}
+        </span>
       </div>
     </aside>
   );

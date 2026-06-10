@@ -1,373 +1,243 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
 import { useApi } from "@/hooks/useApi";
-import { apiGet, apiPost } from "@/lib/api";
-import type { AttackStat, Session } from "@/lib/types";
+import type { AttackStat } from "@/lib/types";
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  RadarChart,
-  Radar,
-  PolarGrid,
-  PolarAngleAxis,
-  PolarRadiusAxis,
-  LineChart,
-  Line,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+  RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
 } from "recharts";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card, CardHeader } from "@/components/ui/Card";
+import { StatCard } from "@/components/ui/StatCard";
+import { TrendingUp, Brain, Crosshair, Target as TargetIcon } from "lucide-react";
 
-/* ---------- chart tooltip style ---------- */
-const TOOLTIP_STYLE = {
-  contentStyle: {
-    background: "#18181b",
-    border: "1px solid #3f3f46",
-    borderRadius: 8,
-  },
-  itemStyle: { color: "#e4e4e7" },
-};
-
-/* ---------- kill chain stage ---------- */
 interface KillChainStage {
-  stage: string;
-  count: number;
+  stage?: string;
+  phase?: string;          // backend ships `phase`; alias to stage
+  count?: number;
+  total?: number;          // backend ships `total`
   success_rate?: number;
 }
-
-/* ---------- evograph types ---------- */
+// Mirrors GET /api/evograph/stats — a summary of the cross-session memory DB.
 interface EvoStats {
-  total_episodes: number;
-  q_table_size: number;
-  avg_reward: number;
-  best_reward: number;
-  exploration_rate: number;
+  available: boolean;
+  session_count: number; pattern_count: number;
+  edge_count: number; total_attacks: number;
+}
+interface TechMapEntry { tech: string; attacks: number; success_rate: number }
+// GET /api/sessions/list rows (distinct from the shared Session type, which
+// describes the live-hunt state machine, not the evograph history table).
+interface InsightSession {
+  id: number; target: string; tech_stack?: string;
+  start_time?: string; end_time?: string;
+  findings_count: number; total_reward?: number;
 }
 
-interface TechMapEntry {
-  tech: string;
-  attacks: number;
-  success_rate: number;
-}
-
-/* ---------- stat card ---------- */
-function StatCard({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string | number;
-  accent?: string;
-}) {
-  return (
-    <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4">
-      <p className="text-[10px] text-zinc-500 uppercase tracking-wider">
-        {label}
-      </p>
-      <p className={`mt-1 text-xl font-bold ${accent ?? "text-zinc-100"}`}>
-        {value}
-      </p>
-    </div>
-  );
-}
-
-/* ---------- page ---------- */
 export default function InsightsPage() {
-  const { data: attackStats } = useApi<AttackStat[]>(
-    "attack-stats",
-    "/api/attacks/stats",
-    10000,
-  );
-  const { data: killChain } = useApi<KillChainStage[]>(
-    "kill-chain",
-    "/api/attacks/kill-chain",
-    10000,
-  );
-  const { data: evoStats } = useApi<EvoStats>(
-    "evo-stats",
-    "/api/evograph/stats",
-    10000,
-  );
-  const { data: techMap } = useApi<TechMapEntry[]>(
-    "tech-map",
-    "/api/evograph/tech-map",
-    10000,
-  );
-  const { data: sessions } = useApi<Session[]>(
-    "sessions-insights",
-    "/api/sessions/list",
-    10000,
-  );
+  const { data: attackStats } = useApi<AttackStat[]>("attack-stats", "/api/attacks/stats", 10000);
+  const { data: killChain } = useApi<KillChainStage[]>("kill-chain", "/api/attacks/kill-chain", 10000);
+  const { data: evoStats } = useApi<EvoStats>("evo-stats", "/api/evograph/stats", 10000);
+  const { data: techMap } = useApi<TechMapEntry[]>("tech-map", "/api/evograph/tech-map", 10000);
+  const { data: sessionsRaw } = useApi<
+    InsightSession[] | { sessions: InsightSession[] }
+  >("sessions-insights", "/api/sessions/list", 10000);
+  const sessions: InsightSession[] = Array.isArray(sessionsRaw)
+    ? sessionsRaw
+    : (sessionsRaw?.sessions ?? []);
 
-  /* attack stats bar chart data */
-  const barData = (attackStats ?? []).map((a) => ({
+  // Backend returns success_rate already as a percentage (0-100), not 0-1.
+  // Guard against either shape so we don't render 2130%.
+  const barData = (attackStats ?? []).slice(0, 10).map((a) => ({
     name: a.attack_type,
-    success: Math.round(a.success_rate * 100),
+    success: Math.round(a.success_rate <= 1 ? a.success_rate * 100 : a.success_rate),
     total: a.total,
   }));
 
-  /* kill chain radar data */
-  const radarData = (killChain ?? []).map((k) => ({
-    stage: k.stage,
-    count: k.count,
-    rate: Math.round((k.success_rate ?? 0) * 100),
-  }));
+  const radarData = (killChain ?? []).map((k) => {
+    const r = k.success_rate ?? 0;
+    return {
+      stage: k.stage ?? k.phase ?? "—",
+      rate: Math.round(r <= 1 ? r * 100 : r),
+    };
+  });
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold text-zinc-100">Insights</h1>
+      <PageHeader
+        kicker="Analytics"
+        title="Insights"
+        subtitle="Q-learning telemetry, kill-chain efficiency, attack-stack patterns."
+      />
 
-      {/* EvoGraph stats */}
-      {evoStats && (
-        <div className="grid grid-cols-5 gap-4">
+      {/* EvoGraph stats — cross-session memory summary */}
+      {evoStats?.available && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard
-            label="Episodes"
-            value={evoStats.total_episodes}
-            accent="text-cyan-400"
+            label="Sessions"
+            value={evoStats.session_count}
+            accent="brand"
+            icon={<Brain size={14} />}
+            hint="hunts recorded"
           />
           <StatCard
-            label="Q-Table Size"
-            value={evoStats.q_table_size}
+            label="Patterns learned"
+            value={evoStats.pattern_count}
+            accent="info"
           />
           <StatCard
-            label="Avg Reward"
-            value={evoStats.avg_reward.toFixed(2)}
-            accent="text-emerald-400"
+            label="Graph edges"
+            value={evoStats.edge_count}
+            accent="medium"
+            icon={<TrendingUp size={14} />}
           />
           <StatCard
-            label="Best Reward"
-            value={evoStats.best_reward.toFixed(2)}
-            accent="text-yellow-400"
-          />
-          <StatCard
-            label="Exploration"
-            value={`${Math.round(evoStats.exploration_rate * 100)}%`}
+            label="Total attacks"
+            value={evoStats.total_attacks}
+            accent="success"
           />
         </div>
       )}
 
-      {/* charts row */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* attack success rates */}
-        <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-            Attack Success Rates
-          </h2>
-          {barData.length > 0 ? (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* Attack success rates */}
+        <Card padding="none">
+          <CardHeader title="Attack success rate" kicker="By technique" />
+          <div className="p-5">
             <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={barData} layout="vertical">
-                <XAxis
-                  type="number"
-                  tick={{ fill: "#71717a", fontSize: 10 }}
-                  axisLine={false}
-                  tickLine={false}
-                  domain={[0, 100]}
-                  tickFormatter={(v) => `${v}%`}
-                />
-                <YAxis
-                  dataKey="name"
-                  type="category"
-                  tick={{ fill: "#a1a1aa", fontSize: 10 }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={120}
-                />
-                <Tooltip {...TOOLTIP_STYLE} formatter={(v) => `${v}%`} />
-                <Bar dataKey="success" fill="#22d3ee" radius={[0, 4, 4, 0]} />
+              <BarChart data={barData} layout="vertical" margin={{ left: 0, right: 16 }}>
+                <CartesianGrid stroke="var(--border-1)" horizontal={false} />
+                <XAxis type="number" domain={[0, 100]} tickFormatter={(v) => `${v}%`}
+                       tick={{ fill: "var(--ink-3)", fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis dataKey="name" type="category" width={120}
+                       tick={{ fill: "var(--ink-2)", fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip cursor={{ fill: "var(--surface-2)" }} />
+                <Bar dataKey="success" fill="var(--brand)" radius={[0, 6, 6, 0]}
+                     background={{ fill: "var(--surface-2)", radius: 6 }} />
               </BarChart>
             </ResponsiveContainer>
-          ) : (
-            <p className="text-xs text-zinc-600 py-12 text-center">
-              No attack data yet.
-            </p>
-          )}
-        </div>
+          </div>
+        </Card>
 
-        {/* kill chain radar */}
-        <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-          <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-            Kill Chain Coverage
-          </h2>
-          {radarData.length > 0 ? (
+        {/* Kill chain radar */}
+        <Card padding="none">
+          <CardHeader title="Kill chain efficiency" kicker="Reach per stage" />
+          <div className="p-5">
             <ResponsiveContainer width="100%" height={280}>
-              <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
-                <PolarGrid stroke="#3f3f46" />
-                <PolarAngleAxis
-                  dataKey="stage"
-                  tick={{ fill: "#a1a1aa", fontSize: 10 }}
-                />
-                <PolarRadiusAxis
-                  tick={{ fill: "#71717a", fontSize: 9 }}
-                  axisLine={false}
-                />
-                <Radar
-                  dataKey="count"
-                  stroke="#22d3ee"
-                  fill="#22d3ee"
-                  fillOpacity={0.2}
-                />
-                <Tooltip {...TOOLTIP_STYLE} />
+              <RadarChart data={radarData}>
+                <PolarGrid stroke="var(--border-1)" />
+                <PolarAngleAxis dataKey="stage" tick={{ fill: "var(--ink-2)", fontSize: 11 }} />
+                <PolarRadiusAxis tick={{ fill: "var(--ink-3)", fontSize: 9 }} angle={90} />
+                <Tooltip />
+                <Radar dataKey="rate" stroke="var(--brand)" fill="var(--brand)" fillOpacity={0.22} />
               </RadarChart>
             </ResponsiveContainer>
-          ) : (
-            <p className="text-xs text-zinc-600 py-12 text-center">
-              No kill chain data yet.
-            </p>
-          )}
-        </div>
+          </div>
+        </Card>
       </div>
 
-      {/* tech map table */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-        <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-          EvoGraph Technology Map
-        </h2>
-        {techMap && techMap.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-700">
-                  <th className="px-4 py-2 text-left text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Technology
-                  </th>
-                  <th className="px-4 py-2 text-right text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Attacks
-                  </th>
-                  <th className="px-4 py-2 text-right text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Success Rate
-                  </th>
-                  <th className="px-4 py-2 text-left text-[10px] text-zinc-500 font-semibold uppercase tracking-wider w-48">
-                    Bar
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {techMap.map((t) => (
-                  <tr
-                    key={t.tech}
-                    className="border-b border-zinc-800/50 hover:bg-zinc-800/30"
-                  >
-                    <td className="px-4 py-2 text-zinc-200 font-mono text-xs">
-                      {t.tech}
-                    </td>
-                    <td className="px-4 py-2 text-right text-zinc-300">
-                      {t.attacks}
-                    </td>
-                    <td className="px-4 py-2 text-right">
-                      <span
-                        className={
-                          t.success_rate >= 0.5
-                            ? "text-emerald-400"
-                            : t.success_rate >= 0.2
-                              ? "text-yellow-400"
-                              : "text-zinc-400"
-                        }
-                      >
-                        {Math.round(t.success_rate * 100)}%
+      {/* Tech stack map */}
+      <Card padding="none">
+        <CardHeader title="Tech stack success map" kicker="Which stacks bleed" />
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ color: "var(--ink-3)", textAlign: "left" }}>
+                {["Tech", "Attacks", "Success rate", ""].map((h, i) => (
+                  <th key={i} className="font-normal text-xs uppercase tracking-wider px-5 py-3">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(techMap ?? []).slice(0, 14).map((t) => {
+                const pct = Math.round(
+                  t.success_rate <= 1 ? t.success_rate * 100 : t.success_rate,
+                );
+                return (
+                  <tr key={t.tech} style={{ borderTop: "1px solid var(--border-1)" }}>
+                    <td className="px-5 py-3" style={{ color: "var(--ink-1)" }}>
+                      <span className="flex items-center gap-2">
+                        <TargetIcon size={12} style={{ color: "var(--ink-3)" }} />
+                        {t.tech}
                       </span>
                     </td>
-                    <td className="px-4 py-2">
-                      <div className="w-full bg-zinc-800 rounded-full h-2">
+                    <td className="px-5 py-3" style={{ color: "var(--ink-2)" }}>
+                      {t.attacks}
+                    </td>
+                    <td className="px-5 py-3" style={{ color: "var(--ink-1)", fontWeight: 600 }}>
+                      {pct}%
+                    </td>
+                    <td className="px-5 py-3 w-1/3">
+                      <div
+                        className="h-1.5 rounded-full overflow-hidden"
+                        style={{ background: "var(--surface-2)" }}
+                      >
                         <div
-                          className="bg-cyan-500 h-2 rounded-full transition-all"
+                          className="h-full transition-all"
                           style={{
-                            width: `${Math.round(t.success_rate * 100)}%`,
+                            width: `${pct}%`,
+                            background: pct >= 60 ? "var(--success)"
+                                         : pct >= 30 ? "var(--brand)"
+                                         : "var(--ink-3)",
                           }}
                         />
                       </div>
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="text-xs text-zinc-600 text-center py-6">
-            No technology data yet. Run scans to build the map.
-          </p>
-        )}
-      </div>
+                );
+              })}
+              {(!techMap || techMap.length === 0) && (
+                <tr><td colSpan={4} className="px-5 py-6 text-center text-sm" style={{ color: "var(--ink-3)" }}>
+                  No tech-map data yet
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
-      {/* sessions summary */}
-      <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-        <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-          Session Summary
-        </h2>
-        {sessions && sessions.length > 0 ? (
-          <div className="overflow-x-auto max-h-64 overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-700">
-                  <th className="px-4 py-2 text-left text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Target
-                  </th>
-                  <th className="px-4 py-2 text-left text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    State
-                  </th>
-                  <th className="px-4 py-2 text-left text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Phase
-                  </th>
-                  <th className="px-4 py-2 text-right text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Iterations
-                  </th>
-                  <th className="px-4 py-2 text-right text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Findings
-                  </th>
-                  <th className="px-4 py-2 text-left text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
-                    Date
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {sessions.map((s) => (
-                  <tr
-                    key={s.id}
-                    className="border-b border-zinc-800/50 hover:bg-zinc-800/30"
-                  >
-                    <td className="px-4 py-2 text-cyan-400 font-mono text-xs truncate max-w-[200px]">
-                      {s.target}
-                    </td>
-                    <td className="px-4 py-2">
-                      <span
-                        className={`text-xs font-semibold ${
-                          s.state === "running"
-                            ? "text-cyan-400"
-                            : s.state === "completed"
-                              ? "text-emerald-400"
-                              : s.state === "error"
-                                ? "text-red-400"
-                                : "text-zinc-400"
-                        }`}
-                      >
-                        {s.state}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2 text-xs text-zinc-300">
-                      {s.phase}
-                    </td>
-                    <td className="px-4 py-2 text-right text-xs text-zinc-300">
-                      {s.iteration}
-                    </td>
-                    <td className="px-4 py-2 text-right text-xs font-semibold text-zinc-200">
-                      {s.findings_count}
-                    </td>
-                    <td className="px-4 py-2 text-xs text-zinc-500">
-                      {s.created_at}
-                    </td>
-                  </tr>
+      {/* Recent sessions */}
+      <Card padding="none">
+        <CardHeader title="Recent sessions" kicker={`${sessions?.length ?? 0} runs`} />
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ color: "var(--ink-3)", textAlign: "left" }}>
+                {["Target", "Tech stack", "Findings", "Reward", "Started"].map((h) => (
+                  <th key={h} className="font-normal text-xs uppercase tracking-wider px-5 py-3">{h}</th>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="text-xs text-zinc-600 text-center py-6">
-            No sessions recorded yet.
-          </p>
-        )}
-      </div>
+              </tr>
+            </thead>
+            <tbody>
+              {(sessions ?? []).slice(0, 10).map((s) => (
+                <tr key={s.id} style={{ borderTop: "1px solid var(--border-1)" }}>
+                  <td className="px-5 py-3" style={{ color: "var(--ink-1)", fontFamily: "var(--font-geist-mono)", fontSize: 12 }}>
+                    {s.target}
+                  </td>
+                  <td className="px-5 py-3">
+                    {s.tech_stack
+                      ? <span className="pill" style={{ background: "var(--brand-soft)", color: "var(--brand-ink)" }}>
+                          {s.tech_stack}
+                        </span>
+                      : <span style={{ color: "var(--ink-3)" }}>—</span>}
+                  </td>
+                  <td className="px-5 py-3" style={{ color: "var(--ink-1)", fontWeight: 600 }}>{s.findings_count}</td>
+                  <td className="px-5 py-3" style={{ color: "var(--ink-2)" }}>
+                    {typeof s.total_reward === "number" ? s.total_reward.toFixed(1) : "—"}
+                  </td>
+                  <td className="px-5 py-3" style={{ color: "var(--ink-3)", fontSize: 12 }}>
+                    {s.start_time ? new Date(s.start_time).toLocaleString() : "—"}
+                  </td>
+                </tr>
+              ))}
+              {(!sessions || sessions.length === 0) && (
+                <tr><td colSpan={5} className="px-5 py-6 text-center text-sm" style={{ color: "var(--ink-3)" }}>
+                  No sessions yet
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
     </div>
   );
 }

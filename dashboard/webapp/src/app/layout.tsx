@@ -4,6 +4,7 @@ import "./globals.css";
 import { QueryProvider } from "@/providers/QueryProvider";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
+import { ThemeScript } from "@/components/ThemeScript";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,25 +17,30 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VIPER 5.0 Dashboard",
-  description: "Multi-agent bug bounty hunting engine",
+  title: "VIPER · Dashboard",
+  description: "Autonomous bug-bounty + agentic-AI red-team hunting engine",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      style={{ fontFamily: "var(--font-geist-sans)" }}
+      suppressHydrationWarning
     >
-      <body className="min-h-full bg-zinc-950 text-zinc-100">
+      <body
+        className="min-h-full"
+        style={{ background: "var(--surface-0)", color: "var(--ink-1)" }}
+        suppressHydrationWarning
+      >
+        <ThemeScript />
         <QueryProvider>
           <Sidebar />
           <TopBar />
-          <main className="ml-56 mt-12 p-6">{children}</main>
+          <main className="ml-60 mt-14 px-8 py-8 max-w-[1480px]">{children}</main>
         </QueryProvider>
       </body>
     </html>

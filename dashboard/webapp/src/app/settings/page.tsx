@@ -1,291 +1,278 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { useApi } from "@/hooks/useApi";
+import { useState, useEffect } from "react";
 import { apiGet, apiPost } from "@/lib/api";
+import { Settings as SettingsIcon, Save, Check, X } from "lucide-react";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card, CardHeader } from "@/components/ui/Card";
 
 interface Settings {
-  /* general */
   target?: string;
   max_concurrent?: number;
   scan_timeout?: number;
-  /* stealth */
   stealth_level?: number;
   waf_evasion?: boolean;
   randomize_ua?: boolean;
-  /* model */
   model_deep?: string;
   model_fast?: string;
   model_report?: string;
-  /* scan */
   scan_intensity?: string;
   max_iterations?: number;
   nuclei_enabled?: boolean;
-  /* notifications */
   discord_webhook?: string;
   telegram_token?: string;
-  email_smtp?: string;
-  [key: string]: unknown;
+  telegram_chat?: string;
+  smtp_host?: string;
+  smtp_port?: number;
+  smtp_user?: string;
+  smtp_password?: string;
+  hackerone_token?: string;
+  rate_limit?: number;
 }
 
-/* ---------- section component ---------- */
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-5">
-      <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-4">
-        {title}
-      </h2>
-      <div className="space-y-3">{children}</div>
-    </div>
-  );
-}
-
-/* ---------- field component ---------- */
 function Field({
-  label,
-  value,
-  onChange,
-  type = "text",
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  type?: string;
-  placeholder?: string;
-}) {
+  label, hint, children,
+}: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">
-        {label}
+      <label className="block">
+        <div className="text-sm font-medium mb-1.5" style={{ color: "var(--ink-1)" }}>
+          {label}
+        </div>
+        {children}
+        {hint && (
+          <div className="text-xs mt-1" style={{ color: "var(--ink-3)" }}>
+            {hint}
+          </div>
+        )}
       </label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-cyan-500 transition-colors"
-      />
     </div>
   );
 }
 
-/* ---------- toggle component ---------- */
-function Toggle({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
+function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return (
-    <label className="flex items-center justify-between cursor-pointer">
-      <span className="text-sm text-zinc-300">{label}</span>
-      <div
+    <input
+      {...props}
+      className="w-full px-3 py-2 rounded-lg outline-none text-sm transition-shadow"
+      style={{
+        background: "var(--surface-2)",
+        border: "1px solid var(--border-1)",
+        color: "var(--ink-1)",
+        fontFamily: props.type === "password" || props.type === "url" ? "var(--font-geist-mono)" : undefined,
+        ...props.style,
+      }}
+    />
+  );
+}
+
+function Toggle({
+  checked, onChange, label,
+}: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <label className="flex items-center justify-between cursor-pointer py-1.5">
+      <span className="text-sm" style={{ color: "var(--ink-1)" }}>{label}</span>
+      <button
         onClick={() => onChange(!checked)}
-        className={`relative w-9 h-5 rounded-full transition-colors ${checked ? "bg-cyan-600" : "bg-zinc-700"}`}
+        className="relative w-10 h-5 rounded-full transition-colors"
+        style={{ background: checked ? "var(--brand)" : "var(--surface-3)" }}
       >
-        <div
-          className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? "translate-x-4" : ""}`}
+        <span
+          className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform"
+          style={{ transform: checked ? "translateX(20px)" : "none" }}
         />
-      </div>
+      </button>
     </label>
   );
 }
 
-/* ---------- page ---------- */
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings>({});
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
-  /* load settings */
   useEffect(() => {
-    apiGet<Settings>("/api/settings").then((data) => {
-      if (data) {
-        setSettings(data);
-        setLoaded(true);
-      }
-    });
+    apiGet<Settings>("/api/settings").then((d) => { if (d) { setSettings(d); setLoaded(true); } });
   }, []);
 
-  /* helper to update a field */
-  const set = (key: string, value: unknown) =>
-    setSettings((prev) => ({ ...prev, [key]: value }));
+  const set = (k: keyof Settings, v: unknown) => setSettings((p) => ({ ...p, [k]: v }));
 
-  /* save */
   const save = async () => {
     setSaving(true);
-    const result = await apiPost<{ ok: boolean }>("/api/settings", settings);
+    const r = await apiPost<{ ok: boolean }>(
+      "/api/settings",
+      settings as unknown as Record<string, unknown>,
+    );
     setSaving(false);
-    if (result?.ok) {
-      setToast({ type: "success", msg: "Settings saved" });
-    } else {
-      setToast({ type: "error", msg: "Failed to save settings" });
-    }
+    setToast(r?.ok
+      ? { type: "success", msg: "Settings saved" }
+      : { type: "error", msg: "Failed to save" });
     setTimeout(() => setToast(null), 3000);
   };
 
   if (!loaded) {
     return (
       <div className="flex items-center justify-center h-64">
-        <span className="text-zinc-500 text-sm animate-pulse">
-          Loading settings...
-        </span>
+        <div className="skeleton" style={{ width: 200, height: 12 }} />
       </div>
     );
   }
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-zinc-100">Settings</h1>
-        <button
-          onClick={save}
-          disabled={saving}
-          className="rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 px-5 py-2 text-sm font-semibold text-white transition-colors"
-        >
-          {saving ? "Saving..." : "Save"}
-        </button>
-      </div>
+      <PageHeader
+        kicker="Configuration"
+        title="Settings"
+        subtitle="Engine, models, stealth, notifications, integrations."
+        actions={
+          <button onClick={save} disabled={saving} className="btn-primary">
+            <Save size={13} />
+            {saving ? "Saving" : "Save"}
+          </button>
+        }
+      />
 
-      {/* toast */}
       {toast && (
         <div
-          className={`rounded-lg px-4 py-2 text-sm font-medium ${
-            toast.type === "success"
-              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-              : "bg-red-500/20 text-red-400 border border-red-500/30"
-          }`}
+          className="fade-in pill"
+          style={{
+            background: toast.type === "success" ? "var(--success-soft)" : "var(--critical-soft)",
+            color: toast.type === "success" ? "var(--success)" : "var(--critical)",
+            position: "fixed",
+            bottom: 24,
+            right: 24,
+            padding: "8px 14px",
+            boxShadow: "var(--shadow-2)",
+            zIndex: 60,
+          }}
         >
+          {toast.type === "success" ? <Check size={12} /> : <X size={12} />}
           {toast.msg}
         </div>
       )}
 
       {/* General */}
-      <Section title="General">
-        <Field
-          label="Target URL"
-          value={String(settings.target ?? "")}
-          onChange={(v) => set("target", v)}
-          placeholder="https://target.com"
-        />
-        <Field
-          label="Max Concurrent Targets"
-          value={String(settings.max_concurrent ?? "")}
-          onChange={(v) => set("max_concurrent", parseInt(v, 10) || 0)}
-          type="number"
-        />
-        <Field
-          label="Scan Timeout (seconds)"
-          value={String(settings.scan_timeout ?? "")}
-          onChange={(v) => set("scan_timeout", parseInt(v, 10) || 0)}
-          type="number"
-        />
-      </Section>
+      <Card padding="none">
+        <CardHeader title="General" kicker="Engine" />
+        <div className="p-5 grid grid-cols-2 gap-4">
+          <Field label="Target">
+            <TextInput
+              type="url"
+              value={settings.target ?? ""}
+              onChange={(e) => set("target", e.target.value)}
+              placeholder="https://target.example.com"
+            />
+          </Field>
+          <Field label="Max concurrent" hint="Parallel scan workers">
+            <TextInput
+              type="number"
+              value={settings.max_concurrent ?? 4}
+              onChange={(e) => set("max_concurrent", parseInt(e.target.value) || 4)}
+            />
+          </Field>
+          <Field label="Scan timeout (s)">
+            <TextInput
+              type="number"
+              value={settings.scan_timeout ?? 60}
+              onChange={(e) => set("scan_timeout", parseInt(e.target.value) || 60)}
+            />
+          </Field>
+          <Field label="Rate limit (req/s)">
+            <TextInput
+              type="number"
+              value={settings.rate_limit ?? 10}
+              onChange={(e) => set("rate_limit", parseInt(e.target.value) || 10)}
+            />
+          </Field>
+        </div>
+      </Card>
 
       {/* Stealth */}
-      <Section title="Stealth">
-        <Field
-          label="Stealth Level (0-4)"
-          value={String(settings.stealth_level ?? 0)}
-          onChange={(v) => set("stealth_level", parseInt(v, 10) || 0)}
-          type="number"
-        />
-        <Toggle
-          label="WAF Evasion"
-          checked={!!settings.waf_evasion}
-          onChange={(v) => set("waf_evasion", v)}
-        />
-        <Toggle
-          label="Randomize User-Agent"
-          checked={!!settings.randomize_ua}
-          onChange={(v) => set("randomize_ua", v)}
-        />
-      </Section>
-
-      {/* Model Preferences */}
-      <Section title="Model Preferences">
-        <Field
-          label="Deep Analysis Model"
-          value={String(settings.model_deep ?? "")}
-          onChange={(v) => set("model_deep", v)}
-          placeholder="claude-opus"
-        />
-        <Field
-          label="Fast Scanning Model"
-          value={String(settings.model_fast ?? "")}
-          onChange={(v) => set("model_fast", v)}
-          placeholder="gemini-flash"
-        />
-        <Field
-          label="Report Writing Model"
-          value={String(settings.model_report ?? "")}
-          onChange={(v) => set("model_report", v)}
-          placeholder="claude-sonnet"
-        />
-      </Section>
-
-      {/* Scan Intensity */}
-      <Section title="Scan Intensity">
-        <div>
-          <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">
-            Intensity
-          </label>
-          <select
-            value={String(settings.scan_intensity ?? "moderate")}
-            onChange={(e) => set("scan_intensity", e.target.value)}
-            className="w-full rounded-lg bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-cyan-500 transition-colors"
-          >
-            <option value="passive">Passive</option>
-            <option value="light">Light</option>
-            <option value="moderate">Moderate</option>
-            <option value="aggressive">Aggressive</option>
-          </select>
+      <Card padding="none">
+        <CardHeader title="Stealth" kicker="Evasion" />
+        <div className="p-5 space-y-2">
+          <Field label="Stealth level (0-4)">
+            <TextInput
+              type="number"
+              min={0}
+              max={4}
+              value={settings.stealth_level ?? 0}
+              onChange={(e) => set("stealth_level", parseInt(e.target.value))}
+            />
+          </Field>
+          <Toggle
+            label="WAF evasion"
+            checked={!!settings.waf_evasion}
+            onChange={(v) => set("waf_evasion", v)}
+          />
+          <Toggle
+            label="Randomize User-Agent"
+            checked={!!settings.randomize_ua}
+            onChange={(v) => set("randomize_ua", v)}
+          />
         </div>
-        <Field
-          label="Max Iterations"
-          value={String(settings.max_iterations ?? "")}
-          onChange={(v) => set("max_iterations", parseInt(v, 10) || 0)}
-          type="number"
-        />
-        <Toggle
-          label="Nuclei Scanner"
-          checked={!!settings.nuclei_enabled}
-          onChange={(v) => set("nuclei_enabled", v)}
-        />
-      </Section>
+      </Card>
+
+      {/* Models */}
+      <Card padding="none">
+        <CardHeader title="LLM models" kicker="Routing" />
+        <div className="p-5 grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Field label="Deep think" hint="anthropic/claude-opus-4-5">
+            <TextInput value={settings.model_deep ?? ""} onChange={(e) => set("model_deep", e.target.value)} />
+          </Field>
+          <Field label="Fast triage" hint="gemini/gemini-flash-1.5">
+            <TextInput value={settings.model_fast ?? ""} onChange={(e) => set("model_fast", e.target.value)} />
+          </Field>
+          <Field label="Reports">
+            <TextInput value={settings.model_report ?? ""} onChange={(e) => set("model_report", e.target.value)} />
+          </Field>
+        </div>
+      </Card>
 
       {/* Notifications */}
-      <Section title="Notifications">
-        <Field
-          label="Discord Webhook URL"
-          value={String(settings.discord_webhook ?? "")}
-          onChange={(v) => set("discord_webhook", v)}
-          placeholder="https://discord.com/api/webhooks/..."
-        />
-        <Field
-          label="Telegram Bot Token"
-          value={String(settings.telegram_token ?? "")}
-          onChange={(v) => set("telegram_token", v)}
-          placeholder="123456:ABC-DEF..."
-        />
-        <Field
-          label="Email SMTP"
-          value={String(settings.email_smtp ?? "")}
-          onChange={(v) => set("email_smtp", v)}
-          placeholder="smtp.gmail.com:587"
-        />
-      </Section>
+      <Card padding="none">
+        <CardHeader title="Notifications" kicker="Outbound" />
+        <div className="p-5 space-y-3">
+          <Field label="Discord webhook" hint="Empty disables Discord notifications">
+            <TextInput
+              type="url"
+              placeholder="https://discord.com/api/webhooks/…"
+              value={settings.discord_webhook ?? ""}
+              onChange={(e) => set("discord_webhook", e.target.value)}
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Telegram bot token">
+              <TextInput
+                type="password"
+                value={settings.telegram_token ?? ""}
+                onChange={(e) => set("telegram_token", e.target.value)}
+              />
+            </Field>
+            <Field label="Telegram chat ID">
+              <TextInput
+                value={settings.telegram_chat ?? ""}
+                onChange={(e) => set("telegram_chat", e.target.value)}
+              />
+            </Field>
+          </div>
+        </div>
+      </Card>
+
+      {/* Integrations */}
+      <Card padding="none">
+        <CardHeader title="Integrations" kicker="Submission" />
+        <div className="p-5">
+          <Field label="HackerOne API token" hint="Only used when --submit is passed; never auto-submitted">
+            <TextInput
+              type="password"
+              value={settings.hackerone_token ?? ""}
+              onChange={(e) => set("hackerone_token", e.target.value)}
+            />
+          </Field>
+        </div>
+      </Card>
     </div>
   );
 }
