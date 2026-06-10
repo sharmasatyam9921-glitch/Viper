@@ -96,7 +96,9 @@ class ParallelHunter:
         scope = None
         if scope_file:
             try:
-                scope_data = json.loads(Path(scope_file).read_text())
+                scope_data = json.loads(
+                    await asyncio.to_thread(Path(scope_file).read_text)
+                )
                 from scope.scope_manager import BugBountyScope
                 scope = BugBountyScope.from_dict(scope_data)
             except Exception as e:

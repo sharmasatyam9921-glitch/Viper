@@ -6,6 +6,7 @@ Triggered after every failed attack. Analyzes the failure, extracts
 lessons, and feeds bypass suggestions back into the fuzzer.
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -160,7 +161,7 @@ class FailureAnalyzer:
             lesson = await self._llm_analyze(failed_attempt)
             if lesson:
                 self.lessons.append(lesson)
-                self._save_history()
+                await asyncio.to_thread(self._save_history)
                 return lesson
 
         # Fallback to heuristic analysis
@@ -174,7 +175,7 @@ class FailureAnalyzer:
         )
 
         self.lessons.append(lesson)
-        self._save_history()
+        await asyncio.to_thread(self._save_history)
         return lesson
 
     async def _llm_analyze(self, failed_attempt: dict) -> Optional[LessonLearned]:
