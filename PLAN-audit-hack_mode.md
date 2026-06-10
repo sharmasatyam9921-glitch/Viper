@@ -1,0 +1,43 @@
+# PLAN — Function Audit: `hack_mode`
+
+> Part of [PLAN.md](PLAN.md) Section 2. Generated 2026-06-06. Module: **core/hack_mode.py — HackMode orchestrator + _NoOpCoordinator**
+
+**Exists:** True  
+
+## Summary
+
+HackMode is the top-level async orchestrator for `viper.py hack <target>`: it auto-detects a profile, builds an AgentBus + AuditLogger + shared FindingDedup, then runs a persistence loop (phases × iterations) dispatching one SwarmCoordinator per phase, gated by profile.stop_conditions / max_iterations / time_budget. Findings are surfaced to a HackResult and an HTML report is auto-written on teardown. Code is generally well-structured with a bounded outer timeout (asyncio.wait_for on profile.time_budget_s), bounded iterations, and bounded per-phase budgets, so no unbounded loops. Main defects: (1) HackMode performs NO scope/RoE check itself before dispatching active workers — scope_reasoner defaults to None and is passed through unverified, so a BugBountyProfile (use_scope_reasoner=True) built via for_target without an explicit scope_reasoner will dispatch active recon/vuln/exploit workers with scope_reasoner=None; enforcement is entirely delegated to downstream workers. (2) Two silent excepts swallow errors (bus.stop() and stop-condition evaluation). (3) resume() hard-codes relative default paths state/hunts and data/viper.db. The auto-approve-destructive wiring (allow_destructive AND approval_gate is None) auto-approves destructive exploit/post workers with no gate — intended for CTF/Lab but risky if misconfigured.
+
+## Top issues
+
+- No scope/RoE enforcement inside HackMode: scope_reasoner defaults to None and is passed unverified into _run_phase payload (line 549). for_target() builds a BugBountyProfile (use_scope_reasoner=True) but never requires/asserts a scope_reasoner, so active recon/vuln/exploit workers can be dispatched with scope_reasoner=None — enforcement is wholly delegated downstream to workers.
+- Silent except in _check_named_stop (line 522-523, `except Exception: continue`): a raising stop_condition is silently ignored, which can mask a legitimate stop (e.g. CTF flag_found), causing the hunt to keep attacking past the intended stop.
+- Silent `except Exception: pass` on bus.stop() in _teardown (line 354): bus shutdown errors swallowed with no log.
+- Hard-coded relative default paths in resume(): Path('state/hunts') (line 211) and Path('data/viper.db') (line 222) are cwd-dependent.
+- Dead conditional at line 475: `'success' if phase_res.workers_failed == 0 else 'success'` — both branches identical, failed-phase status never surfaced to narrator.
+- auto_approve_destructive (lines 576-578, 584-586): destructive exploit/post workers auto-approved when allow_destructive and approval_gate is None, bypassing human gate — risky default if a destructive profile meets a real target.
+
+## Scope / safety notes
+
+HackMode itself performs NO scope or RoE check before initiating network/target actions. _run_phase (line 526) constructs a coordinator and awaits coord.handle_message(payload), which dispatches active workers (recon/vuln/exploit/post) against self.target. The only scope mechanism is an OPTIONAL scope_reasoner object passed through the payload (line 549); it defaults to None in __init__ and for_target(), and HackMode never validates that one exists even when the profile sets use_scope_reasoner=True (BugBountyProfile). There is no in-module assertion, guardrail, or hard blocklist call. Prior-phase findings are forwarded as new-phase inputs/targets (line 558) without re-validating that discovered subdomains/hosts are in scope. Net: scope safety is entirely delegated to downstream worker code; if those workers treat scope_reasoner=None as 'allow all', active scanning could proceed against out-of-scope assets. This is the single most important defect to fix — HackMode should refuse to dispatch active phases when profile.use_scope_reasoner is True and scope_reasoner is None.
+
+## Function-by-function table
+
+| File:Line | Function | Purpose | Inputs | Outputs | Side effects | Status | Issues |
+|---|---|---|---|---|---|---|---|
+| hack_mode.py:63 | `HackResult` (dataclass) | Result container for one hack run | target/profile/hunt_id/audit_path + defaults | dataclass instance | none | OK | |
+| hack_mode.py:77 | `HackResult.findings_count` (property) | Count of findings | self | int | none | OK | |
+| hack_mode.py:80 | `HackResult.to_dict` | Serialize result for JSON | self | dict | none | OK | UNTESTED unknown; per-phase dict drops timed_out flag of CoordinatorResult |
+| hack_mode.py:112 | `HackMode.__init__` | Construct orchestrator; build bus, dedup, state | target, profile, narrator, audit, scope_reasoner=None, approval_gate=None, bus_queue_size, coordinator_factory | None | creates AgentBus, FindingDedup, mutable self._state | OK | scope_reasoner optional/defaults None — no validation that BugBounty profile actually got one |
+| hack_mode.py:156 | `HackMode.for_target` (classmethod) | Convenience builder: auto-detect profile + audit + narrator | target, profile, scope_file, explicit_profile, go, narrator, audit, scope_reasoner, hunts_dir, db_path | HackMode | calls detect_profile, AuditLogger.for_hunt (opens files/DB) | NEEDS-FIX | No scope check: builds active-hunt orchestrator with scope_reasoner=None by default even for BugBounty (use_scope_reasoner=True) |
+| hack_mode.py:191 | `HackMode.resume` (classmethod) | Rebuild HackMode from prior hunt's audit.jsonl; replay events into state | hunt_id, hunts_dir, db_path, profile, narrator, scope_reasoner, approval_gate | HackMode | reads audit.jsonl, opens AuditLogger on same files | NEEDS-FIX | Hard-coded relative defaults `Path("state/hunts")` and `Path("data/viper.db")` (cwd-dependent); profile recovery is best-effort string-match on name substrings ("ctf"/"bug"); bounded loop over events OK |
+| hack_mode.py:306 | `HackMode.run` (async) | Public entrypoint: banner, audit hunt.started, run loop under time budget, teardown | self | HackResult | starts bus, writes audit events, narrator output | OK | Guards double-start via self._started; outer asyncio.wait_for bounds time — no unbounded loop |
+| hack_mode.py:347 | `HackMode._teardown` (async) | Stop bus, audit hunt.completed, narrator summary, write report in thread | result, started_at | None | stops bus, audit events, narrator, spawns thread for report | NEEDS-FIX | Bare `except Exception: pass` on bus.stop() (line 354) silently swallows shutdown errors; report failure caught but only audited |
+| hack_mode.py:387 | `HackMode._write_report` (sync, run via to_thread) | Render hunt_<id>.html from in-memory findings | result, started_at | None | imports html_reporter, writes report file, audit event | OK | Blocking but correctly offloaded via asyncio.to_thread; local import inside fn |
+| hack_mode.py:423 | `HackMode._run_loop` (async) | Persistence loop: phases × iterations, stop-condition gated | result | None (mutates result) | audit events, narrator, mutates self._state | OK | Bounded by max_iterations + per-phase; resume-skip logic only first iter. Minor: line 475 `"success" if workers_failed==0 else "success"` — both branches return "success" (dead conditional / masks failure status) |
+| hack_mode.py:515 | `HackMode._check_named_stop` | Evaluate only named stop_conditions (skip max_iterations) | self | (bool, name?) | none | NEEDS-FIX | `except Exception: continue` (line 522) silently swallows any error in a stop_condition.check — a broken condition is silently ignored, could mask a should-stop (e.g. flag found) |
+| hack_mode.py:526 | `HackMode._run_phase` (async) | Build coordinator + payload for one phase, dispatch handle_message | phase | CoordinatorResult | constructs coordinator, awaits worker swarm (network/target actions) | NEEDS-FIX | No scope/RoE gate before dispatch; passes scope_reasoner (possibly None) straight into payload; forwards prior findings as new targets without re-validating scope |
+| hack_mode.py:566 | `HackMode._default_coordinator` | Map phase name → concrete SwarmCoordinator | phase, common dict | SwarmCoordinator | none | OK | auto_approve_destructive=(allow_destructive AND approval_gate is None) auto-approves destructive exploit/post workers with no human gate — by-design for CTF/Lab but a footgun if misconfigured |
+| hack_mode.py:597 | `_NoOpCoordinator` (class) | Placeholder coordinator for unimplemented phases (e.g. report) | — | — | — | OK | |
+| hack_mode.py:601 | `_NoOpCoordinator.__init__` | Set PHASE then super init | phase, **kw | None | sets instance PHASE | OK | |
+| hack_mode.py:605 | `_NoOpCoordinator.build_manifest` | Return empty manifest → handle_message emits phase.skipped | target, context | [] (empty list) | none | OK | |
