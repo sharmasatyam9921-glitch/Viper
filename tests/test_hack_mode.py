@@ -654,3 +654,28 @@ class TestPhase2Pipeline:
         finally:
             _REGISTRY["recon"].pop("_test_recon_empty", None)
             _REGISTRY["vuln"].pop("_test_vuln_capture", None)
+
+
+# ---------------------------------------------------------------------------
+# World model: beliefs populate from findings during a live hunt (Section 7.2)
+# ---------------------------------------------------------------------------
+
+
+class TestWorldModel:
+    def test_findings_update_live_belief_state(self, tmp_path):
+        hm = _make_hackmode(tmp_path, technique_runner=_exploit_runner)
+        asyncio.run(hm.run())
+        wm = hm.world_model
+        # The confirmed sqli finding became a high-confidence belief...
+        assert wm.has_belief("vuln:sqli@example.com")
+        assert wm.beliefs["vuln:sqli@example.com"].value.get("confirmed") is True
+        # ...and its URL is in the tracked attack surface.
+        assert any("example.com/item" in e for e in wm.attack_surface()["endpoints"])
+        # Snapshot is serializable for the dashboard / report.
+        assert wm.to_dict()["observation_count"] >= 1
+
+    def test_world_snapshot_audited_on_completion(self, tmp_path):
+        hm = _make_hackmode(tmp_path, technique_runner=_exploit_runner)
+        asyncio.run(hm.run())
+        actions = [e.action for e in hm.audit.read_jsonl()]
+        assert "world.snapshot" in actions

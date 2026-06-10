@@ -44,6 +44,7 @@ from .hack_profile import (
 )
 from .narrator import Narrator
 from .scope_reasoner import ScopeReasoner
+from .world_model import WorldModel
 from .swarm_coordinator import (
     CoordinatorResult,
     ExploitSwarmCoordinator,
@@ -142,6 +143,8 @@ class HackMode:
         # so cross-phase duplicates (same SQLi found by probe AND exploit)
         # don't get republished to the bus.
         self.dedup = FindingDedup()
+        # Live per-hunt belief state — updated on every finding (Section 7.2).
+        self.world_model = WorldModel(target=target)
         # Mythos-style finding-driven chaining. Enabled only when the profile
         # opts in (max_chain_depth > 0); None keeps the legacy linear loop.
         _depth = int(getattr(profile, "max_chain_depth", 0) or 0)
@@ -402,6 +405,15 @@ class HackMode:
                 "phases": list(result.phase_results.keys()),
             },
         )
+        # Persist the final belief state so the dashboard/report can show what
+        # the agent ended up believing about the target (Section 7.2).
+        try:
+            self.audit.event(
+                "world.snapshot", target=self.target,
+                payload=self.world_model.to_dict(),
+            )
+        except Exception:
+            pass
         self.narrator.summary(
             target=self.target,
             profile=self.profile.name,
@@ -555,6 +567,13 @@ class HackMode:
                     result.findings.append(f)
                     self._state["findings"].append(f)
                     iter_findings.append(f)
+                    # Fold every finding into the live belief state (Section 7.2)
+                    # so planning/reporting reason over a structured world model,
+                    # not just a flat findings list.
+                    try:
+                        self.world_model.observe_finding(f)
+                    except Exception:
+                        pass
                     self.narrator.emit_finding(f)
                 findings_this_iter += phase_res.findings_count
                 self.narrator.finish_stage(
