@@ -6,7 +6,7 @@ Two live suites: **Juice Shop** (unauthenticated app-logic) and **DVWA**
 | Suite | Target | Mode | Result |
 | --- | --- | --- | --- |
 | Juice Shop | `bkimminich/juice-shop` | unauthenticated | **4/4** (each isolated) |
-| DVWA `low` | `vulnerables/web-dvwa` | **authenticated** (`--auth-setup dvwa`) | **4/4** |
+| DVWA `low` | `vulnerables/web-dvwa` | **authenticated** (`--auth-setup dvwa`) | **3/4** |
 
 ---
 
@@ -83,10 +83,18 @@ bugs (and most real bounties) actually live.
 | `dvwa_sqli` | sql_injection | `/vulnerabilities/sqli/?id=` | ✅ **SOLVE** |
 | `dvwa_xss_reflected` | xss | `/vulnerabilities/xss_r/?name=` | ✅ **SOLVE** |
 | `dvwa_sqli_blind` | sql_injection | `/vulnerabilities/sqli_blind/?id=` | ✅ **SOLVE** |
-| `dvwa_lfi` | lfi | `/vulnerabilities/fi/?page=` | ✅ **SOLVE** |
+| `dvwa_lfi` | lfi | `/vulnerabilities/fi/?page=` | ❌ MISS (in-pipeline) |
 
-**4/4.** (First run was 3/4 — the LFI worker only tried 4×`../`, too shallow for
-DVWA's `/var/www/html/...` docroot; deepened to 8×`../`, which flips it.)
+**3/4 in the full hunt.** The LFI miss is an honest, known limitation — *not* a
+worker gap. The `lfi` worker confirms DVWA's file inclusion when handed the
+endpoint directly (proven: it returns `lfi:page` against
+`/vulnerabilities/fi/?page=`, and the traversal depth was fixed from 4× to 8×
+`../`). But in the time-boxed swarm hunt, recon *discovers* the `/fi/?page=`
+endpoints (6 endpoint findings) yet the vuln phase doesn't dispatch the LFI
+worker against them with the parameter — the same "discovered endpoints don't
+reach the workers" feeding gap tracked in PLAN.md §4/§5. Closing it (threading
+discovered endpoint+params into worker dispatch) is the next structural fix and
+would flip this to 4/4.
 
 ### How the auth works
 `harness/dvwa.py` runs DVWA's setup once against a fresh container — create-db →
