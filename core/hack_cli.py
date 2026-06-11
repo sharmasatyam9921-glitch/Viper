@@ -70,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force a profile. Default: auto-detect.",
     )
     p.add_argument("--scope", help="Bug-bounty scope JSON file path")
+    p.add_argument("--auth-bearer", metavar="TOKEN",
+                   help="Session Bearer token applied to every request "
+                        "(tests the app as a logged-in user).")
+    p.add_argument("--cookie", metavar="COOKIE",
+                   help="Session Cookie header applied to every request.")
+    p.add_argument("--auth-header", action="append", default=[], metavar="K:V",
+                   help="Extra auth header 'Name: value' (repeatable).")
     p.add_argument(
         "--time", type=int, default=None,
         help="Total time budget in minutes (default: depends on profile)",
@@ -167,6 +174,19 @@ def run_hack_cli(argv: list[str]) -> int:
     # 3. Build collaborators
     narrator = Narrator(quiet=args.quiet, use_color=not args.no_color)
 
+    # Session auth (operator-supplied) — applied to every worker request so the
+    # hunt tests the app authenticated, where IDOR/BOLA/business-logic live.
+    auth_headers: dict[str, str] = {}
+    if args.auth_bearer:
+        auth_headers["Authorization"] = f"Bearer {args.auth_bearer.strip()}"
+    if args.cookie:
+        auth_headers["Cookie"] = args.cookie.strip()
+    for raw in (args.auth_header or []):
+        if ":" in raw:
+            k, v = raw.split(":", 1)
+            if k.strip():
+                auth_headers[k.strip()] = v.strip()
+
     scope_reasoner: Optional[ScopeReasoner] = None
     # Resume path doesn't yet know `profile`, so always build the reasoner
     # if a scope file was provided
@@ -225,6 +245,7 @@ def run_hack_cli(argv: list[str]) -> int:
             narrator=narrator,
             audit=audit,
             scope_reasoner=scope_reasoner,
+            auth_headers=auth_headers or None,
         )
     try:
         with bind_hunt_id(audit.hunt_id):

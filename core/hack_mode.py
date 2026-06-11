@@ -141,11 +141,15 @@ class HackMode:
         coordinator_factory: Optional[
             Callable[[str, dict], SwarmCoordinator]
         ] = None,
+        auth_headers: Optional[dict] = None,
     ) -> None:
         """
         coordinator_factory: optional override for tests. Takes
         (phase_name, common_kw) and returns a SwarmCoordinator. Default
         wires the built-in coordinators per phase.
+        auth_headers: optional session auth (e.g. {"Authorization": "Bearer …"}
+        or {"Cookie": "…"}) applied to every worker request so the hunt tests
+        the app as a logged-in user.
         """
         self.target = target
         self.profile = profile
@@ -153,6 +157,7 @@ class HackMode:
         self.audit = audit
         self.scope_reasoner = scope_reasoner
         self.approval_gate = approval_gate
+        self._auth_headers = dict(auth_headers) if auth_headers else {}
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
         # Phase 5: a single FindingDedup is shared by every coordinator
@@ -496,6 +501,15 @@ class HackMode:
             return False
 
     def _install_scope_guard(self) -> None:
+        # Session auth applies regardless of scope mode (lab/CTF too), so install
+        # it before the scope early-return below.
+        if self._auth_headers:
+            try:
+                from .swarm_workers.vuln._http import set_auth
+                set_auth(self._auth_headers)
+                self.narrator.info("session auth installed — testing as a logged-in user")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not install session auth: %s", exc)
         if self.scope_reasoner is None:
             return  # owned box (lab/CTF) — no gate
         try:
@@ -518,8 +532,9 @@ class HackMode:
 
     def _clear_scope_guard(self) -> None:
         try:
-            from .swarm_workers.vuln._http import clear_scope_guard
+            from .swarm_workers.vuln._http import clear_scope_guard, clear_auth
             clear_scope_guard()
+            clear_auth()
         except Exception:
             pass
         try:

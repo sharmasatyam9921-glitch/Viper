@@ -52,6 +52,34 @@ def is_in_scope(url: str) -> bool:
         return False
 
 
+# --- Session auth -----------------------------------------------------------
+# A hunt may install session auth (a recovered/operator-supplied Bearer token or
+# Cookie) here so EVERY worker tests the app as a logged-in user — that's where
+# IDOR/BOLA/business-logic flaws live. Lives in a ContextVar (concurrent-hunt
+# safe); default empty → unauthenticated (legacy behavior). Per-call `headers`
+# always override the session auth, so a worker that needs a specific auth state
+# (e.g. auth-bypass probes) can still set its own.
+_auth_var: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "viper_auth_headers", default={})
+
+
+def set_auth(headers: Optional[dict[str, str]]) -> None:
+    """Install session auth headers applied to every worker request.
+
+    e.g. ``{"Authorization": "Bearer eyJ..."}`` or ``{"Cookie": "session=..."}``.
+    None/empty clears it.
+    """
+    _auth_var.set(dict(headers) if headers else {})
+
+
+def clear_auth() -> None:
+    _auth_var.set({})
+
+
+def get_auth() -> dict[str, str]:
+    return _auth_var.get()
+
+
 @dataclass
 class HttpResp:
     status: int
@@ -140,6 +168,11 @@ async def fetch(
     if url and not is_in_scope(url):
         logger.warning("scope gate blocked off-scope request: %s %s", method, url)
         return None
+    # Merge session auth (if installed). Per-call headers win, so a worker can
+    # still override (e.g. send no auth, or its own Authorization).
+    auth = _auth_var.get()
+    if auth:
+        headers = {**auth, **(headers or {})}
     if rate_limit and url:
         # Lazy import to keep this module dependency-light at top of file
         from ._rate_limit import wait_for_token
