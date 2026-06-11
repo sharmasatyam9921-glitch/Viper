@@ -35,6 +35,7 @@ from . import (  # noqa: F401
     graphql,
     idor,
     jwt,
+    login_sqli,
     nuclei,
     secrets,
     sqli_probe,
@@ -42,6 +43,6 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "ai_hunter", "bola", "cors", "graphql", "idor", "jwt",
+    "ai_hunter", "bola", "cors", "graphql", "idor", "jwt", "login_sqli",
     "nuclei", "secrets", "sqli_probe", "xss_probe",
 ]
