@@ -1,0 +1,42 @@
+{
+  "name": "viper-dvwa-authenticated",
+  "description": "DVWA (security=low) app-logic suite, run AUTHENTICATED. Boot one DVWA container, then run with: --mode hack --auth-setup dvwa --auth-base http://127.0.0.1:4030 . The harness logs in (admin/password), sets security=low, and threads the session cookie into every hunt via --cookie so the vuln workers reach the gated /vulnerabilities/* endpoints. Challenges target the specific GET endpoints VIPER's non-destructive workers can confirm. DVWA's command-injection/file-upload are POST-form and not covered by the current GET-based workers.",
+  "challenges": [
+    {
+      "id": "dvwa_sqli",
+      "name": "DVWA — SQL injection (?id=)",
+      "category": "injection",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://127.0.0.1:4030/vulnerabilities/sqli/?id=1&Submit=Submit", "health_path": "", "health_timeout": 60 },
+      "expect": { "vuln_types": ["sql_injection"] },
+      "tags": ["dvwa", "sqli", "authenticated"]
+    },
+    {
+      "id": "dvwa_xss_reflected",
+      "name": "DVWA — reflected XSS (?name=)",
+      "category": "xss",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://127.0.0.1:4030/vulnerabilities/xss_r/?name=test", "health_path": "", "health_timeout": 60 },
+      "expect": { "vuln_types": ["xss"] },
+      "tags": ["dvwa", "xss", "authenticated"]
+    },
+    {
+      "id": "dvwa_lfi",
+      "name": "DVWA — local file inclusion / path traversal (?page=)",
+      "category": "lfi",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://127.0.0.1:4030/vulnerabilities/fi/?page=include.php", "health_path": "", "health_timeout": 60 },
+      "expect": { "vuln_types": ["lfi"] },
+      "tags": ["dvwa", "lfi", "authenticated"]
+    },
+    {
+      "id": "dvwa_sqli_blind",
+      "name": "DVWA — blind SQL injection (?id=)",
+      "category": "injection",
+      "mode": "vuln_class",
+      "target": { "type": "external", "url": "http://127.0.0.1:4030/vulnerabilities/sqli_blind/?id=1&Submit=Submit", "health_path": "", "health_timeout": 60 },
+      "expect": { "vuln_types": ["sql_injection"] },
+      "tags": ["dvwa", "sqli", "blind", "authenticated"]
+    }
+  ]
+}

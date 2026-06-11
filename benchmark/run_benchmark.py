@@ -165,6 +165,13 @@ def main(argv: list[str] | None = None) -> int:
                         "instead of booting a container per challenge. Avoids the "
                         "cumulative boot pressure that can starve the tail of a "
                         "multi-challenge run; you manage the target's lifecycle.")
+    p.add_argument("--auth-setup", default="", metavar="FLOW",
+                   help="Named auth flow to run once before hunting (e.g. 'dvwa'): "
+                        "logs in and threads the session cookie into every hunt via "
+                        "--cookie, so workers test the app authenticated.")
+    p.add_argument("--auth-base", default="",
+                   help="Base URL for --auth-setup (defaults to --external-url, "
+                        "else the first challenge's target URL).")
     args = p.parse_args(argv)
 
     suite_path = Path(args.suite)
@@ -196,8 +203,32 @@ def main(argv: list[str] | None = None) -> int:
         print("\n(dry run — nothing started)")
         return 0
 
+    # Optional one-time auth flow → thread the captured session cookie into
+    # every hunt so workers test the app as a logged-in user.
+    extra_args = list(args.viper_arg)
+    if args.auth_setup:
+        from harness.dvwa import SETUPS, DvwaSetupError
+        flow = SETUPS.get(args.auth_setup)
+        if flow is None:
+            print(f"error: unknown --auth-setup {args.auth_setup!r} "
+                  f"(known: {', '.join(SETUPS)})", file=sys.stderr)
+            return 2
+        auth_base = args.auth_base or args.external_url or (
+            challenges[0].target.url if challenges else "")
+        if not auth_base:
+            print("error: --auth-setup needs --auth-base or --external-url",
+                  file=sys.stderr)
+            return 2
+        try:
+            cookie = flow(auth_base)
+        except DvwaSetupError as e:
+            print(f"error: auth setup failed: {e}", file=sys.stderr)
+            return 2
+        print(f"  [auth] {args.auth_setup} logged in -> cookie threaded into hunts")
+        extra_args += ["--cookie", cookie]
+
     runner = ViperRunner(python=args.python, time_minutes=args.time,
-                         extra_args=args.viper_arg, mode=args.mode)
+                         extra_args=extra_args, mode=args.mode)
     scores: list[Score] = []
     t0 = time.time()
 
