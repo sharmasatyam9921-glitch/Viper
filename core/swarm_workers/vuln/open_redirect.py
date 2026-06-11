@@ -103,7 +103,15 @@ async def run(agent: SwarmAgent) -> List[dict]:
     findings: list[dict] = []
     seen_params: set[str] = set()
 
-    for param in REDIRECT_PARAMS:
+    # Test the parameters actually present on the discovered URL FIRST (a real
+    # endpoint like /redirect?to= names its own redirect param), then the common
+    # defaults. Without this, an injected param is added but the live one is
+    # never exercised.
+    from urllib.parse import parse_qsl, urlsplit
+    existing = [k for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)]
+    params = list(dict.fromkeys([*existing, *REDIRECT_PARAMS]))
+
+    for param in params:
         for payload in (_ATTACKER_ABS, _ATTACKER_REL):
             test_url = add_query(url, param, payload)
             resp = await fetch(
