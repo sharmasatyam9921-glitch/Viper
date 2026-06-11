@@ -160,6 +160,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=("full", "hack"), default="full",
                    help="VIPER pipeline: 'full' (legacy ViperCore) or 'hack' "
                         "(swarm HackMode — the app-logic worker pipeline).")
+    p.add_argument("--external-url", default="",
+                   help="Run every challenge against this already-running URL "
+                        "instead of booting a container per challenge. Avoids the "
+                        "cumulative boot pressure that can starve the tail of a "
+                        "multi-challenge run; you manage the target's lifecycle.")
     args = p.parse_args(argv)
 
     suite_path = Path(args.suite)
@@ -171,6 +176,12 @@ def main(argv: list[str] | None = None) -> int:
 
     meta, challenges = _load_suite(suite_path)
     challenges = _filter(challenges, args.only, args.skip)
+
+    # Shared-target override: point every challenge at one already-running URL.
+    if args.external_url:
+        for c in challenges:
+            c.target.type = "external"
+            c.target.url = args.external_url
     if not challenges:
         print("error: no challenges selected", file=sys.stderr)
         return 2
