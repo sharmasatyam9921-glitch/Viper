@@ -31,6 +31,7 @@ from __future__ import annotations
 from . import (  # noqa: F401
     ai_hunter,
     bola,
+    broken_access_control,
     cors,
     graphql,
     idor,
@@ -43,6 +44,6 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "ai_hunter", "bola", "cors", "graphql", "idor", "jwt", "login_sqli",
+    "ai_hunter", "bola", "broken_access_control", "cors", "graphql", "idor", "jwt", "login_sqli",
     "nuclei", "secrets", "sqli_probe", "xss_probe",
 ]
