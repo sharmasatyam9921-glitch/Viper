@@ -56,6 +56,15 @@ _PAYLOADS = [
     "php://filter/convert.base64-encode/resource=index",
 ]
 
+# Extend with the curated payload library (knowledge/payloads.json) — adds
+# /proc/self/environ, extra wrappers and encodings learned from real reports.
+# Our deep-traversal defaults stay first; library payloads are appended deduped.
+try:
+    from core.payload_library import merge_payloads
+    _PAYLOADS = merge_payloads(_PAYLOADS, "lfi")
+except Exception:  # noqa: BLE001 — library is optional; never break the worker
+    pass
+
 # A harmless, normal-looking control value used for the baseline request.
 _CONTROL = "index"
 
