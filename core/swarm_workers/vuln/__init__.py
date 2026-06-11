@@ -37,13 +37,17 @@ from . import (  # noqa: F401
     idor,
     jwt,
     login_sqli,
+    nosql_injection,
     nuclei,
+    open_redirect,
+    path_bypass,
     secrets,
     sqli_probe,
+    ssrf,
+    ssti_probe,
     xss_probe,
 )
 
 __all__ = [
-    "ai_hunter", "bola", "broken_access_control", "cors", "graphql", "idor", "jwt", "login_sqli",
-    "nuclei", "secrets", "sqli_probe", "xss_probe",
+    "ai_hunter", "bola", "broken_access_control", "cors", "graphql", "idor", "jwt", "login_sqli", "nosql_injection", "nuclei", "open_redirect", "path_bypass", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe",
 ]
