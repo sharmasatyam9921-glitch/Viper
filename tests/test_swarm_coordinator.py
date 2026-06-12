@@ -877,3 +877,44 @@ class TestPostSwarmCoordinator:
         coord = PostSwarmCoordinator(bus=AgentBus())
         assert coord.PHASE == "post"
         assert coord.OUTPUT_TOPIC == "report"
+
+
+class TestVulnTargeting:
+    """build_manifest affinity: param workers -> param endpoints, root
+    workers -> origins, near-duplicate endpoints collapse."""
+
+    def _coord(self):
+        from core.swarm_coordinator import VulnSwarmCoordinator
+        return VulnSwarmCoordinator(bus=AgentBus())
+
+    def test_param_worker_targets_param_endpoints(self):
+        c = self._coord()
+        assets = ["http://t/", "http://t/fi/?page=a", "http://t/sqli/?id=1"]
+        got = c._assets_for_technique("lfi", assets, "http://t/")
+        assert "http://t/fi/?page=a" in got and "http://t/sqli/?id=1" in got
+        assert "http://t/" in got  # root always probed for default-param cases
+
+    def test_root_worker_collapses_to_origin(self):
+        c = self._coord()
+        assets = ["http://t/a", "http://t/b?x=1", "http://t/c"]
+        got = c._assets_for_technique("secrets", assets, "http://t/")
+        assert got == ["http://t"]  # one probe per origin, not per endpoint
+
+    def test_unknown_technique_keeps_all_assets(self):
+        c = self._coord()
+        assets = ["http://t/a", "http://t/b", "http://t/c"]
+        assert set(c._assets_for_technique("_custom", assets, "http://t/")) == set(assets)
+
+    def test_collect_assets_dedupes_by_signature(self):
+        c = self._coord()
+        findings = [
+            {"type": "endpoint", "url": "http://t/fi/?page=include.php"},
+            {"type": "endpoint", "url": "http://t/fi/?page=file1.php"},
+            {"type": "endpoint", "url": "http://t/fi/?page=file2.php"},
+            {"type": "endpoint", "url": "http://t/other?id=1"},
+        ]
+        assets = c._collect_assets("http://t", {"findings": findings})
+        # the three ?page= variants collapse to one; /other stays
+        fi = [a for a in assets if "/fi/" in a]
+        assert len(fi) == 1
+        assert any("/other" in a for a in assets)

@@ -31,6 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 from .agent_bus import AgentBus, Priority
 from .swarm_engine import AgentRunner, SwarmAgent, SwarmEngine, SwarmStats
@@ -559,6 +560,25 @@ class VulnSwarmCoordinator(SwarmCoordinator):
                    9090, 9100, 3000, 5000, 5001, 8443, 443, 9443, 8888,
                    9999, 10000}
 
+    # Targeting affinity (Section 4/5 fix): a blind workers×assets cross-product
+    # explodes the manifest, so under a time budget high-yield combos (e.g. the
+    # LFI worker against a ?page= endpoint) lose the race and never run. Route
+    # each worker only to the assets where its class can actually fire.
+    #   PARAM workers inject into query parameters -> param-bearing endpoints.
+    #   ROOT  workers probe root-relative paths / whole responses -> one per origin.
+    #   anything else (custom/test techniques, nuclei) -> all assets (legacy).
+    _PARAM_TECHNIQUES = frozenset({
+        "sqli_probe", "xss_probe", "lfi", "ssti_probe", "ssrf", "open_redirect",
+        "command_injection", "nosql_injection", "idor", "bola",
+    })
+    _ROOT_TECHNIQUES = frozenset({
+        "secrets", "broken_access_control", "cors", "jwt", "xxe", "csrf",
+        "mass_assignment", "path_bypass", "login_sqli", "graphql",
+    })
+    # Per-technique asset cap — keeps the manifest bounded on large sites so the
+    # phase budget covers every technique at least once.
+    _MAX_ASSETS_PER_TECH = 40
+
     def __init__(self, *, default_techniques: Optional[list[str]] = None, **kw: Any) -> None:
         super().__init__(**kw)
         self.default_techniques = default_techniques
@@ -574,15 +594,16 @@ class VulnSwarmCoordinator(SwarmCoordinator):
         assets = self._collect_assets(target, context)
         if not assets:
             return []
+        root = self._coerce_url(target, target)
 
         manifest: list[WorkerSpec] = []
-        for asset_url in assets:
-            for tech in techniques:
-                try:
-                    runner = get_worker_runner("vuln", tech)
-                except KeyError:
-                    logger.warning("unknown vuln technique: %s — skipping", tech)
-                    continue
+        for tech in techniques:
+            try:
+                runner = get_worker_runner("vuln", tech)
+            except KeyError:
+                logger.warning("unknown vuln technique: %s — skipping", tech)
+                continue
+            for asset_url in self._assets_for_technique(tech, assets, root):
                 manifest.append(WorkerSpec(
                     technique=f"{tech}@{asset_url}",
                     runner=self._make_asset_runner(runner, asset_url),
@@ -597,6 +618,32 @@ class VulnSwarmCoordinator(SwarmCoordinator):
                     },
                 ))
         return manifest
+
+    def _assets_for_technique(
+        self, tech: str, assets: list[str], root: str,
+    ) -> list[str]:
+        """Pick the assets a given technique should actually probe.
+
+        PARAM techniques -> param-bearing endpoints (+ root for default-param
+        probing); ROOT techniques -> one asset per origin; anything else ->
+        all assets (preserves legacy behavior for custom/test techniques)."""
+        if tech in self._PARAM_TECHNIQUES:
+            param_assets = [a for a in assets if urlsplit(a).query]
+            chosen = param_assets or list(assets)
+            if root not in chosen:
+                chosen = [root, *chosen]
+            return chosen[: self._MAX_ASSETS_PER_TECH]
+        if tech in self._ROOT_TECHNIQUES:
+            origins: list[str] = []
+            seen: set[str] = set()
+            for a in assets:
+                p = urlsplit(a)
+                origin = f"{p.scheme}://{p.netloc}"
+                if origin not in seen:
+                    seen.add(origin)
+                    origins.append(origin)
+            return (origins or [root])[: self._MAX_ASSETS_PER_TECH]
+        return list(assets)[: self._MAX_ASSETS_PER_TECH]
 
     def _make_asset_runner(self, base_runner: AgentRunner, asset_url: str) -> AgentRunner:
         """Wrap a per-target vuln runner so it operates on the asset_url
@@ -628,16 +675,30 @@ class VulnSwarmCoordinator(SwarmCoordinator):
             return [self._coerce_url(a, target) for a in explicit]
 
         findings = context.get("findings") or []
-        urls: set[str] = set()
+        # Dedupe by endpoint signature (origin + path + the SET of param names)
+        # so /fi/?page=a, /fi/?page=b, /fi/?page=c collapse to one probe target.
+        # Without this, near-identical endpoints flood the manifest and starve
+        # the phase budget. Keep the first URL seen for each signature.
+        by_sig: dict[tuple, str] = {}
         for f in findings:
             asset_url = self._asset_to_url(f)
-            if asset_url:
-                urls.add(asset_url)
-        if urls:
-            return sorted(urls)
+            if not asset_url:
+                continue
+            by_sig.setdefault(self._asset_signature(asset_url), asset_url)
+        if by_sig:
+            return sorted(by_sig.values())
 
         # Last fallback: probe the primary target itself
         return [self._coerce_url(target, target)]
+
+    @staticmethod
+    def _asset_signature(url: str) -> tuple:
+        """(scheme, host, path-no-trailing-slash, sorted param-name tuple)."""
+        p = urlsplit(url)
+        param_names = tuple(sorted(
+            kv.split("=", 1)[0] for kv in p.query.split("&") if kv
+        ))
+        return (p.scheme, p.netloc, p.path.rstrip("/"), param_names)
 
     @staticmethod
     def _coerce_url(asset: str, default: str) -> str:
