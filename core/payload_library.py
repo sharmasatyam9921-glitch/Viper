@@ -19,7 +19,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List
 
-_PAYLOADS_PATH: Path = Path(__file__).parent.parent / "knowledge" / "payloads.json"
+_PAYLOADS_PATH: Path = Path(__file__).parent / "selfimprove" / "payloads.json"
 
 # Cache: vuln_class -> list of payload dicts. ``None`` means "not yet loaded".
 _cache: Dict[str, List[dict]] | None = None

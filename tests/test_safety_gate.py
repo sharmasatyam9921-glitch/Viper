@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.knowledge.safety_gate import classify_payload, is_allowed
+from core.selfimprove.safety_gate import classify_payload, is_allowed
 
 
 # (text, expected_category) — every one of these MUST be allowed.

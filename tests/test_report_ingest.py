@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.knowledge import report_ingest
-from core.knowledge.report_ingest import ingest_report, promote_to_library
+from core.selfimprove import report_ingest
+from core.selfimprove.report_ingest import ingest_report, promote_to_library
 
 
 # ── Fixtures (inline disclosed-report samples) ────────────────────────────────
