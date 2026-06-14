@@ -88,6 +88,38 @@ def _target_params(url: str) -> list[str]:
     return present or list(_DEFAULT_PARAMS)
 
 
+def _executed_not_reflected(body: str, marker: str, injected_value: str) -> bool:
+    """True only if `marker` appears as ECHOED COMMAND OUTPUT, not as a mere
+    reflection of the injected payload.
+
+    Pages routinely reflect the query string into canonical / og:url / analytics
+    tags, so the raw marker appearing is NOT proof of execution — that was a
+    critical-severity false positive (e.g. an ASP.NET catalog page echoing
+    ``?p=viperctl|echo MARKER`` into <meta og:url>). Strip every reflected copy
+    of the injected value (raw + URL-encoded forms) and the literal ``echo
+    MARKER`` command; only if the marker still appears did the shell consume the
+    command and emit the marker on its own.
+    """
+    if not body or marker not in body:
+        return False
+    variants = {
+        injected_value,
+        urllib.parse.quote(injected_value, safe=""),
+        urllib.parse.quote_plus(injected_value),
+        injected_value.replace(" ", "+"),
+        injected_value.replace(" ", "%20"),
+    }
+    # Also strip the bare `echo MARKER` command in any whitespace encoding, so a
+    # reflected command (without the control prefix) doesn't count as output.
+    for sep in (" ", "+", "%20", "%09"):
+        variants.add(f"echo{sep}{marker}")
+    stripped = body
+    for v in variants:
+        if v:
+            stripped = stripped.replace(v, "")
+    return marker in stripped
+
+
 async def run(agent: SwarmAgent) -> List[dict]:
     url = normalize_target_url(agent.target)
     if not url:
@@ -112,11 +144,15 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # --- Marker reflection (high confidence) ---------------------------
         reflected = False
         for payload in _echo_payloads(marker):
-            inj_url = add_query(url, param, _CONTROL_VALUE + payload)
+            injected_value = _CONTROL_VALUE + payload
+            inj_url = add_query(url, param, injected_value)
             resp = await fetch("GET", inj_url, timeout=timeout)
             if resp is None or not resp.body:
                 continue
-            if marker in resp.body:
+            # The marker must appear as EXECUTED OUTPUT, not as a reflection of
+            # the payload itself (query strings get echoed into og:url/canonical
+            # tags all the time — that is NOT command execution).
+            if _executed_not_reflected(resp.body, marker, injected_value):
                 findings.append({
                     "type": "command_injection",
                     "vuln_type": f"rce:cmdi:{param}",
@@ -128,10 +164,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
                     "cwe": "CWE-78",
                     "confidence": 0.9,
                     "evidence": (
-                        f"injected benign marker {marker!r} via {payload!r} was "
-                        f"reflected in the response body while a control value "
-                        f"({_CONTROL_VALUE!r}) was not — command output is being "
-                        "executed and echoed"
+                        f"benign marker {marker!r} appeared as echoed command "
+                        f"output via {payload!r} (present even after stripping every "
+                        "reflected copy of the payload), while the control did not"
                     ),
                 })
                 reflected = True

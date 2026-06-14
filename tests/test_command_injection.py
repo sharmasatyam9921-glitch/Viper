@@ -112,10 +112,33 @@ def test_time_based_blind_fallback():
     assert "sleep" in f["payload"]
 
 
+def test_reflected_payload_is_not_command_injection():
+    """Regression (found live on www.newegg.com): an app that reflects the query
+    string into a canonical / og:url <meta> tag echoes the WHOLE payload —
+    including the unique marker — back into the body. That is reflection, NOT
+    execution, and must NOT be flagged as a critical RCE."""
+    from urllib.parse import urlsplit, parse_qs, quote_plus
+
+    async def fake(method, url, **kw):
+        # Reflect every param value, URL-encoded, into an og:url meta tag — the
+        # exact ASP.NET/IIS behaviour that produced the false positive.
+        q = parse_qs(urlsplit(url).query)
+        reflected = "".join(
+            f'<meta property="og:url" content="http://t/?p={quote_plus(v[0])}" />'
+            for v in q.values()
+        )
+        return HttpResp(status=200, headers={}, body="<html>" + reflected + "</html>",
+                        final_url="http://t/")
+
+    findings = _run(fake)
+    assert findings == [], f"reflected payload wrongly flagged as RCE: {findings}"
+
+
 if __name__ == "__main__":
     test_registered()
     test_marker_reflection_true_positive()
     test_benign_response_no_finding()
     test_marker_already_reflected_is_suppressed()
     test_time_based_blind_fallback()
+    test_reflected_payload_is_not_command_injection()
     print("ok")
