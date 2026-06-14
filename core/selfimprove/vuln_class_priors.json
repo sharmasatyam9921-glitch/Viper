@@ -1,0 +1,117 @@
+{
+  "source": "codebygk/hackerone-bug-bounty-reports (7982 disclosed)",
+  "priors": {
+    "auth_bypass": {
+      "reports": 403,
+      "total_bounty": 134187,
+      "avg_bounty": 333,
+      "viper_covered": true,
+      "value_score": 1016.5
+    },
+    "sql_injection": {
+      "reports": 157,
+      "total_bounty": 23584,
+      "avg_bounty": 150,
+      "viper_covered": true,
+      "value_score": 341.6
+    },
+    "business_logic": {
+      "reports": 276,
+      "total_bounty": 79369,
+      "avg_bounty": 288,
+      "viper_covered": false,
+      "value_score": 678.8
+    },
+    "info_disclosure": {
+      "reports": 921,
+      "total_bounty": 234120,
+      "avg_bounty": 254,
+      "viper_covered": true,
+      "value_score": 2214.9
+    },
+    "rce": {
+      "reports": 380,
+      "total_bounty": 370684,
+      "avg_bounty": 975,
+      "viper_covered": true,
+      "value_score": 1135.8
+    },
+    "crlf": {
+      "reports": 36,
+      "total_bounty": 6600,
+      "avg_bounty": 183,
+      "viper_covered": false,
+      "value_score": 81.4
+    },
+    "csrf": {
+      "reports": 283,
+      "total_bounty": 54178,
+      "avg_bounty": 191,
+      "viper_covered": true,
+      "value_score": 645.5
+    },
+    "xss": {
+      "reports": 1327,
+      "total_bounty": 403079,
+      "avg_bounty": 304,
+      "viper_covered": true,
+      "value_score": 3294.8
+    },
+    "deserialization": {
+      "reports": 40,
+      "total_bounty": 8340,
+      "avg_bounty": 208,
+      "viper_covered": false,
+      "value_score": 92.7
+    },
+    "lfi": {
+      "reports": 126,
+      "total_bounty": 107370,
+      "avg_bounty": 852,
+      "viper_covered": true,
+      "value_score": 369.2
+    },
+    "access_control": {
+      "reports": 801,
+      "total_bounty": 346957,
+      "avg_bounty": 433,
+      "viper_covered": true,
+      "value_score": 2111.8
+    },
+    "idor": {
+      "reports": 222,
+      "total_bounty": 119759,
+      "avg_bounty": 539,
+      "viper_covered": true,
+      "value_score": 606.4
+    },
+    "memory_corruption": {
+      "reports": 250,
+      "total_bounty": 108950,
+      "avg_bounty": 436,
+      "viper_covered": false,
+      "value_score": 659.9
+    },
+    "open_redirect": {
+      "reports": 192,
+      "total_bounty": 17298,
+      "avg_bounty": 90,
+      "viper_covered": true,
+      "value_score": 375.2
+    },
+    "ssrf": {
+      "reports": 191,
+      "total_bounty": 113357,
+      "avg_bounty": 593,
+      "viper_covered": true,
+      "value_score": 529.7
+    },
+    "dos": {
+      "reports": 383,
+      "total_bounty": 278233,
+      "avg_bounty": 726,
+      "viper_covered": false,
+      "value_score": 1095.7
+    }
+  }
+}

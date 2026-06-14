@@ -20,10 +20,42 @@ from pathlib import Path
 from typing import Dict, List
 
 _PAYLOADS_PATH: Path = Path(__file__).parent / "selfimprove" / "payloads.json"
+_HINTS_PATH: Path = Path(__file__).parent / "selfimprove" / "param_hints.json"
+_PRIORS_PATH: Path = Path(__file__).parent / "selfimprove" / "vuln_class_priors.json"
 
 # Cache: vuln_class -> list of payload dicts. ``None`` means "not yet loaded".
 _cache: Dict[str, List[dict]] | None = None
+_hints_cache: List[str] | None = None
+_priors_cache: Dict | None = None
 _lock = threading.Lock()
+
+
+def get_param_hints() -> List[str]:
+    """Real-world parameter names mined from 7,982 disclosed HackerOne reports
+    (host, url, redirect, id, state, relaystate, …). Injection workers merge
+    these into their candidate-parameter set so they probe the params that
+    actually carry bugs in practice. Never raises; [] if unavailable."""
+    global _hints_cache
+    if _hints_cache is None:
+        try:
+            data = json.loads(_HINTS_PATH.read_text(encoding="utf-8"))
+            _hints_cache = [str(x) for x in data if isinstance(x, str) and x]
+        except Exception:
+            _hints_cache = []
+    return list(_hints_cache)
+
+
+def get_class_priors() -> Dict[str, dict]:
+    """Per-vuln-class frequency + bounty priors learned from disclosed reports.
+    {class: {reports, avg_bounty, value_score, viper_covered}}. Used to dispatch
+    high-value workers first within a time budget. Never raises; {} if missing."""
+    global _priors_cache
+    if _priors_cache is None:
+        try:
+            _priors_cache = json.loads(_PRIORS_PATH.read_text(encoding="utf-8")).get("priors", {})
+        except Exception:
+            _priors_cache = {}
+    return dict(_priors_cache)
 
 
 def _load() -> Dict[str, List[dict]]:

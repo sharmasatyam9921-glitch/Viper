@@ -41,7 +41,17 @@ def _candidate_params(url: str) -> list[str]:
     qs = parse_qs(urlsplit(url).query)
     if qs:
         return list(qs.keys())
-    return list(_DEFAULT_PARAMS)
+    # No params on the URL → defaults PLUS real-world parameter names mined from
+    # 7,982 disclosed HackerOne reports (learned prior), deduped.
+    params = list(_DEFAULT_PARAMS)
+    try:
+        from core.payload_library import get_param_hints
+        for h in get_param_hints():
+            if h not in params:
+                params.append(h)
+    except Exception:
+        pass
+    return params
 
 
 async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
