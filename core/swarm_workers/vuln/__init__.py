@@ -32,8 +32,10 @@ from . import (  # noqa: F401
     ai_hunter,
     bola,
     broken_access_control,
+    clickjacking,
     command_injection,
     cors,
+    crlf,
     csrf,
     graphql,
     idor,
@@ -45,6 +47,7 @@ from . import (  # noqa: F401
     nuclei,
     open_redirect,
     path_bypass,
+    race_condition,
     request_smuggling,
     secrets,
     sqli_probe,
@@ -55,5 +58,5 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "ai_hunter", "bola", "broken_access_control", "command_injection", "cors", "csrf", "graphql", "idor", "jwt", "lfi", "login_sqli", "mass_assignment", "nosql_injection", "nuclei", "open_redirect", "path_bypass", "request_smuggling", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe", "xxe",
+    "ai_hunter", "bola", "broken_access_control", "clickjacking", "command_injection", "cors", "crlf", "csrf", "graphql", "idor", "jwt", "lfi", "login_sqli", "mass_assignment", "nosql_injection", "nuclei", "open_redirect", "path_bypass", "race_condition", "request_smuggling", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe", "xxe",
 ]
