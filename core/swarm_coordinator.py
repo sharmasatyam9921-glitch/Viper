@@ -574,6 +574,7 @@ class VulnSwarmCoordinator(SwarmCoordinator):
     _ROOT_TECHNIQUES = frozenset({
         "secrets", "broken_access_control", "cors", "jwt", "xxe", "csrf",
         "mass_assignment", "path_bypass", "login_sqli", "graphql",
+        "request_smuggling",  # host-level desync — probe once per origin
     })
     # Per-technique asset cap — keeps the manifest bounded on large sites so the
     # phase budget covers every technique at least once.
