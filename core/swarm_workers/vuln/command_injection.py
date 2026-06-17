@@ -41,9 +41,24 @@ _DEFAULT_PARAMS = [
     "search", "name", "file", "path", "url", "id", "page",
 ]
 
-# How much slower a sleep response must be vs the control to count as blind.
-_SLEEP_SECONDS = 5
-_TIME_DELTA_MIN = 4.0  # response must be >= control + this many seconds
+# Time-based blind detection uses a SCALING confirmation, not a single
+# threshold. A lone "response was +Ns slower than the control" trips on latency
+# noise — under concurrent load the control itself was observed ranging
+# 0.02s..1.2s on the same target, so a transient spike on the payload request
+# reads as a 5s "sleep" and produces a false-positive RCE. Instead we require
+# the delay to TRACK the injected duration: a short sleep must delay by ~its
+# duration, and a longer sleep must delay proportionally MORE. A load spike
+# cannot grow linearly with the commanded sleep, so scaling rules it out.
+_SLEEP_SHORT = 3    # seconds — first probe
+_SLEEP_LONG = 7     # seconds — confirmation probe (must delay ~4s more)
+# A genuine `sleep N` response takes AT LEAST ~N seconds (the server actually
+# waited), plus network — it can never come back faster. _ABS_TOL is the most a
+# real response may fall below its commanded sleep (clock jitter only). The
+# false positives that survived a scaling-only check returned FASTER than the
+# sleep (sleep 3 -> 2.1s, sleep 7 -> 5.0s) — load rose between probes so the
+# delta scaled, but neither probe actually slept. The absolute floor catches it.
+_ABS_TOL = 0.75     # seconds a real `sleep N` response may fall below N
+_SCALE_TOL = 1.25   # slack on the (LONG-SHORT) scaling delta
 
 # A benign control value: alphanumeric, no shell metacharacters, never reflects
 # the marker.
@@ -70,15 +85,15 @@ def _echo_payloads(marker: str) -> list[str]:
     ]
 
 
-def _sleep_payloads() -> list[str]:
-    """Benign time-delay payloads for the blind fallback (read-only `sleep`)."""
-    return [
-        f";sleep {_SLEEP_SECONDS}",
-        f"|sleep {_SLEEP_SECONDS}",
-        f"$(sleep {_SLEEP_SECONDS})",
-        f"`sleep {_SLEEP_SECONDS}`",
-        f"&& sleep {_SLEEP_SECONDS}",
-    ]
+# Shell-injection contexts for the blind probe. `{n}` is filled with the sleep
+# duration so the SAME context can be measured at two durations (scaling check).
+_SLEEP_SEPARATORS = [
+    ";sleep {n}",
+    "|sleep {n}",
+    "$(sleep {n})",
+    "`sleep {n}`",
+    "&& sleep {n}",
+]
 
 
 def _target_params(url: str) -> list[str]:
@@ -118,6 +133,15 @@ def _executed_not_reflected(body: str, marker: str, injected_value: str) -> bool
         if v:
             stripped = stripped.replace(v, "")
     return marker in stripped
+
+
+async def _timed_fetch(url: str, timeout: float):
+    """GET `url`, returning (elapsed_seconds, resp). (None, None) on failure."""
+    t = time.monotonic()
+    resp = await fetch("GET", url, timeout=timeout)
+    if resp is None:
+        return None, None
+    return time.monotonic() - t, resp
 
 
 async def run(agent: SwarmAgent) -> List[dict]:
@@ -176,52 +200,69 @@ async def run(agent: SwarmAgent) -> List[dict]:
             break
 
         # --- Time-based blind fallback (lower confidence) ------------------
-        # Baseline timing from the control request.
-        t0 = time.monotonic()
-        base = await fetch("GET", control_url, timeout=timeout)
-        base_elapsed = time.monotonic() - t0
-        if base is None:
-            continue
-        # Only attempt the sleep probe if the control returns fast enough that a
-        # +5s delay could fit inside the timeout window.
-        if base_elapsed >= timeout - _SLEEP_SECONDS:
-            continue
+        # A single slow response is NOT proof: under concurrent load the control
+        # itself spikes (observed 0.02s..1.2s on the same target), so a lone
+        # "+Ns over control" threshold trips on latency noise and emits a
+        # false-positive RCE. Confirm by SCALING instead — the delay must track
+        # the injected sleep: `sleep SHORT` delays ~SHORT, `sleep LONG` delays
+        # proportionally MORE. A transient spike can't grow with the command.
+        if timeout < _SLEEP_LONG + 2.0:
+            continue  # not enough budget for the long confirmation probe
 
+        # Two controls characterize the noise floor (use the worse of them).
+        c1, _ = await _timed_fetch(control_url, timeout)
+        c2, _ = await _timed_fetch(control_url, timeout)
+        if c1 is None or c2 is None:
+            continue
+        noise_floor = max(c1, c2)
+        if noise_floor >= timeout - _SLEEP_LONG:
+            continue  # control already too slow to measure a LONG sleep cleanly
+
+        expected_delta = _SLEEP_LONG - _SLEEP_SHORT
         blind_hit = False
-        for payload in _sleep_payloads():
-            inj_url = add_query(url, param, _CONTROL_VALUE + payload)
-            t1 = time.monotonic()
-            resp = await fetch("GET", inj_url, timeout=timeout)
-            elapsed = time.monotonic() - t1
-            if resp is None:
+        for sep in _SLEEP_SEPARATORS:
+            # 1) Short probe must ACTUALLY wait ~SHORT seconds (not merely be
+            #    "slow"). A real `sleep N` can't return faster than N.
+            short_url = add_query(url, param, _CONTROL_VALUE + sep.format(n=_SLEEP_SHORT))
+            e_short, _ = await _timed_fetch(short_url, timeout)
+            if e_short is None or e_short < _SLEEP_SHORT - _ABS_TOL:
                 continue
-            if elapsed >= base_elapsed + _TIME_DELTA_MIN:
-                # Confirm with a second control to rule out a transient spike.
-                t2 = time.monotonic()
-                confirm = await fetch("GET", control_url, timeout=timeout)
-                confirm_elapsed = time.monotonic() - t2
-                if confirm is None:
-                    continue
-                if elapsed >= confirm_elapsed + _TIME_DELTA_MIN:
-                    findings.append({
-                        "type": "command_injection",
-                        "vuln_type": f"rce:cmdi:{param}",
-                        "title": f"Blind OS command injection in '{param}'",
-                        "severity": "high",
-                        "url": inj_url,
-                        "parameter": param,
-                        "payload": payload,
-                        "cwe": "CWE-78",
-                        "confidence": 0.6,
-                        "evidence": (
-                            f"time-based probe {payload!r} responded in "
-                            f"{elapsed:.2f}s vs control {base_elapsed:.2f}s / "
-                            f"{confirm_elapsed:.2f}s (>= +{_TIME_DELTA_MIN:.0f}s "
-                            "delay), consistent with `sleep` executing in a shell"
-                        ),
-                    })
-                    blind_hit = True
-                    break
+            # 2) Long probe must wait ~LONG seconds too.
+            long_url = add_query(url, param, _CONTROL_VALUE + sep.format(n=_SLEEP_LONG))
+            e_long, _ = await _timed_fetch(long_url, timeout)
+            if e_long is None or e_long < _SLEEP_LONG - _ABS_TOL:
+                continue
+            # 3) The extra delay must match the extra sleep (scaling) — rules out
+            #    a uniformly-slow endpoint that isn't sleeping at all.
+            if (e_long - e_short) < expected_delta - _SCALE_TOL:
+                continue
+            # 4) Reproduce the long delay once more — a coincidental load spike
+            #    won't sleep ~LONG seconds twice in a row; a real shell will.
+            e_rep, _ = await _timed_fetch(long_url, timeout)
+            if e_rep is None or e_rep < _SLEEP_LONG - _ABS_TOL:
+                continue
+            findings.append({
+                "type": "command_injection",
+                "vuln_type": f"rce:cmdi:{param}",
+                "title": f"Blind OS command injection in '{param}'",
+                "severity": "high",
+                "url": long_url,
+                "parameter": param,
+                "payload": sep.format(n=_SLEEP_LONG),
+                "cwe": "CWE-78",
+                "confidence": 0.7,
+                "evidence": (
+                    f"response time matched the injected sleep on every probe: "
+                    f"sleep {_SLEEP_SHORT}s -> {e_short:.2f}s, "
+                    f"sleep {_SLEEP_LONG}s -> {e_long:.2f}s, "
+                    f"repeat sleep {_SLEEP_LONG}s -> {e_rep:.2f}s "
+                    f"(control {noise_floor:.2f}s) — each response waited at least "
+                    "the commanded duration and the delay scaled with it, which a "
+                    "load spike cannot fake. Consistent with `sleep` in a shell."
+                ),
+            })
+            blind_hit = True
+            break
         if blind_hit:
             break
 
