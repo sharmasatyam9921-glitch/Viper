@@ -52,7 +52,11 @@ def _adjacent_id(seg: str) -> str | None:
 async def _baseline_extract(url: str, timeout: float) -> set[tuple[str, str]]:
     """Return (api_path, id_segment) tuples observed in the baseline page."""
     out: set[tuple[str, str]] = set()
-    resp = await fetch("GET", url, timeout=timeout)
+    # Anonymous probe (use_session_auth=False): this single-session worker's
+    # evidence claims "without authentication"; it must not inherit the hunt's
+    # global identity-A session. The authenticated cross-user case is handled
+    # by the two-account bola_multi worker.
+    resp = await fetch("GET", url, timeout=timeout, use_session_auth=False)
     if not resp or not resp.body:
         return out
     for m in _API_URL_RE.finditer(resp.body[:256 * 1024]):
@@ -84,8 +88,8 @@ async def run(agent: SwarmAgent) -> List[dict]:
             continue
         url_a = host + path
         url_b = host + path.replace(f"/{id_seg}", f"/{adj}", 1)
-        ra = await fetch("GET", url_a, timeout=timeout)
-        rb = await fetch("GET", url_b, timeout=timeout)
+        ra = await fetch("GET", url_a, timeout=timeout, use_session_auth=False)
+        rb = await fetch("GET", url_b, timeout=timeout, use_session_auth=False)
         if not (ra and rb):
             continue
         if ra.ok and rb.ok and ra.body != rb.body and ra.body and rb.body:

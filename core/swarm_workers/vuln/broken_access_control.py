@@ -58,7 +58,11 @@ async def run(agent: SwarmAgent) -> List[dict]:
 
     for path in _PROTECTED_ENDPOINTS:
         full = origin + path
-        resp = await fetch("GET", full, timeout=timeout)
+        # use_session_auth=False: this worker proves access WITHOUT
+        # credentials, so it must NOT inherit the hunt's global session auth
+        # (else an authenticated 200 is misread as anonymous access — a false
+        # positive). See _http.fetch docstring.
+        resp = await fetch("GET", full, timeout=timeout, use_session_auth=False)
         if not resp or resp.status != 200:
             continue
         body = (resp.body or "").lstrip()

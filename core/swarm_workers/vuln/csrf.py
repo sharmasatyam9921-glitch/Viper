@@ -132,7 +132,11 @@ async def run(agent: SwarmAgent) -> List[dict]:
     findings: list[dict] = []
 
     # --- Base page (read-only GET) -----------------------------------------
-    resp = await fetch("GET", url, timeout=timeout)
+    # use_session_auth=False: the CSRF finding keys on the Set-Cookie the server
+    # mints for a fresh/anonymous visitor (a SameSite-less SESSION cookie). With
+    # the hunt's global session merged in, an already-authenticated request gets
+    # no Set-Cookie and the finding is silently suppressed (false negative).
+    resp = await fetch("GET", url, timeout=timeout, use_session_auth=False)
     if not resp:
         return findings
 

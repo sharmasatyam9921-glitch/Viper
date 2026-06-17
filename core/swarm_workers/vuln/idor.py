@@ -79,8 +79,12 @@ async def run(agent: SwarmAgent) -> List[dict]:
             continue
         url_a = _replace_param(url, param, value)
         url_b = _replace_param(url, param, adj)
-        ra = await fetch("GET", url_a, timeout=timeout)
-        rb = await fetch("GET", url_b, timeout=timeout)
+        # use_session_auth=False: the evidence below asserts "without auth
+        # checks", so these probes must be genuinely anonymous — not carry the
+        # hunt's global identity-A session (which would make the claim false
+        # and turn two distinct logged-in responses into a spurious candidate).
+        ra = await fetch("GET", url_a, timeout=timeout, use_session_auth=False)
+        rb = await fetch("GET", url_b, timeout=timeout, use_session_auth=False)
         if not ra or not rb:
             continue
         # Both must be 2xx — strong IDOR signal

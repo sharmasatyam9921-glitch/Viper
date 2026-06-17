@@ -111,7 +111,11 @@ async def run(agent: SwarmAgent) -> List[dict]:
     timeout = min(agent.timeout_s, 10.0)
 
     # Step 1: probe the base URL. Bail unless it is actually 401/403.
-    base = await fetch("GET", url, timeout=timeout, follow_redirects=False)
+    # use_session_auth=False on every probe here: an ACL bypass must be
+    # demonstrated from an UNAUTHORIZED position. Inheriting the hunt's global
+    # identity-A session would make the base return 200 (hiding the gate) and
+    # any "unlock" just the authenticated body — a fabricated bypass.
+    base = await fetch("GET", url, timeout=timeout, follow_redirects=False, use_session_auth=False)
     if not base or base.status not in (401, 403):
         return []
     baseline_status = base.status
@@ -130,26 +134,26 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # Step 2a: PATH suffix mutations.
     for suffix in _PATH_SUFFIXES:
         mutated = url + suffix
-        resp = await fetch("GET", mutated, timeout=timeout, follow_redirects=False)
+        resp = await fetch("GET", mutated, timeout=timeout, follow_redirects=False, use_session_auth=False)
         _record("path", suffix, resp)
 
     # Step 2b: case-flip the path.
     flipped = _flip_case(orig_path)
     if flipped != orig_path:
         case_url = origin + flipped
-        resp = await fetch("GET", case_url, timeout=timeout, follow_redirects=False)
+        resp = await fetch("GET", case_url, timeout=timeout, follow_redirects=False, use_session_auth=False)
         _record("path", "case-flip", resp)
 
     # Step 2c: HEADER mutations (path-override + trusted-IP spoof).
     for name, value in _HEADER_MUTATIONS:
         hv = orig_path if value == "__PATH__" else value
         resp = await fetch("GET", url, headers={name: hv},
-                           timeout=timeout, follow_redirects=False)
+                           timeout=timeout, follow_redirects=False, use_session_auth=False)
         _record("header", f"{name}: {hv}", resp)
 
     # Step 2d: METHOD swaps.
     for method in _METHOD_SWAPS:
-        resp = await fetch(method, url, timeout=timeout, follow_redirects=False)
+        resp = await fetch(method, url, timeout=timeout, follow_redirects=False, use_session_auth=False)
         _record("method", method, resp)
 
     return findings
