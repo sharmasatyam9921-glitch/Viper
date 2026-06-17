@@ -53,7 +53,12 @@ async def run(agent: SwarmAgent) -> List[dict]:
     timeout = min(agent.timeout_s, 10.0)
 
     async def _fetch(method, u, *, headers=None, timeout=timeout):
-        return await fetch(method, u, headers=headers, timeout=timeout)
+        # use_session_auth=False: this worker fully specifies each identity
+        # (owner A / attacker B / anonymous) itself. The globally-installed
+        # session auth must NOT be merged in, or it would contaminate the
+        # attacker and anon-control probes and invalidate the result.
+        return await fetch(method, u, headers=headers, timeout=timeout,
+                           use_session_auth=False)
 
     return await find_bola(owner, attacker, [url], fetch=_fetch,
                            timeout=timeout,

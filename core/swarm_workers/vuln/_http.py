@@ -155,6 +155,7 @@ async def fetch(
     timeout: float = 10.0,
     follow_redirects: bool = True,
     rate_limit: bool = True,
+    use_session_auth: bool = True,
 ) -> Optional[HttpResp]:
     """Async wrapper around stdlib urllib via asyncio.to_thread.
 
@@ -164,15 +165,26 @@ async def fetch(
 
     Every request is checked against the installed scope guard first; an
     off-scope URL returns None without touching the network.
+
+    use_session_auth: when True (default) the globally-installed session auth
+    (see set_auth) is merged into the request, so every worker tests the app as
+    the logged-in user. Workers that fully specify their own identities — the
+    two-account BOLA worker especially — MUST pass False, otherwise the global
+    session leaks into their "attacker" and "anonymous" probes and corrupts the
+    result (a leftover owner cookie makes an anon control look public; a leftover
+    owner Bearer makes the attacker look authorized). Per-call `headers` are then
+    sent verbatim.
     """
     if url and not is_in_scope(url):
         logger.warning("scope gate blocked off-scope request: %s %s", method, url)
         return None
     # Merge session auth (if installed). Per-call headers win, so a worker can
-    # still override (e.g. send no auth, or its own Authorization).
-    auth = _auth_var.get()
-    if auth:
-        headers = {**auth, **(headers or {})}
+    # still override (e.g. send no auth, or its own Authorization). Workers doing
+    # identity-controlled testing opt out entirely via use_session_auth=False.
+    if use_session_auth:
+        auth = _auth_var.get()
+        if auth:
+            headers = {**auth, **(headers or {})}
     if rate_limit and url:
         # Lazy import to keep this module dependency-light at top of file
         from ._rate_limit import wait_for_token

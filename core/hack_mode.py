@@ -142,6 +142,7 @@ class HackMode:
             Callable[[str, dict], SwarmCoordinator]
         ] = None,
         auth_headers: Optional[dict] = None,
+        bola_config: Optional[dict] = None,
     ) -> None:
         """
         coordinator_factory: optional override for tests. Takes
@@ -150,6 +151,11 @@ class HackMode:
         auth_headers: optional session auth (e.g. {"Authorization": "Bearer …"}
         or {"Cookie": "…"}) applied to every worker request so the hunt tests
         the app as a logged-in user.
+        bola_config: optional two-account config that activates the BOLA/IDOR
+        specialist worker (core.specialist.bola_engine). Shape:
+        {"owner_headers", "owner_markers", "attacker_headers", ...}. When set,
+        it is threaded into the vuln phase so bola_multi replays identity A's
+        object URLs as identity B and confirms cross-user reads.
         """
         self.target = target
         self.profile = profile
@@ -158,6 +164,7 @@ class HackMode:
         self.scope_reasoner = scope_reasoner
         self.approval_gate = approval_gate
         self._auth_headers = dict(auth_headers) if auth_headers else {}
+        self._bola_config = dict(bola_config) if bola_config else None
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
         # Phase 5: a single FindingDedup is shared by every coordinator
@@ -718,6 +725,10 @@ class HackMode:
             # Empty techniques list → use all registered for the phase
             "techniques": techniques or None,
         }
+        # Two-account BOLA/IDOR specialist config — only the vuln phase's
+        # bola_multi worker consumes it; harmless on other phases.
+        if self._bola_config and phase == "vuln":
+            payload["bola"] = self._bola_config
 
         # Chain overrides: scope this phase to explicit assets/findings.
         if assets is not None:

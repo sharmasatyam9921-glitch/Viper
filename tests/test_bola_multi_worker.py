@@ -28,7 +28,7 @@ def test_self_gated_no_config_returns_empty():
 def test_detects_cross_user_with_config():
     cfg = {"bola": {"owner_headers": {"Cookie": "s=a"}, "owner_markers": ["alice@victim.io"],
                     "attacker_headers": {"Cookie": "s=b"}}}
-    async def fake(method, url, *, headers=None, timeout=10.0):
+    async def fake(method, url, *, headers=None, timeout=10.0, **kw):
         if headers in ({"Cookie": "s=a"}, {"Cookie": "s=b"}):
             return _R(200, '{"email":"alice@victim.io"}')
         return _R(401, "")

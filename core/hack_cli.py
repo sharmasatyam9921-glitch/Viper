@@ -77,6 +77,38 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Session Cookie header applied to every request.")
     p.add_argument("--auth-header", action="append", default=[], metavar="K:V",
                    help="Extra auth header 'Name: value' (repeatable).")
+
+    # --- Two-account BOLA / IDOR (specialist) -----------------------------
+    # Identity A is the primary session above (--cookie / --auth-bearer /
+    # --auth-header). Supply a SECOND identity B + identity-A's private markers
+    # to activate the bola_multi worker: it replays A's object URLs as B and
+    # confirms cross-user reads. Read-only; opt-in; needs two accounts you own.
+    bola = p.add_argument_group(
+        "two-account BOLA/IDOR (specialist)",
+        "Provide a second identity (B) + identity-A markers to test broken "
+        "object-level authorization - the #1 bug-bounty class a single-session "
+        "scanner cannot find. Identity A = the primary session flags above.",
+    )
+    bola.add_argument("--cookie-b", metavar="COOKIE",
+                      help="Second identity (B): Cookie header.")
+    bola.add_argument("--auth-bearer-b", metavar="TOKEN",
+                      help="Second identity (B): Bearer token.")
+    bola.add_argument("--auth-header-b", action="append", default=[], metavar="K:V",
+                      help="Second identity (B): extra header 'Name: value' "
+                           "(repeatable).")
+    bola.add_argument("--owner-marker", action="append", default=[], metavar="STR",
+                      help="A string unique to identity A's PRIVATE data (email, "
+                           "user-id, account number). Repeatable. Required to "
+                           "activate BOLA: a finding fires only when B's response "
+                           "still contains one of A's markers.")
+    bola.add_argument("--attacker-marker", action="append", default=[], metavar="STR",
+                      help="Optional: a string unique to identity B's own data "
+                           "(used to distinguish 'B sees only his own' from a "
+                           "real leak). Repeatable.")
+    bola.add_argument("--bola-no-unauth-control", action="store_true",
+                      help="Skip the unauthenticated control request that "
+                           "suppresses public objects (keep it on unless the "
+                           "app has no anonymous access at all).")
     p.add_argument(
         "--time", type=int, default=None,
         help="Total time budget in minutes (default: depends on profile)",
@@ -187,6 +219,11 @@ def run_hack_cli(argv: list[str]) -> int:
             if k.strip():
                 auth_headers[k.strip()] = v.strip()
 
+    # Two-account BOLA/IDOR config (opt-in). Identity A = auth_headers above;
+    # identity B = the *-b flags. Only activated when BOTH a B session and
+    # identity-A markers are present — otherwise the worker self-gates off.
+    bola_config = _build_bola_config(args, auth_headers)
+
     scope_reasoner: Optional[ScopeReasoner] = None
     # Resume path doesn't yet know `profile`, so always build the reasoner
     # if a scope file was provided
@@ -246,6 +283,7 @@ def run_hack_cli(argv: list[str]) -> int:
             audit=audit,
             scope_reasoner=scope_reasoner,
             auth_headers=auth_headers or None,
+            bola_config=bola_config,
         )
     try:
         with bind_hunt_id(audit.hunt_id):
@@ -288,6 +326,74 @@ def run_hack_cli(argv: list[str]) -> int:
 
 
 # ----- Helpers --------------------------------------------------------------
+
+
+def _parse_headers(cookie: Optional[str], bearer: Optional[str],
+                   raw_headers: list[str]) -> dict[str, str]:
+    """Build an auth-header dict from cookie / bearer / 'K: V' flags."""
+    h: dict[str, str] = {}
+    if bearer:
+        h["Authorization"] = f"Bearer {bearer.strip()}"
+    if cookie:
+        h["Cookie"] = cookie.strip()
+    for raw in (raw_headers or []):
+        if ":" in raw:
+            k, v = raw.split(":", 1)
+            if k.strip():
+                h[k.strip()] = v.strip()
+    return h
+
+
+def _build_bola_config(args, owner_headers: dict) -> Optional[dict]:
+    """Assemble the two-account BOLA config, or None if not (fully) requested.
+
+    Activates only when the operator supplied a SECOND identity (B) *and*
+    identity-A markers. Partial config prints a guidance warning and disables
+    BOLA (the worker would self-gate off anyway) so a half-wired run is loud,
+    not silently inert.
+    """
+    attacker_headers = _parse_headers(
+        getattr(args, "cookie_b", None),
+        getattr(args, "auth_bearer_b", None),
+        getattr(args, "auth_header_b", []) or [],
+    )
+    markers = [m.strip() for m in (getattr(args, "owner_marker", []) or [])
+               if m and m.strip()]
+    requested = bool(attacker_headers or markers)
+    if not requested:
+        return None  # BOLA not asked for — stay quiet on normal hunts.
+
+    problems: list[str] = []
+    if not owner_headers:
+        problems.append("identity A is unauthenticated — give --cookie / "
+                        "--auth-bearer / --auth-header for the victim account")
+    if not attacker_headers:
+        problems.append("no identity B — give --cookie-b / --auth-bearer-b / "
+                        "--auth-header-b for the second account")
+    if not markers:
+        problems.append("no --owner-marker — supply ≥1 string unique to "
+                        "identity A's private data (email, user-id, account #)")
+    if problems:
+        print("[WARN] BOLA/IDOR testing requested but not fully configured; "
+              "it will NOT run:", file=sys.stderr)
+        for pr in problems:
+            print(f"        - {pr}", file=sys.stderr)
+        return None
+
+    print(f"[i] two-account BOLA/IDOR armed: identity A ({len(owner_headers)} "
+          f"header(s), {len(markers)} marker(s)) vs identity B "
+          f"({len(attacker_headers)} header(s)).", file=sys.stderr)
+    return {
+        "owner_name": "A",
+        "owner_headers": dict(owner_headers),
+        "owner_markers": markers,
+        "attacker_name": "B",
+        "attacker_headers": attacker_headers,
+        "attacker_markers": [m.strip() for m in
+                             (getattr(args, "attacker_marker", []) or [])
+                             if m and m.strip()],
+        "unauth_control": not getattr(args, "bola_no_unauth_control", False),
+    }
 
 
 def _build_scope_reasoner(scope_file: Optional[str], db_path: str) -> Optional[ScopeReasoner]:

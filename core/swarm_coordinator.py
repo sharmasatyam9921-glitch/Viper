@@ -617,6 +617,9 @@ class VulnSwarmCoordinator(SwarmCoordinator):
                         "scope_reasoner": context.get("scope_reasoner"),
                         "rate_limiter": context.get("rate_limiter"),
                         "asset_url": asset_url,
+                        # Two-account BOLA config (consumed only by bola_multi,
+                        # which self-gates to [] when absent).
+                        "bola": context.get("bola"),
                     },
                 ))
         return manifest
