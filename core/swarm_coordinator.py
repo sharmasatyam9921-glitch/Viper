@@ -569,7 +569,7 @@ class VulnSwarmCoordinator(SwarmCoordinator):
     #   anything else (custom/test techniques, nuclei) -> all assets (legacy).
     _PARAM_TECHNIQUES = frozenset({
         "sqli_probe", "xss_probe", "lfi", "ssti_probe", "ssrf", "open_redirect",
-        "command_injection", "nosql_injection", "idor", "bola", "crlf",
+        "command_injection", "nosql_injection", "idor", "bola", "bola_multi", "crlf",
     })
     _ROOT_TECHNIQUES = frozenset({
         "secrets", "broken_access_control", "cors", "jwt", "xxe", "csrf",

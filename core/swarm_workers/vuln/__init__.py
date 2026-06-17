@@ -31,6 +31,7 @@ from __future__ import annotations
 from . import (  # noqa: F401
     ai_hunter,
     bola,
+    bola_multi,
     broken_access_control,
     clickjacking,
     command_injection,
@@ -58,5 +59,5 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "ai_hunter", "bola", "broken_access_control", "clickjacking", "command_injection", "cors", "crlf", "csrf", "graphql", "idor", "jwt", "lfi", "login_sqli", "mass_assignment", "nosql_injection", "nuclei", "open_redirect", "path_bypass", "race_condition", "request_smuggling", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe", "xxe",
+    "ai_hunter", "bola", "bola_multi", "broken_access_control", "clickjacking", "command_injection", "cors", "crlf", "csrf", "graphql", "idor", "jwt", "lfi", "login_sqli", "mass_assignment", "nosql_injection", "nuclei", "open_redirect", "path_bypass", "race_condition", "request_smuggling", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe", "xxe",
 ]
