@@ -109,3 +109,41 @@ def test_extract_links_dedupes_and_strips_punctuation():
 
 def test_verification_link_none_when_no_links():
     assert verification_link({"text": "no links here", "subject": "hi"}) is None
+
+
+def test_verification_link_ignores_token_substring_in_host_or_query():
+    # Regression: a bare 'token' substring used to match benign hosts/params
+    # ("tokenshop", "tokenmarket.io"). The real confirm link must win.
+    msg = {"text": "promo https://target.test/api?utm_source=tokenshop and "
+                   "confirm https://target.test/email/confirm?id=9 thanks"}
+    assert verification_link(msg) == "https://target.test/email/confirm?id=9"
+
+
+def test_verification_link_matches_token_query_param():
+    msg = {"text": "Activate: https://target.test/a?token=abcdef end"}
+    assert verification_link(msg) == "https://target.test/a?token=abcdef"
+
+
+def test_malformed_responses_never_raise(monkeypatch):
+    # The "never raise" contract: malformed API bodies must degrade to []/None.
+    from core.specialist.temp_mail import MailTmProvider, TempMailbox
+    mb = TempMailbox(address="m@e.test", password="p", token="T")
+    bad_bodies = [
+        {"hydra:member": None},
+        {"hydra:member": "not-a-list"},
+        [1, "x", None],                      # bare list of non-dicts
+        {"hydra:member": [1, "x", {"id": "ok"}]},  # mixed; only the dict survives
+        None,
+    ]
+    for body in bad_bodies:
+        monkeypatch.setattr(temp_mail, "_send",
+                            _fake_transport({("GET", "/domains"): (200, body),
+                                             ("GET", "/messages"): (200, body)}))
+        prov = MailTmProvider()
+        # none of these may raise
+        assert isinstance(asyncio.run(prov.domains()), list)
+        assert isinstance(asyncio.run(prov.messages(mb)), list)
+    # create() with a malformed domains body returns None, not a crash
+    monkeypatch.setattr(temp_mail, "_send",
+                        _fake_transport({("GET", "/domains"): (200, {"hydra:member": [1, "x"]})}))
+    assert asyncio.run(new_mailbox()) is None

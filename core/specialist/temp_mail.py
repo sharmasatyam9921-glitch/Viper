@@ -45,10 +45,14 @@ logger = logging.getLogger("viper.specialist.temp_mail")
 _BASE = "https://api.mail.tm"
 _UA = "viper-temp-mail/1.0"
 
-# URL keywords that mark a link as a verify/confirm/activate action.
+# URL markers of a verify/confirm/activate action. The action words are specific
+# enough as bare substrings; the looser ones (token/signup/register) are
+# delimited so they don't match a benign host or path like "tokenmarket.io" or
+# "?utm_source=tokenshop".
 _VERIFY_HINTS = (
     "verify", "verification", "confirm", "confirmation", "activate",
-    "activation", "validate", "validation", "token", "signup", "register",
+    "activation", "validate", "validation",
+    "token=", "/token/", "/signup/", "/register/",
     "account/confirm", "auth/confirm", "email/confirm",
 )
 _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.I)
@@ -67,10 +71,18 @@ class TempMailbox:
 
 
 def _members(obj):
-    """mail.tm sometimes returns a Hydra envelope, sometimes a bare list."""
-    if isinstance(obj, dict) and "hydra:member" in obj:
-        return obj["hydra:member"]
-    return obj if isinstance(obj, list) else []
+    """Collection items as a list of dicts, defensively.
+
+    mail.tm normally returns a Hydra envelope ({"hydra:member": [...]}) but has
+    been seen returning a bare list; a flaky/edge response could also carry a
+    non-list member or non-dict elements. Never raise — callers iterate dicts,
+    so filter to dicts here and return [] for anything malformed.
+    """
+    if isinstance(obj, dict):
+        obj = obj.get("hydra:member")
+    if not isinstance(obj, list):
+        return []
+    return [x for x in obj if isinstance(x, dict)]
 
 
 def _send(method: str, url: str, data: Optional[dict] = None,
@@ -138,12 +150,20 @@ class MailTmProvider:
     async def messages(self, mb: TempMailbox) -> list[dict]:
         """Inbox message intros (id, from, subject, intro)."""
         status, body = await self._req("GET", "/messages", token=mb.token)
-        return _members(body) if status == 200 else []
+        if status != 200:
+            # 401 (expired token) / 429 (rate limit) shouldn't look like an empty
+            # inbox during a long wait_for() poll — surface it at debug.
+            logger.debug("temp_mail: /messages returned status %s", status)
+            return []
+        return _members(body)
 
     async def message(self, mb: TempMailbox, mid: str) -> Optional[dict]:
         """Full message (text + html) by id."""
         status, body = await self._req("GET", f"/messages/{mid}", token=mb.token)
-        return body if status == 200 and isinstance(body, dict) else None
+        if status != 200 or not isinstance(body, dict):
+            logger.debug("temp_mail: /messages/%s returned status %s", mid, status)
+            return None
+        return body
 
     async def wait_for(self, mb: TempMailbox, *, sender: str = "",
                        contains: str = "", timeout: float = 120.0,

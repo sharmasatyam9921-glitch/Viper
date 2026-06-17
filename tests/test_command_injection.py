@@ -95,15 +95,19 @@ def _injected_sleep_seconds(url: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
-# Scaled-down sleep constants so the tests run fast but still exercise the real
-# floor + scaling + reproduction logic. Ratios mirror production
-# (SHORT=0.3, LONG=0.7, ABS_TOL=0.08 -> floors 0.22/0.62, SCALE_TOL=0.12).
+# Scaled-down constants so the tests run fast but still exercise the real
+# paired-control differential. Ratios mirror production (SHORT=0.3, LONG=0.7,
+# ABS_TOL=0.08, DELTA_HI=0.35, SCALE_TOL=0.12). The detector now differences each
+# sleep probe against a benign control taken immediately before it, so the fakes
+# model latency as (base + injected_sleep) for sleep probes and base for controls.
 def _patch_fast_timing():
     return [
         patch("core.swarm_workers.vuln.command_injection._SLEEP_SHORT", 0.3),
         patch("core.swarm_workers.vuln.command_injection._SLEEP_LONG", 0.7),
         patch("core.swarm_workers.vuln.command_injection._ABS_TOL", 0.08),
+        patch("core.swarm_workers.vuln.command_injection._DELTA_HI", 0.35),
         patch("core.swarm_workers.vuln.command_injection._SCALE_TOL", 0.12),
+        patch("core.swarm_workers.vuln.command_injection._BLIND_HEADROOM", 2.0),
     ]
 
 
@@ -122,13 +126,15 @@ def _run_fast(fake, agent=None):
     return asyncio.run(go())
 
 
+_BASE = 0.02  # simulated base latency for the fakes
+
+
 def test_time_based_blind_fallback_scaling_true_positive():
-    """A server that actually sleeps the injected duration -> the delay SCALES
-    (sleep 0.3 -> ~0.3s, sleep 0.7 -> ~0.7s) -> blind finding."""
+    """A server that actually sleeps the injected duration: each sleep probe adds
+    ~N over its adjacent control and the deltas scale -> blind finding."""
     async def fake(method, url, **kw):
         n = _injected_sleep_seconds(url)
-        if n:
-            await asyncio.sleep(n)  # real shell would sleep the commanded time
+        await asyncio.sleep(_BASE + n)  # control(n=0) -> base; sleep probe -> base+N
         return _resp(body="done")
 
     findings = _run_fast(fake)
@@ -138,51 +144,54 @@ def test_time_based_blind_fallback_scaling_true_positive():
     assert f["cwe"] == "CWE-78"
     assert f["confidence"] < 0.9  # blind is lower-confidence than reflection
     assert "sleep" in f["payload"]
-    assert "scaled" in f["evidence"]
 
 
-def test_time_based_load_spike_not_flagged():
-    """Regression (found live on Juice Shop under benchmark load): a NON-vulnerable
-    target whose latency spikes ~uniformly regardless of the sleep duration must
-    NOT be flagged. The delay does not scale with the command, so it is noise."""
+def test_time_based_uniform_slow_not_flagged():
+    """A uniformly slow / laggy server (every request ~constant, sleep ignored).
+    The control taken moments before is just as slow -> delta ~0 -> not flagged."""
     async def fake(method, url, **kw):
-        n = _injected_sleep_seconds(url)
-        # Every sleep probe spikes to ~0.8s irrespective of N (3s vs 7s) — exactly
-        # the load-latency signature. Old single-threshold logic flagged this.
-        if n:
-            await asyncio.sleep(0.8)
+        await asyncio.sleep(0.5)  # constant, regardless of the injected command
         return _resp(body="done")
 
     findings = _run_fast(fake)
-    assert findings == [], f"non-scaling latency wrongly flagged as RCE: {findings}"
+    assert findings == [], f"uniformly-slow latency wrongly flagged as RCE: {findings}"
 
 
-def test_time_based_single_spike_not_flagged():
-    """One isolated spike on the SHORT probe, with the LONG probe fast, must not
-    flag — the long probe must also wait ~its full duration."""
-    state = {"short_seen": False}
+def test_time_based_monotonic_degradation_not_flagged():
+    """Regression (HIGH-sev FP found by adversarial review): a server whose latency
+    GROWS over time (GC pressure / memory leak under scan load), ignoring the
+    command. Each successive probe is slower, which defeated a floor+scaling+repeat
+    check. The paired control (taken moments before each probe) cancels the drift:
+    delta ~= one request-gap, far below the commanded sleep -> not flagged."""
+    calls = {"n": 0}
 
     async def fake(method, url, **kw):
-        n = _injected_sleep_seconds(url)
-        if n and not state["short_seen"]:
-            state["short_seen"] = True
-            await asyncio.sleep(0.9)  # lone spike on the first (short) probe
-        # long probe (and everything after) returns fast
+        calls["n"] += 1
+        await asyncio.sleep(0.04 * calls["n"])  # each request slower than the last
         return _resp(body="done")
 
     findings = _run_fast(fake)
-    assert findings == [], f"lone latency spike wrongly flagged as RCE: {findings}"
+    assert findings == [], f"monotonic latency drift wrongly flagged as RCE: {findings}"
+
+
+def test_time_based_probe_spike_not_flagged():
+    """A sleep probe that spikes FAR beyond the commanded duration is a latency
+    spike, not a sleep — the upper bound (delta <= N + _DELTA_HI) rejects it."""
+    async def fake(method, url, **kw):
+        n = _injected_sleep_seconds(url)
+        await asyncio.sleep(_BASE + (n + 1.0 if n else 0.0))  # +1.0s over commanded
+        return _resp(body="done")
+
+    findings = _run_fast(fake)
+    assert findings == [], f"over-long spike wrongly flagged as RCE: {findings}"
 
 
 def test_time_based_subsleep_not_flagged():
-    """Regression (the survivor under benchmark load): responses come back FASTER
-    than the commanded sleep (sleep 3 -> 2.1s, sleep 7 -> 5.0s) — load rose
-    between probes so the delta scaled, but the server never actually slept. The
-    absolute floor (a real `sleep N` can't return faster than N) must reject it."""
+    """Responses come back FASTER than commanded (server never actually slept):
+    delta < N -> rejected by the lower bound of the paired differential."""
     async def fake(method, url, **kw):
         n = _injected_sleep_seconds(url)
-        if n:
-            await asyncio.sleep(n * 0.5)  # always returns in HALF the commanded time
+        await asyncio.sleep(_BASE + n * 0.4)  # only 40% of the commanded sleep
         return _resp(body="done")
 
     findings = _run_fast(fake)
@@ -190,23 +199,40 @@ def test_time_based_subsleep_not_flagged():
 
 
 def test_time_based_reproduction_guard():
-    """Floors and scaling pass on the first pair, but the confirmation (repeat
-    long) probe is fast — a coincidental spike that won't repeat must not flag."""
+    """First short+long pair passes, but the reproduction (repeat long) probe
+    collapses — a coincidental spike that won't repeat must not flag."""
     long_seen = {"n": 0}
 
     async def fake(method, url, **kw):
         n = _injected_sleep_seconds(url)
-        if abs(n - 0.7) < 1e-6:           # a LONG probe
+        if abs(n - 0.7) < 1e-6:                 # a LONG sleep probe
             long_seen["n"] += 1
-            if long_seen["n"] >= 2:       # the reproduction probe: collapses
-                return _resp(body="done")
-            await asyncio.sleep(0.7)
-        elif n:                            # the SHORT probe
-            await asyncio.sleep(0.3)
+            if long_seen["n"] >= 2:             # reproduction probe: collapses to base
+                await asyncio.sleep(_BASE)
+            else:
+                await asyncio.sleep(_BASE + 0.7)
+        elif n:                                  # SHORT sleep probe
+            await asyncio.sleep(_BASE + n)
+        else:                                    # control
+            await asyncio.sleep(_BASE)
         return _resp(body="done")
 
     findings = _run_fast(fake)
     assert findings == [], f"non-reproducing spike wrongly flagged as RCE: {findings}"
+
+
+def test_time_based_slow_base_true_positive():
+    """Regression (FN found by adversarial review): a genuinely vulnerable server
+    with a SLOW base page (was missed by the old noise-floor skip gate). The
+    paired control absorbs the base, so the sleep delta is still ~N -> flagged."""
+    async def fake(method, url, **kw):
+        n = _injected_sleep_seconds(url)
+        await asyncio.sleep(0.5 + n)  # slow 0.5s base on EVERY request + real sleep
+        return _resp(body="done")
+
+    findings = _run_fast(fake)
+    assert len(findings) == 1, "slow-base vulnerable server should still be flagged"
+    assert findings[0]["vuln_type"].startswith("rce:cmdi:")
 
 
 def test_reflected_payload_is_not_command_injection():
@@ -237,9 +263,11 @@ if __name__ == "__main__":
     test_benign_response_no_finding()
     test_marker_already_reflected_is_suppressed()
     test_time_based_blind_fallback_scaling_true_positive()
-    test_time_based_load_spike_not_flagged()
-    test_time_based_single_spike_not_flagged()
+    test_time_based_uniform_slow_not_flagged()
+    test_time_based_monotonic_degradation_not_flagged()
+    test_time_based_probe_spike_not_flagged()
     test_time_based_subsleep_not_flagged()
     test_time_based_reproduction_guard()
+    test_time_based_slow_base_true_positive()
     test_reflected_payload_is_not_command_injection()
     print("ok")
