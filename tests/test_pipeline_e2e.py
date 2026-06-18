@@ -40,7 +40,9 @@ class _SqliVuln(BaseHTTPRequestHandler):
         if "?" in self.path and "q=" in self.path:
             from urllib.parse import urlsplit, parse_qs, unquote
             q = unquote(parse_qs(urlsplit(self.path).query).get("q", [""])[0])
-        if "'" in q or '"' in q:
+        # Genuine SQLi: an UNBALANCED quote breaks the query (500 + DB error); a
+        # balanced '' and a benign value do not — exactly what the gate confirms.
+        if q.count("'") % 2 == 1 or q.count('"') % 2 == 1:
             body = (b"<html><title>Error</title>"
                     b"You have an error in your SQL syntax; check the manual "
                     b"near \"'\" at line 1</html>")

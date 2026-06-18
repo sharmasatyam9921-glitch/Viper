@@ -47,11 +47,42 @@ _SECRET_SHAPE = re.compile(
     r"sk_live_[0-9A-Za-z]{20,}|AIza[0-9A-Za-z_\-]{35}|"
     r"xox[baprs]-[0-9A-Za-z\-]{10,}|"
     r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----")
-# Sensitive content that should never come back to an ANONYMOUS request.
+# STRONGLY-private content that a public endpoint never returns. Deliberately
+# EXCLUDES "email"/"name" — public profiles carry those, so they are not proof of
+# broken access control.
 _SENSITIVE = re.compile(
-    r'"(email|password|passwordHash|ssn|creditCard|cardNum|apiKey|api_key|'
-    r'secret|sessionToken|access_token)"\s*:|AKIA[0-9A-Z]{16}|'
-    r"-----BEGIN .*PRIVATE KEY", re.I)
+    r'"(password|passwordHash|password_hash|ssn|social_security|creditCard|'
+    r'card_number|cardNum|cvv|sessionToken|session_token|access_token|'
+    r'api_?key|private_?key|secret)"\s*:\s*"[^"]'
+    r"|AKIA[0-9A-Z]{16}|-----BEGIN .*PRIVATE KEY", re.I)
+
+# WAF / edge-block signatures — a quote that returns one of these was BLOCKED, not
+# executed by a database (defeats the SQLi-on-a-WAF gate false positive).
+_WAF_STATUSES = frozenset({403, 406, 429, 501})
+_WAF_MARKERS = re.compile(
+    r"blocked by|request blocked|web application firewall|security policy|"
+    r"forbidden by|access denied|incapsula|cloudflare|akamai|mod_security|"
+    r"reference\s*id|cf-ray|attention required|request was flagged", re.I)
+# Non-executing HTML regions: a reflection that only survives inside one of these
+# is inert (RCDATA/RAWTEXT/comment) — not exploitable XSS.
+_INERT_REGION = re.compile(
+    r"<textarea\b[^>]*>.*?</textarea>|<title\b[^>]*>.*?</title>|"
+    r"<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>|"
+    r"<xmp\b[^>]*>.*?</xmp>|<noscript\b[^>]*>.*?</noscript>|<!--.*?-->",
+    re.I | re.S)
+# A passwd-format account line (name:x:uid:gid:...). A real /etc/passwd has many;
+# a doc that merely quotes the canonical root line has one.
+_PASSWD_LINE = re.compile(r"(?m)^[a-z_][a-z0-9_-]*:[^:]*:\d+:\d+:")
+# Real directory-listing autoindex markers (Apache / nginx / IIS).
+_AUTOINDEX = re.compile(r"(?:<title>|<h1>)\s*index of\s+/|\[to parent directory\]|"
+                        r'<a href="\.\./"', re.I)
+# Obvious credential PLACEHOLDERS that are not live secrets.
+_SECRET_PLACEHOLDER = re.compile(r"EXAMPLE|XXXX|PLACEHOLDER|YOUR_|<.*>|0{8,}", re.I)
+
+
+def _waf_block(resp) -> bool:
+    return (getattr(resp, "status", 0) in _WAF_STATUSES
+            or bool(_WAF_MARKERS.search(_body(resp))))
 
 
 def _ctype(resp) -> str:
@@ -81,10 +112,16 @@ async def _recheck_xss(finding, fetch, timeout):
         return False, 0.0, "re-fetch failed"
     ct = _ctype(r)
     body = _body(r)
-    html_ctx = "html" in ct or "xml" in ct or ct == ""
-    if html_ctx and f"<{tag}>" in body and f"&lt;{tag}&gt;" not in body:
-        return True, 0.8, f"injected <{tag}> reflected UNENCODED in HTML context (live markup)"
-    return False, 0.2, "reflection encoded or non-HTML context — not exploitable"
+    if body.lstrip()[:1] in ("{", "["):
+        return False, 0.2, "JSON body — browsers treat it as data, not markup"
+    if not ("html" in ct or "xhtml" in ct or "svg" in ct):
+        return False, 0.2, "not an HTML/SVG content type — reflection is inert"
+    # Remove non-executing regions (textarea/title/script/style/comment); a tag
+    # that only survives inside one of those is inert RCDATA/RAWTEXT, not XSS.
+    live = _INERT_REGION.sub("", body)
+    if f"<{tag}>" in live and f"&lt;{tag}&gt;" not in body:
+        return True, 0.8, "injected tag reflected as LIVE markup (not encoded, not in an inert region)"
+    return False, 0.2, "reflection encoded or only inside a non-executing context — not exploitable"
 
 
 async def _recheck_sqli(finding, fetch, timeout):
@@ -98,15 +135,22 @@ async def _recheck_sqli(finding, fetch, timeout):
         return False, 0.0, "no parameter to re-test"
     benign = await fetch("GET", add_query(url, param, "1"), timeout=timeout)
     q1 = await fetch("GET", add_query(url, param, "1'"), timeout=timeout)
-    q2 = await fetch("GET", add_query(url, param, '1"'), timeout=timeout)
-    if None in (benign, q1, q2):
+    bal = await fetch("GET", add_query(url, param, "1''"), timeout=timeout)
+    if None in (benign, q1, bal):
         return False, 0.0, "re-fetch failed"
+    if _waf_block(q1):
+        return False, 0.1, "quote was blocked by a WAF/edge, not executed by a database"
 
-    def err(r):
-        return bool(_SQL_ERR.search(_body(r)))
-    if not err(benign) and err(q1) and (err(q2) or getattr(q1, "status", 0) >= 500):
-        return True, 0.75, "DB error reproduced under ' and \" breakers, absent for benign value"
-    return False, 0.2, "no reproducible DB-error differential (likely reflected content)"
+    def dberr(r):  # a genuine DB error: an error signature AND a 5xx (query broke)
+        return bool(_SQL_ERR.search(_body(r))) and getattr(r, "status", 0) >= 500
+    # Real injection: the UNBALANCED quote breaks the query (DB error + 5xx) while
+    # the benign value and a BALANCED '' do not. Rejects: a 200 page merely echoing
+    # "SQL syntax" (corpus search — no 5xx); a WAF block (handled above); an app
+    # that 500s on every quote including '' (balanced test).
+    if not _SQL_ERR.search(_body(benign)) and dberr(q1) and not dberr(bal):
+        return True, 0.8, ("unbalanced quote caused a DB error (5xx); a balanced '' "
+                           "and the benign value did not — genuine SQL injection")
+    return False, 0.2, "no clean DB-error differential (reflected text / quote filter / WAF)"
 
 
 async def _recheck_ssti(finding, fetch, timeout):
@@ -122,14 +166,19 @@ async def _recheck_ssti(finding, fetch, timeout):
         live = await fetch("GET", add_query(url, param, "${" + expr + "}"), timeout=timeout)
         ctrl = await fetch("GET", add_query(url, param, "${" + expr.replace("*", "x") + "}"),
                            timeout=timeout)
-        if live is None or ctrl is None:
+        bare = await fetch("GET", add_query(url, param, expr), timeout=timeout)  # no ${}
+        if live is None or ctrl is None or bare is None:
             return False, 0.0, "re-fetch failed"
-        lb, cb = _body(live), _body(ctrl)
-        if prod in lb and prod not in cb and expr not in lb:
+        lb, cb, bb = _body(live), _body(ctrl), _body(bare)
+        # Template engine: ${8*8} -> 64 (consumed), control has no 64, AND the BARE
+        # `8*8` is NOT evaluated. A plain calculator computes 8*8 with or without
+        # the ${} delimiters, so it fails the bare test.
+        if prod in lb and prod not in cb and expr not in lb and prod not in bb:
             confirmed += 1
     if confirmed >= 2:
-        return True, 0.8, "two fresh arithmetic expressions evaluated (consumed), absent in controls"
-    return False, 0.2, "fresh operands not evaluated — not a template engine"
+        return True, 0.8, ("delimited expressions evaluated but bare arithmetic did "
+                           "not — a template engine, not a calculator")
+    return False, 0.2, "fresh operands not template-evaluated (or a plain math evaluator)"
 
 
 async def _recheck_secrets(finding, fetch, timeout):
@@ -142,10 +191,14 @@ async def _recheck_secrets(finding, fetch, timeout):
     r = await fetch("GET", url, timeout=timeout)
     if not _ok2xx(r):
         return False, 0.1, "url no longer serves 2xx"
-    m = _SECRET_SHAPE.search(_body(r))
-    if m:
-        return True, 0.75, f"shape-specific credential reproduced ({m.group(0)[:4]}…)"
-    return False, 0.2, "no shape-specific credential on re-fetch — manual review"
+    body = _body(r)
+    for mm in _SECRET_SHAPE.finditer(body):
+        tok = mm.group(0)
+        ctx = body[max(0, mm.start() - 12):mm.end() + 12]
+        # Skip obvious placeholders/examples (AKIA…EXAMPLE, YOUR_KEY, <token>, 0000…).
+        if not _SECRET_PLACEHOLDER.search(tok) and not _SECRET_PLACEHOLDER.search(ctx):
+            return True, 0.75, f"live-looking credential reproduced ({tok[:4]}…)"
+    return False, 0.2, "only placeholder/example credentials (or none) — manual review"
 
 
 async def _recheck_access_control(finding, fetch, timeout):
@@ -186,9 +239,19 @@ async def _recheck_cmdi(finding, fetch, timeout):
         fs = await run(ag)
     except Exception as e:  # noqa: BLE001
         return False, 0.0, f"cmdi re-run error: {e}"
-    if any("cmdi" in str(f.get("vuln_type", "")) for f in (fs or [])):
-        return True, 0.7, "command injection reproduced by an independent re-run of the time-test"
-    return False, 0.2, "not reproduced on re-run (likely a transient/load spike)"
+    # Only a REFLECTION-confirmed re-fire (executed command output echoed back,
+    # severity critical) is trustworthy. A timing-only re-fire is NOT orthogonal
+    # (it re-runs the same time heuristic, which a tarpit/numeric-latency endpoint
+    # also fools), so it stays a LEAD for human corroboration.
+    fs = fs or []
+    if any("cmdi" in str(f.get("vuln_type", "")) and str(f.get("severity")) == "critical"
+           for f in fs):
+        return True, 0.85, ("command injection reproduced with EXECUTED command output "
+                            "(marker echoed) — not timing-only")
+    if any("cmdi" in str(f.get("vuln_type", "")) for f in fs):
+        return False, 0.3, ("only a timing-based signal reproduced (no executed output) "
+                            "— a tarpit can fake this; manual corroboration needed (lead)")
+    return False, 0.2, "not reproduced on re-run"
 
 
 async def _recheck_lfi(finding, fetch, timeout):
@@ -202,13 +265,17 @@ async def _recheck_lfi(finding, fetch, timeout):
     inj = await fetch("GET", url, timeout=timeout)   # the finding url carries the traversal
     if inj is None:
         return False, 0.0, "re-fetch failed"
-    if not _PASSWD.search(_body(inj)):
-        return False, 0.2, "passwd signature not reproduced"
+    # A real /etc/passwd has MANY account lines; a doc that merely quotes the
+    # canonical root line (or a search echo) has one. Require >= 2 distinct accounts.
+    accounts = set(_PASSWD_LINE.findall(_body(inj)))
+    if len(accounts) < 2:
+        return False, 0.2, ("fewer than 2 passwd-format account lines — a doc quoting "
+                            "root:x:0:0, not a file read")
     if param:
-        ctrl = await fetch("GET", add_query(url, param, "index"), timeout=timeout)
-        if ctrl is not None and _PASSWD.search(_body(ctrl)):
-            return False, 0.2, "benign control also leaks signature — doc echo, not a file read"
-    return True, 0.75, "/etc/passwd signature under traversal, absent for benign control"
+        ctrl = await fetch("GET", add_query(url, param, "harmless-token-zzz9"), timeout=timeout)
+        if ctrl is not None and len(set(_PASSWD_LINE.findall(_body(ctrl)))) >= 2:
+            return False, 0.2, "benign control also returns passwd lines — corpus echo, not a file read"
+    return True, 0.8, f"{len(accounts)} distinct /etc/passwd account lines under traversal, absent for a benign value"
 
 
 async def _recheck_idor(finding, fetch, timeout, bola_config):
@@ -264,30 +331,40 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
             return False, 0.0, "re-fetch failed"
         aco = (r.headers or {}).get("access-control-allow-origin", "")
         acc = (r.headers or {}).get("access-control-allow-credentials", "").lower()
+        # Only submittable when credentials are ALSO allowed — a reflected origin
+        # without credentials exposes only data the server already made public.
+        if aco == _PROBE_ORIGIN and acc == "true":
+            return True, 0.85, ("server reflects an arbitrary Origin AND allows "
+                                "credentials — an attacker site can read authenticated responses")
         if aco == _PROBE_ORIGIN:
-            return True, (0.9 if acc == "true" else 0.7), \
-                f"server reflects an arbitrary Origin ({aco}); credentials={acc or 'false'}"
-        return False, 0.2, "arbitrary origin not reflected on re-test (no real CORS bug)"
+            return False, 0.3, ("arbitrary Origin reflected but Allow-Credentials is "
+                                "not true — exposes only public data (lead)")
+        return False, 0.2, "arbitrary origin not reflected (no real CORS bug)"
 
     # Directory listing / sensitive-file exposure — re-fetch, confirm shape.
     if head in ("information_disclosure", "dir_listing", "directory_listing"):
         r = await fetch("GET", url, timeout=timeout)
         if r is None or not (200 <= getattr(r, "status", 0) < 300):
             return False, 0.1, "url no longer serves 2xx"
-        body = (getattr(r, "body", "") or "").lower()
-        if any(m in body for m in _DIRLIST) or body.count("<a href") >= 8:
-            return True, 0.7, "directory listing reproduced on re-fetch"
-        return False, 0.2, "no listing shape on re-test"
+        if _AUTOINDEX.search(_body(r)):
+            return True, 0.7, "real directory autoindex (Apache/nginx/IIS) reproduced on re-fetch"
+        return False, 0.2, "no autoindex structure — prose/links, not a directory listing"
 
-    # Exposed .env / config — env-var lines, not HTML.
+    # Exposed .env / config — env-var lines with a REAL secret value, not HTML,
+    # and not a committed .env.example/template (placeholders).
     if head in ("env_exposed", "actuator_env"):
+        if any(url.lower().rstrip("/").endswith(s)
+               for s in (".example", ".sample", ".dist", ".template")):
+            return False, 0.1, "looks like a committed .env.example/template, not a live secret file"
         r = await fetch("GET", url, timeout=timeout)
         if r is None or not (200 <= getattr(r, "status", 0) < 300):
             return False, 0.1, "env url no longer 2xx"
         body = getattr(r, "body", "") or ""
-        if "text/html" not in _ctype(r) and _ENV_LINE.search(body):
-            return True, 0.85, "env-var lines reproduced (KEY=value), non-HTML body"
-        return False, 0.2, "no env shape on re-test"
+        if "text/html" in _ctype(r):
+            return False, 0.2, "HTML body — not a raw env file"
+        if _ENV_LINE.search(body) and _SECRET_SHAPE.search(body):
+            return True, 0.85, "env file with KEY=value lines AND a real credential value"
+        return False, 0.2, "env-shaped but no live secret value — likely a sample/placeholder (lead)"
 
     # Exposed .git
     if head == "git_exposed":

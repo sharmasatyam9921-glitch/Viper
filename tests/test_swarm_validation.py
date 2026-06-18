@@ -110,6 +110,10 @@ def _run1(finding, responder):
 
 # --- injection-class orthogonal re-tests ---
 
+_AKIA = "AKIA2E0K8Z9QXVB7N3RT"   # AKIA + 16, no EXAMPLE/placeholder
+_PWHASH = '[{"id":1,"email":"a@b.co","passwordHash":"$2b$10$abcdefghijklmno"}]'
+
+
 def test_xss_live_markup_submittable():
     def resp(m, url, h):
         return HttpResp(200, {"content-type": "text/html"},
@@ -124,57 +128,108 @@ def test_xss_escaped_reflection_is_lead():
         return HttpResp(200, {"content-type": "text/html"},
                         f"<h1>Results for {html.escape(_injected(url))}</h1>", url)
     f = _run1({"vuln_type": "xss_text:q", "url": "http://t/s?q=x", "parameter": "q"}, resp)
-    assert not f["submittable"]  # correctly-escaped reflection (round-3 FP) stays a lead
+    assert not f["submittable"]
 
 
-def test_sqli_error_under_both_quotes_submittable():
+def test_xss_textarea_context_is_lead():
+    # GATE-FP regression: raw reflection INSIDE a <textarea> is inert (RCDATA).
     def resp(m, url, h):
-        v = _injected(url)
-        if "'" in v or '"' in v:
-            return HttpResp(500, {}, "You have an error in your SQL syntax near", url)
+        return HttpResp(200, {"content-type": "text/html"},
+                        f"<form><textarea>{_injected(url)}</textarea></form>", url)
+    f = _run1({"vuln_type": "xss_text:q", "url": "http://t/s?q=x", "parameter": "q"}, resp)
+    assert not f["submittable"]
+
+
+def test_xss_json_under_text_html_is_lead():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        '{"q":"' + _injected(url) + '"}', url)
+    f = _run1({"vuln_type": "xss_text:q", "url": "http://t/s?q=x", "parameter": "q"}, resp)
+    assert not f["submittable"]  # JSON body -> data, not markup
+
+
+def _sqli_real(m, url, h):
+    # genuine DB: an UNBALANCED quote breaks the query (5xx + error); a balanced
+    # '' and the benign value do not.
+    v = _injected(url)
+    if v.count("'") % 2 == 1 or v.count('"') % 2 == 1:
+        return HttpResp(500, {}, "You have an error in your SQL syntax near", url)
+    return HttpResp(200, {}, "ok", url)
+
+
+def test_sqli_unbalanced_quote_500_submittable():
+    f = _run1({"vuln_type": "sqli:id", "url": "http://t/x?id=1", "parameter": "id"},
+              _sqli_real)
+    assert f["submittable"]
+
+
+def test_sqli_waf_block_is_lead():
+    # GATE-FP regression: a WAF 403-blocks any quote and its page mentions SQL.
+    def resp(m, url, h):
+        if "'" in _injected(url) or '"' in _injected(url):
+            return HttpResp(403, {}, "Request blocked by Web Application Firewall: "
+                            "incorrect syntax near the submitted token", url)
         return HttpResp(200, {}, "ok", url)
     f = _run1({"vuln_type": "sqli:id", "url": "http://t/x?id=1", "parameter": "id"}, resp)
-    assert f["submittable"]
+    assert not f["submittable"]
 
 
 def test_sqli_corpus_search_is_lead():
     def resp(m, url, h):
         v = _injected(url)
-        if v == "1'":  # only this query surfaces a post mentioning the error
+        if v == "1'":  # 200 page echoing a post about SQL syntax (no 5xx)
             return HttpResp(200, {}, "post: 'error in your SQL syntax' help", url)
         return HttpResp(200, {}, "other posts", url)
     f = _run1({"vuln_type": "sqli:q", "url": "http://t/s?q=1", "parameter": "q"}, resp)
-    assert not f["submittable"]  # round-3 corpus-search FP rejected
+    assert not f["submittable"]
 
 
-def test_ssti_fresh_eval_submittable():
+def _ssti_engine(m, url, h):
     import re as _re2
-    def resp(m, url, h):
-        v = _injected(url)
-        mm = _re2.search(r"(\d+)\*(\d+)", v)
-        return HttpResp(200, {}, f"Result: {int(mm.group(1))*int(mm.group(2))}" if mm
-                        else f"Result: {v}", url)
-    f = _run1({"vuln_type": "ssti", "url": "http://t/x?n=1", "parameter": "n"}, resp)
+    v = _injected(url)
+    mm = _re2.search(r"\$\{(\d+)\*(\d+)\}", v)   # ONLY evaluate inside ${...}
+    if mm:
+        return HttpResp(200, {}, f"Result: {int(mm.group(1))*int(mm.group(2))}", url)
+    return HttpResp(200, {}, f"Result: {v}", url)
+
+
+def test_ssti_template_engine_submittable():
+    f = _run1({"vuln_type": "ssti", "url": "http://t/x?n=1", "parameter": "n"}, _ssti_engine)
     assert f["submittable"]
 
 
-def test_lfi_passwd_under_traversal_submittable():
+def test_ssti_calculator_is_lead():
+    # GATE-FP regression: a calculator evaluates BARE arithmetic too -> not SSTI.
+    import re as _re2
+    def resp(m, url, h):
+        v = _injected(url)
+        mm = _re2.search(r"(\d+)\*(\d+)", v)   # evaluates with OR without ${}
+        return HttpResp(200, {}, f"Result: {int(mm.group(1))*int(mm.group(2))}" if mm
+                        else f"Result: {v}", url)
+    f = _run1({"vuln_type": "ssti", "url": "http://t/order?qty=1", "parameter": "qty"}, resp)
+    assert not f["submittable"]
+
+
+def test_lfi_multi_account_passwd_submittable():
     def resp(m, url, h):
         v = _injected(url)
         if "etc/passwd" in v and "../" in v:
-            return HttpResp(200, {}, "root:x:0:0:root:/root:/bin/bash", url)
+            return HttpResp(200, {}, "root:x:0:0:root:/root:/bin/bash\n"
+                            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+                            "bin:x:2:2:bin:/bin:/usr/sbin/nologin\n", url)
         return HttpResp(200, {}, "no such doc", url)
     f = _run1({"vuln_type": "lfi:file", "parameter": "file",
                "url": "http://t/x?file=../../../../etc/passwd"}, resp)
     assert f["submittable"]
 
 
-def test_lfi_doc_echo_is_lead():
+def test_lfi_single_quoted_line_is_lead():
+    # GATE-FP regression: a doc/search quoting only the canonical root line.
     def resp(m, url, h):
-        return HttpResp(200, {}, "root:x:0:0: (from a tutorial)", url)  # leaks for everything
+        return HttpResp(200, {}, "The file starts with root:x:0:0:root:/root (one line).", url)
     f = _run1({"vuln_type": "lfi:file", "parameter": "file",
                "url": "http://t/x?file=../../../../etc/passwd"}, resp)
-    assert not f["submittable"]  # benign control also leaks -> doc echo
+    assert not f["submittable"]
 
 
 def test_bola_finding_trusted_submittable():
@@ -184,12 +239,21 @@ def test_bola_finding_trusted_submittable():
     assert f["submittable"] and f["validation_confidence"] >= 0.8
 
 
-def test_secrets_shape_specific_submittable():
+def test_secrets_live_credential_submittable():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/javascript"},
+                        f'var k="{_AKIA}";', url)
+    f = _run1({"vuln_type": "secret:aws", "url": "http://t/main.js"}, resp)
+    assert f["submittable"]
+
+
+def test_secrets_placeholder_is_lead():
+    # GATE-FP regression: the AWS canonical EXAMPLE key is not a live secret.
     def resp(m, url, h):
         return HttpResp(200, {"content-type": "application/javascript"},
                         'var k="AKIAIOSFODNN7EXAMPLE";', url)
     f = _run1({"vuln_type": "secret:aws", "url": "http://t/main.js"}, resp)
-    assert f["submittable"]
+    assert not f["submittable"]
 
 
 def test_secrets_generic_match_is_lead():
@@ -197,16 +261,25 @@ def test_secrets_generic_match_is_lead():
         return HttpResp(200, {"content-type": "text/html"},
                         "<html>password reset instructions</html>", url)
     f = _run1({"vuln_type": "secret:generic", "url": "http://t/page"}, resp)
-    assert not f["submittable"]  # no shape-specific credential -> lead
+    assert not f["submittable"]
 
 
-def test_access_control_anon_sensitive_submittable():
+def test_access_control_strong_sensitive_submittable():
     def resp(m, url, h):
-        return HttpResp(200, {"content-type": "application/json"},
-                        '[{"id":1,"email":"alice@corp.example","role":"admin"}]', url)
+        return HttpResp(200, {"content-type": "application/json"}, _PWHASH, url)
     f = _run1({"vuln_type": "access_control:missing_authorization",
                "url": "http://t/api/Users"}, resp)
     assert f["submittable"]
+
+
+def test_access_control_public_email_is_lead():
+    # GATE-FP regression: a public profile returning an email is not broken auth.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"name":"Acme Co","email":"contact@acme.example"}', url)
+    f = _run1({"vuln_type": "access_control:missing_authorization",
+               "url": "http://t/api/public-profile"}, resp)
+    assert not f["submittable"]
 
 
 def test_access_control_forbidden_is_lead():
@@ -214,7 +287,7 @@ def test_access_control_forbidden_is_lead():
         return HttpResp(403, {}, "Forbidden", url)
     f = _run1({"vuln_type": "access_control:missing_authorization",
                "url": "http://t/api/Users"}, resp)
-    assert not f["submittable"]  # 403 anonymously -> access control works
+    assert not f["submittable"]
 
 
 _A_MARKER = "alice@victim.io"
@@ -277,7 +350,18 @@ def test_cors_reflecting_arbitrary_origin_is_submittable():
         [{"vuln_type": "cors_origin_reflect", "url": "http://t/api"}],
         fetch=_fetch_returning(resp)))
     assert out[0]["validated"] and out[0]["submittable"]
-    assert out[0]["validation_confidence"] >= 0.9  # credentials=true
+    assert out[0]["validation_confidence"] >= 0.8  # reflected origin + credentials
+
+
+def test_cors_reflect_without_credentials_is_lead():
+    # GATE-FP regression: a public read-only API reflects Origin but no credentials.
+    def resp(method, url, headers):
+        return HttpResp(200, {"access-control-allow-origin": headers.get("Origin", "")},
+                        '{"price":1}', url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "cors_origin_reflect", "url": "http://t/ticker"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
 
 
 def test_cors_not_reflecting_probe_origin_is_lead():
@@ -292,11 +376,22 @@ def test_cors_not_reflecting_probe_origin_is_lead():
 def test_env_exposed_reconfirmed_submittable():
     def resp(method, url, headers):
         return HttpResp(200, {"content-type": "text/plain"},
-                        "DB_PASSWORD=s3cret\nAPI_KEY=abc123xyz\n", url)
+                        f"DB_PASSWORD=s3cret\nAWS_KEY={_AKIA}\n", url)
     out = asyncio.run(validate_findings(
         [{"vuln_type": "env_exposed:/.env", "url": "http://t/.env"}],
         fetch=_fetch_returning(resp)))
     assert out[0]["validated"] and out[0]["submittable"]
+
+
+def test_env_example_is_lead():
+    # GATE-FP regression: a committed .env.example with placeholders is not a leak.
+    def resp(method, url, headers):
+        return HttpResp(200, {"content-type": "text/plain"},
+                        "DB_PASSWORD=changeme\nAWS_KEY=YOUR_KEY_HERE\n", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "env_exposed:/.env.example", "url": "http://t/.env.example"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
 
 
 def test_env_html_page_is_lead_not_submittable():
@@ -315,6 +410,18 @@ def test_directory_listing_reconfirmed_submittable():
         [{"vuln_type": "information_disclosure:listing:/ftp", "url": "http://t/ftp"}],
         fetch=_fetch_returning(resp)))
     assert out[0]["validated"] and out[0]["submittable"]
+
+
+def test_dir_listing_prose_is_lead():
+    # GATE-FP regression: a normal page mentioning "index of" with many links, but
+    # not a real autoindex.
+    def resp(method, url, headers):
+        links = "".join(f'<a href="/p{i}">page {i}</a>' for i in range(12))
+        return HttpResp(200, {}, f"<html><h2>Our index of services</h2>{links}</html>", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "information_disclosure:listing:/x", "url": "http://t/services"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
 
 
 def test_injection_class_unconfirmed_stays_lead():
