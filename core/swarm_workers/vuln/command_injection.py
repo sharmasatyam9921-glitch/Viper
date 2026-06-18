@@ -20,6 +20,7 @@ vuln_type carries the scorer's RCE class token (`rce:cmdi:<param>`); CWE-78.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 import urllib.parse
@@ -129,15 +130,24 @@ def _executed_not_reflected(body: str, marker: str, injected_value: str) -> bool
         injected_value.replace(" ", "+"),
         injected_value.replace(" ", "%20"),
     }
-    # Also strip the bare `echo MARKER` command in any whitespace encoding, so a
-    # reflected command (without the control prefix) doesn't count as output.
-    for sep in (" ", "+", "%20", "%09"):
+    # Also strip the bare `echo MARKER` command in any whitespace encoding —
+    # INCLUDING the zero-separator form `echoMARKER` produced by a sanitizer that
+    # strips metacharacters AND collapses whitespace (that was a gate FP).
+    for sep in (" ", "+", "%20", "%09", ""):
         variants.add(f"echo{sep}{marker}")
     stripped = body
     for v in variants:
         if v:
             stripped = stripped.replace(v, "")
-    return marker in stripped
+    if marker not in stripped:
+        return False
+    # Belt-and-suspenders: re-check with ALL whitespace removed, so a reflection
+    # that merely re-spaced `echo` and the marker can't smuggle it past the strip.
+    nows = re.sub(r"\s+", "", stripped)
+    for v in variants:
+        if v:
+            nows = nows.replace(re.sub(r"\s+", "", v), "")
+    return marker in nows
 
 
 # Clock seam: real time in production; tests patch this to a virtual clock so the

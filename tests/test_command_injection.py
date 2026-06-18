@@ -260,6 +260,23 @@ def test_reflected_payload_is_not_command_injection():
     assert findings == [], f"reflected payload wrongly flagged as RCE: {findings}"
 
 
+def test_whitespace_collapse_sanitizer_not_flagged():
+    """Regression (gate-FP): a sanitizer that strips shell metacharacters AND
+    collapses whitespace reflects ';echo MARKER' as 'echoMARKER' (glued). The raw
+    marker must NOT be scored as executed command output."""
+    import re as _re
+    from urllib.parse import urlsplit, parse_qs, unquote_plus
+
+    async def fake(method, url, **kw):
+        q = parse_qs(urlsplit(url).query)
+        val = next((v[0] for v in q.values() if v), "")
+        clean = _re.sub(r"\s+", "", _re.sub(r"[;|&`$()<>]", "", unquote_plus(val)))
+        return _resp(body=f"<p>Results for {clean}</p>")
+
+    findings = _run(fake)
+    assert findings == [], f"whitespace-collapse reflection wrongly flagged: {findings}"
+
+
 if __name__ == "__main__":
     test_registered()
     test_marker_reflection_true_positive()

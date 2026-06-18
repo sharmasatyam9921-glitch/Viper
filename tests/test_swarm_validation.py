@@ -290,6 +290,63 @@ def test_access_control_forbidden_is_lead():
     assert not f["submittable"]
 
 
+def test_sqli_dsl_parser_is_lead():
+    # GATE-FP regression: a query-DSL parser 500s on an unbalanced quote with a
+    # generic "near ...: syntax error" (NOT a DB error).
+    def resp(m, url, h):
+        v = _injected(url)
+        if v.count("'") % 2 == 1:
+            return HttpResp(500, {}, "ParseException: near \"'\": syntax error", url)
+        return HttpResp(200, {}, "ok", url)
+    f = _run1({"vuln_type": "sqli:q", "url": "http://t/search?q=docs", "parameter": "q"}, resp)
+    assert not f["submittable"]
+
+
+def test_access_control_publishable_key_is_lead():
+    # GATE-FP regression: a public SPA config serving a Stripe PUBLISHABLE key.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"api_key":"pk_live_51ABCdefGHIjklMNOpqr"}', url)
+    f = _run1({"vuln_type": "access_control:missing_authorization",
+               "url": "http://t/config.json"}, resp)
+    assert not f["submittable"]
+
+
+def test_secrets_changelog_is_lead():
+    # GATE-FP regression: a credential-shaped string in a CHANGELOG (rotated/sample).
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/plain"},
+                        f"v1.2: rotated key {_AKIA}", url)
+    f = _run1({"vuln_type": "secret:aws", "url": "http://t/CHANGELOG.txt"}, resp)
+    assert not f["submittable"]
+
+
+def test_lfi_html_docs_is_lead():
+    # GATE-FP regression: a man-page search returning a passwd tutorial as HTML.
+    def resp(m, url, h):
+        v = _injected(url)
+        if "etc/passwd" in v:
+            return HttpResp(200, {"content-type": "text/html"},
+                            "<html>root:x:0:0:root:/root:/bin/bash\n"
+                            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin</html>", url)
+        return HttpResp(200, {"content-type": "text/html"}, "<html>no match</html>", url)
+    f = _run1({"vuln_type": "lfi:file", "parameter": "file",
+               "url": "http://t/x?file=../../../../etc/passwd"}, resp)
+    assert not f["submittable"]
+
+
+def test_cors_static_asset_is_lead():
+    # GATE-FP regression: a CDN reflecting Origin + credentials on a .css asset.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/css",
+                              "access-control-allow-origin": h.get("Origin", ""),
+                              "access-control-allow-credentials": "true"}, "body{}", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "cors_origin_reflect", "url": "http://t/brand.css"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
+
+
 _A_MARKER = "alice@victim.io"
 
 

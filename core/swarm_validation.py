@@ -32,13 +32,16 @@ _DIRLIST = ("index of /", "parent directory", "directory listing for")
 
 # Tight DB-error signatures (a corpus search quoting "SQL syntax" won't reproduce
 # the SAME one under two different quote chars; a broken query does).
+# DB-SPECIFIC error signatures only. Deliberately EXCLUDES generic grammar-parser
+# phrasing like `near "...": syntax error` and `Warning: ...sql`, which ordinary
+# query-DSL parsers (Lucene/CEL/homegrown) reuse — they tripped a gate FP.
 _SQL_ERR = re.compile(
-    r"SQL syntax|SQLSTATE\[|ORA-\d{5}|unclosed quotation mark|"
-    r"quoted string not properly terminated|near \"[^\"]*\": syntax error|"
+    r"You have an error in your SQL syntax|SQLSTATE\[|ORA-\d{5}|"
+    r"unclosed quotation mark|quoted string not properly terminated|"
     r"PG::\w*Error|psqlException|MySqlException|valid MySQL result|"
-    r"sqlite3?\.(Operational|Programming)Error|SQLITE_ERROR|SqlException|"
-    r"Microsoft OLE DB|Incorrect syntax near|Warning: \w*sql|"
-    r"PostgreSQL.{0,20}ERROR|Unclosed quotation mark", re.I)
+    r"sqlite3?\.(Operational|Programming)Error|SQLITE_ERROR|"
+    r"Microsoft OLE DB|Incorrect syntax near|PostgreSQL.{0,20}ERROR|"
+    r"ODBC SQL Server", re.I)
 _PASSWD = re.compile(r"root:.*?:0:0:")
 
 # Unambiguous credential SHAPES — a benign page never carries these verbatim.
@@ -78,6 +81,14 @@ _AUTOINDEX = re.compile(r"(?:<title>|<h1>)\s*index of\s+/|\[to parent directory\
                         r'<a href="\.\./"', re.I)
 # Obvious credential PLACEHOLDERS that are not live secrets.
 _SECRET_PLACEHOLDER = re.compile(r"EXAMPLE|XXXX|PLACEHOLDER|YOUR_|<.*>|0{8,}", re.I)
+# PUBLISHABLE / client-side keys that are intended to be public (not a leak).
+_PUBLISHABLE = re.compile(
+    r"pk_(live|test)_|publishable|ingest\.sentry\.io|sentry[_-]?dsn|"
+    r"search[_-]?only|sandbox|demo[-_]?token|client_id", re.I)
+# Doc/changelog URLs where a credential-shaped string is usually rotated/sample.
+_DOC_URL = re.compile(r"(changelog|readme|history|release[-_]?notes)|\.(txt|md|rst)(\?|$)", re.I)
+# Static-asset content types where a CORS reflection exposes nothing sensitive.
+_STATIC_CT = ("text/css", "javascript", "font", "image/", "woff", "octet-stream")
 
 
 def _waf_block(resp) -> bool:
@@ -191,6 +202,10 @@ async def _recheck_secrets(finding, fetch, timeout):
     r = await fetch("GET", url, timeout=timeout)
     if not _ok2xx(r):
         return False, 0.1, "url no longer serves 2xx"
+    # A credential-shaped string in a changelog/readme/doc is usually rotated or a
+    # sample — not a live leak. Leave it for human review.
+    if _DOC_URL.search(url):
+        return False, 0.3, "credential-shaped string in a doc/changelog — likely rotated/sample (lead)"
     body = _body(r)
     for mm in _SECRET_SHAPE.finditer(body):
         tok = mm.group(0)
@@ -213,9 +228,13 @@ async def _recheck_access_control(finding, fetch, timeout):
     if not _ok2xx(r):
         return False, 0.2, "not accessible anonymously (access control works)"
     body = _body(r)
+    # Publishable/client-side keys (Stripe pk_live, Algolia search key, Sentry DSN,
+    # demo tokens) are intended to be served anonymously — not broken access control.
+    if _PUBLISHABLE.search(body):
+        return False, 0.3, "anonymous data is a PUBLISHABLE/client-side key (intended public) — lead"
     if _SENSITIVE.search(body):
-        return True, 0.7, "protected endpoint returns sensitive data ANONYMOUSLY (2xx)"
-    return False, 0.2, "anonymous access returns no sensitive content"
+        return True, 0.7, "protected endpoint returns strongly-private data ANONYMOUSLY (2xx)"
+    return False, 0.2, "anonymous access returns no strongly-private content"
 
 
 async def _recheck_cmdi(finding, fetch, timeout):
@@ -265,6 +284,10 @@ async def _recheck_lfi(finding, fetch, timeout):
     inj = await fetch("GET", url, timeout=timeout)   # the finding url carries the traversal
     if inj is None:
         return False, 0.0, "re-fetch failed"
+    # A real file read returns the RAW file; a docs/man-page search wraps the
+    # quoted passwd in an HTML page.
+    if "html" in _ctype(inj):
+        return False, 0.2, "HTML response — a docs page quoting passwd, not a raw file read"
     # A real /etc/passwd has MANY account lines; a doc that merely quotes the
     # canonical root line (or a search echo) has one. Require >= 2 distinct accounts.
     accounts = set(_PASSWD_LINE.findall(_body(inj)))
@@ -329,6 +352,10 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         r = await fetch("GET", url, headers={"Origin": _PROBE_ORIGIN}, timeout=timeout)
         if r is None:
             return False, 0.0, "re-fetch failed"
+        # A CORS reflection on a static asset (css/js/font/image) exposes nothing
+        # sensitive — even with credentials it is not a real bug.
+        if any(a in _ctype(r) for a in _STATIC_CT):
+            return False, 0.2, "static-asset endpoint — CORS reflection exposes no sensitive data (lead)"
         aco = (r.headers or {}).get("access-control-allow-origin", "")
         acc = (r.headers or {}).get("access-control-allow-credentials", "").lower()
         # Only submittable when credentials are ALSO allowed — a reflected origin
