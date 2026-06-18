@@ -91,9 +91,22 @@ _CONTROL = "index"
 # misclassified — a topical keyword ("etc", "windows") still triggers the corpus
 # match on a real search endpoint while never naming a real file.
 #   kind -> tuple of keyword-only probe values (no `../`, no exact filename).
+#
+# The php-wrapper kind needs the SAME treatment for the symmetric FP: a code
+# -snippet / template gallery whose search param echoes base64-encoded source
+# (the standard clipboard.js `data-clipboard-text` copy pattern). The wrapper
+# payload string `php://filter/convert.base64-encode/resource=index` carries the
+# full-text tokens "php" and "index", which surface a "PHP index.php" card whose
+# clipboard blob decodes to <?php — flagged as LFI even though no file is read.
+# The token-only probes below share those tokens but carry NO wrapper scheme: a
+# genuine php://filter read only emits base64-PHP when the wrapper is actually
+# present, so the token-only probe returns the app's normal page (no leak) and
+# the true positive still fires; a search/echo gallery leaks base64-PHP for the
+# bare tokens too (=> skip).
 _KEYWORD_CONTROLS = {
     "passwd": ("etc", "etcetera"),
     "win.ini": ("windows", "win"),
+    "php-wrapper": ("index.php", "index"),
 }
 
 # The canonical /etc/passwd root line: root:<pwd>:0:0:... (uid 0, gid 0).
@@ -180,18 +193,23 @@ async def run(agent: SwarmAgent) -> List[dict]:
     keyword_driven: dict[tuple[str, str], bool] = {}
 
     async def _is_keyword_driven(param: str, kind: str) -> bool:
-        """True if the param leaks `kind`'s signature for the bare keyword alone.
+        """True if the param leaks `kind`'s signature for a bare control token.
 
-        Fetches the file keyword WITHOUT any `../` traversal. A real path
-        traversal needs the `../`; a full-text doc/search endpoint surfaces the
-        same article for the keyword by itself. If a keyword-only probe leaks the
-        SAME signature kind, the endpoint is search/docs-driven, not LFI.
+        Probes with a benign value that shares the payload's full-text tokens
+        but carries NONE of the attack machinery — for passwd/win.ini that means
+        the topical keyword WITHOUT any `../` traversal; for php-wrapper it means
+        the resource token (`index.php` / `index`) WITHOUT the `php://filter`
+        wrapper scheme. A real read needs that machinery (the `../` to escape the
+        docroot, or the wrapper to base64-encode source); a full-text search
+        /echo endpoint surfaces the same article/snippet for the bare token. If a
+        token-only probe leaks the SAME signature kind, the endpoint is
+        search/echo-driven, not LFI.
         """
         cache_key = (param, kind)
         if cache_key in keyword_driven:
             return keyword_driven[cache_key]
         verdict = False
-        for probe in _KEYWORD_CONTROLS.get(kind, ()):  # php-wrapper has none
+        for probe in _KEYWORD_CONTROLS.get(kind, ()):
             probe_url = add_query(url, param, probe)
             kresp = await fetch("GET", probe_url, timeout=timeout)
             if kresp is None:
@@ -238,8 +256,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 "confidence": 0.9,
                 "evidence": (
                     f"{kind} signature leaked in response: {evidence!r} "
-                    f"(absent in control={_CONTROL!r}; keyword-only control "
-                    f"did not leak it, so not a search/docs echo)"
+                    f"(absent in control={_CONTROL!r}; token/keyword-only "
+                    f"control(s) {_KEYWORD_CONTROLS.get(kind, ())!r} did not "
+                    f"leak it, so not a search/echo artifact)"
                 ),
             })
             # One confirmed leak per parameter is enough.

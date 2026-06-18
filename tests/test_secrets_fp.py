@@ -100,3 +100,128 @@ def test_real_dotenv_still_flagged():
     env = [r for r in result if r["type"] == "env_exposed"]
     assert env, "a real text/plain dotenv with KEY=value lines must be flagged"
     assert env[0]["severity"] == "high"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 audit: Google AIza... browser keys (Maps JS / Firebase web config /
+# reCAPTCHA) are PUBLIC by design — embedded in client-side JS, visible to every
+# visitor, secured by HTTP-referrer/app restrictions in Google Cloud Console,
+# NOT by secrecy. A minified JS bundle served as application/javascript that
+# contains such a key is not a "leaked secret". The round-1 HTML gate does not
+# cover this (the body is JS, not HTML), so the worker still emits a spurious
+# secret:google_api_key finding. Same gap applies to low-severity jwt_token
+# (public OIDC sample/config tokens in JS bundles).
+# ---------------------------------------------------------------------------
+
+# Canonical Google browser API key shape: AIza + 35 url-safe chars = 39 total.
+_GMAPS_KEY = "AIzaSyB1cD3fGh4Jk5Lm6No7Pq8Rs9Tu0Vw4uA0"
+# A public (non-sensitive) OIDC/JWT-shaped value as a JS bundles often inline.
+_PUBLIC_JWT = (
+    "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0."
+    "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+)
+
+# A realistic minified browser bundle, served as application/javascript.
+_JS_BUNDLE = (
+    '(function(){var cfg={apiKey:"' + _GMAPS_KEY + '",'
+    'authDomain:"shop.firebaseapp.com",projectId:"shop"};'
+    'var t="' + _PUBLIC_JWT + '";'
+    'window.__APP__=cfg;})();'
+)
+
+
+def test_google_key_in_js_bundle_not_flagged():
+    """A Google AIza browser key in a JS bundle (application/javascript) is
+    public-by-design and must NOT be flagged as a leaked secret.
+
+    Pre-fix this FAILS: the worker emits secret:google_api_key (medium).
+    """
+    asset = "http://shop.example.com/assets/index-4f3a.js"
+
+    async def fake(method, url, **kw):
+        if url == asset:
+            return HttpResp(
+                200, {"content-type": "application/javascript; charset=utf-8"},
+                _JS_BUNDLE, url)
+        # Honest 404s for every origin-relative exposure path.
+        return HttpResp(404, {"content-type": "text/html"}, "Not Found", url)
+
+    result = _run(asset, fake)
+    offenders = [r for r in result if r.get("vuln_type") in
+                 ("secret:google_api_key", "secret:jwt_token")]
+    assert offenders == [], (
+        "Google browser key / public JWT in a JS bundle is public-by-design and "
+        "must not be flagged as a leaked secret, got: " + repr(offenders)
+    )
+
+
+def test_google_key_by_js_extension_not_flagged():
+    """Even when content-type is generic, a .js URL marks a public client-side
+    asset — the AIza key must be suppressed by extension alone.
+    """
+    asset = "http://shop.example.com/static/main.mjs"
+
+    async def fake(method, url, **kw):
+        if url == asset:
+            # Mislabeled content-type (octet-stream) — extension must still gate.
+            return HttpResp(
+                200, {"content-type": "application/octet-stream"},
+                _JS_BUNDLE, url)
+        return HttpResp(404, {"content-type": "text/html"}, "Not Found", url)
+
+    result = _run(asset, fake)
+    offenders = [r for r in result if r.get("vuln_type") in
+                 ("secret:google_api_key", "secret:jwt_token")]
+    assert offenders == [], (
+        "AIza key on a .mjs asset must be suppressed by URL extension, got: "
+        + repr(offenders)
+    )
+
+
+def test_google_key_on_server_side_json_still_flagged():
+    """A Google AIza key in a genuinely server-side surface (JSON config dump,
+    NOT a JS asset) is still a real leak and MUST fire — guards against
+    over-correcting the public-asset gate into a false negative.
+    """
+    config_url = "http://api.example.com/config"
+    config_body = (
+        '{"env":"prod","mapsKey":"' + _GMAPS_KEY + '",'
+        '"debug":false,"region":"us-east-1"}'
+    )
+
+    async def fake(method, url, **kw):
+        if url == config_url:
+            return HttpResp(200, {"content-type": "application/json"},
+                            config_body, url)
+        return HttpResp(404, {"content-type": "text/html"}, "Not Found", url)
+
+    result = _run(config_url, fake)
+    google = [r for r in result if r.get("vuln_type") == "secret:google_api_key"]
+    assert google, (
+        "an AIza key in a server-side application/json config dump is a real "
+        "leak and must still be flagged"
+    )
+
+
+def test_high_confidence_secret_in_js_still_flagged():
+    """Shape-specific, never-public secrets (AKIA/ghp_/sk_live_/PEM) in a JS
+    bundle STILL fire unconditionally — the public-asset gate must NOT swallow
+    them.
+    """
+    asset = "http://shop.example.com/assets/leaky.js"
+    leaky = (
+        'var c={k:"AKIAIOSFODNN7EXAMPLE",'
+        't:"ghp_' + "a" * 36 + '"};'
+    )
+
+    async def fake(method, url, **kw):
+        if url == asset:
+            return HttpResp(
+                200, {"content-type": "application/javascript"}, leaky, url)
+        return HttpResp(404, {"content-type": "text/html"}, "Not Found", url)
+
+    result = _run(asset, fake)
+    vt = {r.get("vuln_type") for r in result}
+    assert "secret:aws_access_key" in vt, "AKIA key in JS must still fire"
+    assert "secret:github_pat" in vt, "ghp_ PAT in JS must still fire"

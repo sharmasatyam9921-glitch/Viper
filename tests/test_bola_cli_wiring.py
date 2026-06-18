@@ -129,6 +129,7 @@ class _FakeResult:
     hunt_id = "h_test"
     audit_path = "audit.jsonl"
     findings_count = 0
+    submittable_count = 0
     iterations = 0
     stop_reason = "done"
     timed_out = False

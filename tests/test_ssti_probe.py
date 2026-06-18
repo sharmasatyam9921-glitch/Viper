@@ -12,6 +12,26 @@ from core.swarm_engine import SwarmAgent
 from core.swarm_workers import get_worker_runner, list_workers
 from core.swarm_workers.vuln._http import HttpResp
 
+import re as _re
+from urllib.parse import parse_qs as _parse_qs, urlsplit as _urlsplit
+
+_SENTINEL_TOK = "viper7canary7probe"
+
+
+def _injected_value(url: str) -> str:
+    """The (url-decoded) value the worker injected into a parameter."""
+    q = _parse_qs(_urlsplit(url).query)
+    for v in q.values():
+        if v:
+            return v[0]
+    return ""
+
+
+def _eval_product(s: str):
+    """Model a template engine evaluating an arithmetic expression: 'A*B' -> 'A*B' product."""
+    m = _re.search(r"(\d+)\s*\*\s*(\d+)", s or "")
+    return str(int(m.group(1)) * int(m.group(2))) if m else None
+
 
 def _agent(target="http://t", timeout=5.0):
     return SwarmAgent(
@@ -42,13 +62,16 @@ def test_true_positive_evaluated_marker():
     """Live payload (operator intact) reflects 49; control (7x7) does not."""
 
     async def fake(method, url, **kw):
-        # The control payload mutates the operator -> contains "7x7".
-        if "7x7" in url:
-            return HttpResp(200, {}, "Result: 7x7 echoed back", url)
-        # The live payload preserves "7*7"; engine evaluates it to 49.
-        if "7%2A7" in url or "7*7" in url:
-            return HttpResp(200, {}, "Result: 49", url)
-        return HttpResp(200, {}, "nothing here", url)
+        # A real template engine reflects input at a stable site and evaluates an
+        # arithmetic expression to its product THERE (consuming the literal). It
+        # does this for EVERY operand pair (7*7->49, 13*13->169, 6*9->54) and
+        # reflects the benign sentinel, which the hardened worker now requires.
+        val = _injected_value(url)
+        prod = _eval_product(val)
+        if prod is not None:
+            return HttpResp(200, {}, f"<p>Result: {prod} here</p>", url)
+        # sentinel or the 7x7 control: reflected verbatim, no evaluation.
+        return HttpResp(200, {}, f"<p>Result: {val} here</p>", url)
 
     findings = _run(fake)
     assert findings, "expected an SSTI finding"
@@ -91,10 +114,12 @@ def test_error_signature_medium():
     """A template-engine error (only under live payload) -> medium finding."""
 
     async def fake(method, url, **kw):
-        if "7x7" in url:  # control -> clean
-            return HttpResp(200, {}, "ok", url)
-        # Live payload -> engine throws a recognizable error.
-        return HttpResp(500, {}, "jinja2.exceptions.TemplateSyntaxError: bad", url)
+        val = _injected_value(url)
+        if _SENTINEL_TOK in val:                       # sentinel must reflect (anchors)
+            return HttpResp(200, {}, f"<p>Result: {val} here</p>", url)
+        if _eval_product(val) is not None:             # arithmetic injection -> engine error
+            return HttpResp(500, {}, "jinja2.exceptions.TemplateSyntaxError: bad", url)
+        return HttpResp(200, {}, f"<p>Result: {val} here</p>", url)  # control 7x7 -> clean
 
     findings = _run(fake)
     assert findings, "expected an error-signature SSTI finding"

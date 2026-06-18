@@ -141,6 +141,111 @@ def test_real_passwd_read_true_positive_still_fires():
     assert f["vuln_type"].startswith("lfi:")
 
 
+# --- (c) round-2 FP: php-wrapper search/echo over a code-snippet gallery -----
+
+import base64 as _b64
+
+
+def _gallery_search_value(url):
+    """Extract the raw `template` (or any file-ish) search term from the URL."""
+    from urllib.parse import urlsplit, parse_qs, unquote
+    qs = parse_qs(urlsplit(url).query)
+    for k in ("template", "file", "doc", "page", "name", "path", "load"):
+        if k in qs:
+            return unquote(qs[k][0])
+    return ""
+
+
+def _b64card(source: str) -> str:
+    """A copy-to-clipboard card whose snippet source is base64 in an attribute."""
+    blob = _b64.b64encode(source.encode()).decode()
+    return (
+        '<div class="card">'
+        f'<button class="copy" data-clipboard-text="{blob}">Copy</button>'
+        "</div>"
+    )
+
+
+def test_php_wrapper_snippet_gallery_search_echo_false_positive_not_flagged():
+    """Code-snippet gallery whose `template` param is a full-text SEARCH.
+
+    This is the round-2 audit FP. The endpoint searches a gallery of code
+    snippets; each result card embeds the snippet's source base64-encoded in a
+    ``data-clipboard-text`` attribute (the standard clipboard.js copy pattern).
+
+    The worker's wrapper payload string
+    ``php://filter/convert.base64-encode/resource=index`` contains the tokens
+    ``php`` and ``index``; those full-text-match the "PHP index.php boilerplate"
+    card, whose clipboard blob decodes to ``<?php`` source. The benign baseline
+    value ``index`` matches a DIFFERENT (JavaScript) snippet whose blob decodes
+    to JS, so the baseline guard does NOT skip the param. No file is ever read
+    off disk — pure search/echo, exactly analogous to the passwd doc-search FP.
+
+    Pre-fix the worker flagged it as ``lfi:template``; post-fix a token-only
+    php-wrapper control (a benign value sharing the payload tokens but with NO
+    wrapper scheme) leaks the same base64-PHP blob, unmasking the search/echo
+    behavior, so the param is skipped.
+    """
+    php_src = "<?php // index.php boilerplate\necho 'hello';\n"
+    js_src = "// index.js — app entrypoint\nconst x = 1;\nexport default x;\n"
+
+    def page_for(term):
+        t = term.lower()
+        # Full-text gallery search. The "PHP index.php boilerplate" card is
+        # indexed under the tokens "php" and "index" (and "index.php"); the
+        # JavaScript "index.js" card is indexed under "index"/"js" only. The
+        # wrapper payload string carries BOTH "php" and "index", so it surfaces
+        # the PHP card. The bare baseline "index" surfaces the JS card.
+        if "php" in t:
+            return "<html><body>" + _b64card(php_src) + "</body></html>"
+        if "index" in t:
+            return "<html><body>" + _b64card(js_src) + "</body></html>"
+        return "<html><body><p>No snippets found.</p></body></html>"
+
+    async def fake(method, url, **kw):
+        term = _gallery_search_value(url)
+        return HttpResp(200, {"content-type": "text/html"}, page_for(term), url)
+
+    agent = _agent(target="http://127.0.0.1/gallery/search?template=index")
+    findings = _run(fake, agent)
+    assert findings == [], (
+        "code-snippet gallery doc-search endpoint must NOT be flagged as LFI: "
+        f"got {findings!r}"
+    )
+
+
+def test_real_php_filter_read_true_positive_still_fires():
+    """A genuinely vulnerable php://filter LFI must STILL be reported.
+
+    The wrapper scheme being present is what makes the app base64-encode and
+    return real source off disk. A token-only probe sharing the payload tokens
+    (``index.php`` / ``index``) does NOT carry the wrapper scheme, so it returns
+    the app's normal page (no base64-PHP) — proving the leak is wrapper-specific
+    and the finding fires.
+    """
+    php_source = "<?php\n$config = require 'config.php';\necho render($config);\n"
+    leaked_blob = _b64.b64encode(php_source.encode()).decode()
+
+    async def fake(method, url, **kw):
+        from urllib.parse import urlsplit, parse_qs, unquote
+        qs = parse_qs(urlsplit(url).query)
+        raw = unquote(qs.get("file", [""])[0])
+        # Only the actual php://filter wrapper makes the app emit base64 source.
+        if "php://filter" in raw.lower():
+            return HttpResp(200, {"content-type": "text/html"},
+                            f"<html><body><pre>{leaked_blob}</pre></body></html>", url)
+        # Baseline / token-only control: normal app page, no base64 source.
+        return HttpResp(200, {"content-type": "text/html"},
+                        "<html><body><h1>Home</h1></body></html>", url)
+
+    agent = _agent(target="http://127.0.0.1/app?file=index")
+    findings = _run(fake, agent)
+    assert findings, "expected a real LFI finding for an actual php://filter read"
+    assert any(f["payload"].startswith("php://filter") for f in findings), (
+        f"expected the php://filter payload to be the confirmed one: {findings!r}"
+    )
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

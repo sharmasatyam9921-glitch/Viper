@@ -75,12 +75,45 @@ def _looks_like_html(resp) -> bool:
     return head.startswith(_HTML_OPENERS)
 
 
+# Patterns whose matches are PUBLIC by design when they live in a client-side
+# asset. Google AIza... browser keys (Maps JS API, Firebase web config,
+# reCAPTCHA) are embedded in client JS, visible to every visitor, and secured by
+# HTTP-referrer / API / app restrictions in Google Cloud Console — not by
+# secrecy. Public OIDC sample/config tokens (jwt_token) are the same. Flagging
+# them on a JS bundle is a false positive; they are only a real leak on a
+# genuinely server-side surface (/.env, application/json config dump, etc.). The
+# high-confidence, never-public shape patterns (AKIA…, ghp_…, sk_live_…, PEM)
+# are deliberately NOT listed here — they fire unconditionally.
+_PUBLIC_BY_DESIGN = frozenset({"google_api_key", "jwt_token"})
+
+# Content-types and URL suffixes that mark a response as a public client-side
+# asset (browser-delivered JS), where _PUBLIC_BY_DESIGN matches are expected.
+_JS_CTYPES = ("javascript", "ecmascript")  # text/javascript, application/x-ecmascript
+_JS_SUFFIXES = (".js", ".mjs", ".cjs")
+
+
+def _is_public_client_asset(resp, url: str) -> bool:
+    """True when `resp`/`url` is a public client-side JS asset.
+
+    A browser-delivered JS bundle (content-type text/javascript /
+    application/javascript, or a .js/.mjs/.cjs URL) is fetched verbatim by every
+    visitor, so any AIza browser key or sample OIDC token inside it is public by
+    design — not a leaked secret.
+    """
+    ctype = (resp.headers.get("content-type", "") if resp.headers else "").lower()
+    if any(j in ctype for j in _JS_CTYPES):
+        return True
+    path = urlsplit(url).path.lower()
+    return path.endswith(_JS_SUFFIXES)
+
+
 # A dotenv file has at least one UPPERCASE KEY=value line (env-var convention),
 # unlike an HTML page whose only `=` come from attribute syntax (lang="en").
 _DOTENV_LINE = re.compile(r"(?m)^[A-Z][A-Z0-9_]*=\S")
 
 
-def _scan_body(body: str, url: str, *, is_html: bool = False) -> List[dict]:
+def _scan_body(body: str, url: str, *, is_html: bool = False,
+               is_public_asset: bool = False) -> List[dict]:
     findings: list[dict] = []
     for name, pat, sev in _SECRET_PATTERNS:
         # The password_assignment regex matches any `password="<8 chars>"`,
@@ -88,6 +121,13 @@ def _scan_body(body: str, url: str, *, is_html: bool = False) -> List[dict]:
         # placeholders). Suppress it on HTML bodies — real credential leaks in
         # HTML come from the high-confidence, shape-specific patterns above.
         if is_html and name == "password_assignment":
+            continue
+        # Google AIza browser keys and public OIDC sample tokens are public by
+        # design when delivered in client-side code (JS bundle, or inlined in an
+        # HTML page). Suppress them there — they are only a real leak on a
+        # server-side surface (/.env, application/json config dump, etc.). The
+        # high-confidence, never-public patterns stay unaffected.
+        if (is_public_asset or is_html) and name in _PUBLIC_BY_DESIGN:
             continue
         for m in pat.finditer(body[:512 * 1024]):  # cap body scan
             secret = m.group(0)
@@ -115,10 +155,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
     timeout = min(agent.timeout_s, 8.0)
     findings: list[dict] = []
 
-    # 1. Main page
+    # 1. Main page (often a JS bundle when the worker is dispatched at an asset)
     resp = await fetch("GET", url, timeout=timeout)
     if resp:
-        findings.extend(_scan_body(resp.body, url, is_html=_looks_like_html(resp)))
+        findings.extend(_scan_body(
+            resp.body, url,
+            is_html=_looks_like_html(resp),
+            is_public_asset=_is_public_client_asset(resp, url),
+        ))
 
     # 2. Common exposure paths — in parallel. These are ROOT-relative: the
     # worker may be dispatched against a discovered endpoint asset (e.g.
@@ -138,7 +182,10 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # served as HTML — so suppress the exposure signals (and the noisy
         # HTML-only secret regexes) when the body looks like an HTML page.
         is_html = _looks_like_html(r)
-        out: list[dict] = _scan_body(r.body, full, is_html=is_html)
+        out: list[dict] = _scan_body(
+            r.body, full, is_html=is_html,
+            is_public_asset=_is_public_client_asset(r, full),
+        )
         # Even without secret hits, exposing /.env is itself a finding — but
         # only when the body is an actual dotenv file: not HTML, with at least
         # one UPPERCASE KEY=value line (a bare `=` is satisfied by any HTML

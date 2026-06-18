@@ -36,6 +36,60 @@ _WEAK_KEYS = [
     "supersecret", "your-256-bit-secret", "changeme", "default", "jwt",
 ]
 
+# Cracking a weak HMAC key is only CRITICAL when forging the token escalates
+# privilege — i.e. the token AUTHORIZES an identity. Many JWTs that the server
+# sets on every anonymous visitor authorize nothing: anti-CSRF double-submit
+# nonces, A/B feature-flag buckets, cookie-consent records, guest markers. Their
+# signing key is often a copy-pasted tutorial default, so they crack instantly,
+# but forging them grants no access. Two signals gate the escalation:
+#
+# (1) Cookie NAME convention: cookies named XSRF-TOKEN / CSRF-TOKEN / _csrf /
+#     *consent* / *flags* / ab_* are non-credential by convention. Never escalate.
+# (2) Payload claims: a session must carry an identity claim (sub/user/uid/
+#     email/role/scope/...) AND must not be explicitly marked non-auth
+#     (xsrf/csrf/nonce/bucket/consent). A payload whose only fields are a nonce
+#     or a bucket is not a session.
+_IDENTITY_CLAIMS = frozenset({
+    "sub", "user", "username", "uid", "user_id", "userid", "email",
+    "role", "roles", "scope", "scopes", "authorities", "groups", "perms",
+    "permissions", "account", "actor", "client_id", "azp", "preferred_username",
+})
+_NON_AUTH_MARKERS = frozenset({
+    "xsrf", "csrf", "_csrf", "nonce", "bucket", "variant", "experiment",
+    "consent", "flag", "flags", "feature", "ab", "abtest", "guest",
+    "anonymous", "anon", "csrf_token", "xsrf_token", "antiforgery",
+})
+# Cookie-name substrings that mark a conventionally non-credential cookie.
+_NON_CRED_COOKIE_NAME_RE = re.compile(
+    r"(xsrf|csrf|antiforgery|consent|flag|bucket|variant|experiment|^ab[_-])",
+    re.IGNORECASE,
+)
+
+
+def _cookie_name(set_cookie_segment: str) -> str:
+    """Best-effort cookie name from a single Set-Cookie value (`name=value; ...`)."""
+    head = set_cookie_segment.split(";", 1)[0].strip()
+    return head.split("=", 1)[0].strip() if "=" in head else ""
+
+
+def _authorizes_identity(payload: dict, cookie_name: str) -> bool:
+    """True only if cracking the token's key would let us forge an *identity*.
+
+    A conventionally non-credential cookie name, or a payload that carries no
+    identity claim, or one explicitly marked as a non-auth artifact (CSRF nonce /
+    A-B bucket / consent flag) does NOT authorize an identity — forging it
+    escalates nothing, so a weak key there is not a critical.
+    """
+    if cookie_name and _NON_CRED_COOKIE_NAME_RE.search(cookie_name):
+        return False
+    keys = {str(k).lower() for k in payload.keys()}
+    if keys & _NON_AUTH_MARKERS:
+        return False
+    aud = payload.get("aud")
+    if isinstance(aud, str) and aud.lower() in ("anti-csrf", "csrf", "xsrf"):
+        return False
+    return bool(keys & _IDENTITY_CLAIMS)
+
 
 def _b64url_decode(seg: str) -> bytes:
     seg = seg + "=" * (-len(seg) % 4)
@@ -100,18 +154,29 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # never raise weak_key/alg_none from a body-scraped token, or every API
     # docs page that prints a sample JWT becomes a false critical.
     #
-    # `credential=True` → token came from a header the server set on this
+    # `credential=True` -> token came from a header the server set on this
     # response (cookie / auth). Only those are eligible for the high/critical
-    # forgeability findings; body tokens are downgraded to info-only.
+    # forgeability findings; body tokens are downgraded to info-only. We also
+    # remember the cookie NAME a token arrived under (empty for Authorization /
+    # body) — it's a strong signal of whether the token is a session credential
+    # or a non-credential artifact (XSRF-TOKEN, ab_*, *consent*).
     candidates: dict[str, bool] = {}  # token -> credential?
+    cookie_names: dict[str, str] = {}  # token -> originating cookie name
 
-    def _collect(text: str, credential: bool) -> None:
+    def _collect(text: str, credential: bool, cookie_name: str = "") -> None:
         for m in _JWT_RE.finditer(text):
             tok = m.group(0)
             # credential source wins if the same token shows up in both places
             candidates[tok] = candidates.get(tok, False) or credential
+            if cookie_name and not cookie_names.get(tok):
+                cookie_names[tok] = cookie_name
 
-    _collect(resp.headers.get("set-cookie") or "", credential=True)
+    # Set-Cookie may carry several cookies (one header value, comma-joined, or
+    # repeated). Split on the segment boundary and collect the JWT in each so we
+    # can attribute it to the right cookie name.
+    raw_set_cookie = resp.headers.get("set-cookie") or ""
+    for seg in re.split(r",(?=[^;,]+?=)", raw_set_cookie):
+        _collect(seg, credential=True, cookie_name=_cookie_name(seg))
     _collect(resp.headers.get("authorization") or "", credential=True)
     _collect(resp.body[:32 * 1024], credential=False)
 
@@ -122,13 +187,22 @@ async def run(agent: SwarmAgent) -> List[dict]:
             continue
         header, payload, _ = parsed
         alg = (header.get("alg") or "").upper()
+        cookie_name = cookie_names.get(tok, "")
+
+        # A credential-sourced token only justifies a high/critical forgeability
+        # finding if cracking/forging it would let us escalate — i.e. the token
+        # AUTHORIZES an identity. Anonymous CSRF nonces, A/B buckets, and consent
+        # records arrive via Set-Cookie too, but forging them grants nothing.
+        # `forgeable` = real session credential we could escalate by forging.
+        forgeable = credential and _authorizes_identity(payload, cookie_name)
 
         # Detection 1: alg=none indicates obvious misuse (no real server
         # should sign with none, but the *header* with alg=none + empty
         # sig is what we'd forge — finding it in a live token is rare
-        # but still informational). Only flag for credential-sourced tokens;
-        # a body sample showing alg=none is just documentation.
-        if alg == "NONE" and credential:
+        # but still informational). Only flag for credential-sourced tokens
+        # that authorize an identity; a body sample, or a non-credential CSRF/
+        # bucket cookie, showing alg=none escalates nothing.
+        if alg == "NONE" and forgeable:
             findings.append({
                 "type": "jwt_alg_none",
                 "vuln_type": "jwt:alg_none",
@@ -141,15 +215,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
             })
 
         # Detection 2: HS256 with weak key (cracked offline). Only a
-        # critical when the token is a LIVE credential — cracking the key of a
-        # sample JWT printed in HTML proves nothing about the application
-        # (the docs author chose the example secret, the server never signs
-        # real sessions with it). For body-scraped tokens we still report the
-        # crack, but as info-only "sample JWT seen in body" so an operator can
-        # eyeball it without it polluting the critical queue.
+        # critical when the token is a LIVE, IDENTITY-BEARING credential —
+        # cracking the key of a sample JWT printed in HTML, or of an anonymous
+        # CSRF-nonce / A-B-bucket cookie, proves nothing about session security
+        # (forging it forges no identity). For those we still report the crack,
+        # but downgraded to info-only so it doesn't pollute the critical queue.
         cracked = _try_weak_keys(tok)
         if cracked is not None:
-            if credential:
+            if forgeable:
                 findings.append({
                     "type": "jwt_weak_key",
                     "vuln_type": "jwt:weak_key",
@@ -162,7 +235,29 @@ async def run(agent: SwarmAgent) -> List[dict]:
                         f"HMAC signature verified locally with key={cracked!r}. "
                         f"alg={alg}. Token can be forged with arbitrary claims. "
                         "Source: server-set session credential (Set-Cookie / "
-                        "Authorization)."
+                        f"Authorization) carrying an identity claim "
+                        f"({sorted({str(k).lower() for k in payload} & _IDENTITY_CLAIMS)})."
+                    ),
+                })
+            elif credential:
+                # Credential-sourced but authorizes no identity: a weak key on a
+                # CSRF nonce / feature-flag / consent cookie. Worth noting (the
+                # key is still leaked / shared) but forging it escalates nothing.
+                findings.append({
+                    "type": "jwt_weak_key_noauth",
+                    "vuln_type": "jwt:weak_key_noauth",
+                    "title": f"Non-identity JWT cookie cracks with {cracked!r}",
+                    "severity": "info",
+                    "url": url,
+                    "cwe": "CWE-326",
+                    "confidence": 0.5,
+                    "evidence": (
+                        f"Server-set cookie {cookie_name or '<unnamed>'!r} is a JWT "
+                        f"verified locally with key={cracked!r} (alg={alg}), but its "
+                        f"payload carries NO identity claim "
+                        f"(keys={list(payload.keys())[:10]}) — it looks like an "
+                        "anti-CSRF nonce / feature-flag / consent record. Forging it "
+                        "escalates no privilege; not a session-forgery critical."
                     ),
                 })
             else:

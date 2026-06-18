@@ -55,12 +55,14 @@ _JS_RE = re.compile(
 )
 
 # A js_location match is only a redirect if the assignment runs at page LOAD —
-# not inside a user-gesture handler (addEventListener("click",...)/onclick),
-# and not merely displayed inside an escaped code sample (<code>/<pre>). The
-# audit FP was a safe interstitial that reflected the URL into a click handler.
-# We look at the context immediately BEFORE the assignment for handler/gesture
-# markers; if any is present the assignment is gated behind interaction and is
-# NOT an open redirect.
+# not inside a user-gesture handler (addEventListener("click",...)/onclick).
+# (Code that is merely displayed/disabled inside an inert region — HTML
+# comments, <code>/<pre>/<template>/<noscript>/<textarea>, non-JS <script type>
+# — is removed up front by _INERT_RE in _detect, so it never reaches this gate.)
+# The round-1 audit FP was a safe interstitial that reflected the URL into a
+# click handler. We look at the context immediately BEFORE the assignment for
+# handler/gesture markers; if any is present the assignment is gated behind
+# interaction and is NOT an open redirect.
 _JS_GESTURE_RE = re.compile(
     r"""addeventlistener\s*\(\s*['"](?:click|mousedown|mouseup|submit|"""
     r"""touchstart|touchend|keydown|keyup|keypress|change|focus|blur)['"]"""
@@ -70,6 +72,22 @@ _JS_GESTURE_RE = re.compile(
 )
 # How many characters of preceding context to inspect for a gesture marker.
 _JS_CONTEXT_WINDOW = 200
+
+# Inert regions whose contents a browser NEVER executes: HTML comments, and the
+# text content of <pre>/<code>/<template>/<noscript>/<textarea> and non-JS
+# <script type=...> blocks (JSON, templates). Redirect-looking code inside any
+# of these is documentation, disabled legacy code, or data — not a real
+# redirect. We strip them from the body BEFORE running _META_RE / _JS_RE so
+# commented-out or quoted redirect code is never treated as evidence. The
+# Location-header channel reads only headers and is unaffected.
+_INERT_RE = re.compile(
+    r"<!--.*?-->"
+    r"|<(pre|code|template|noscript|textarea)\b[^>]*>.*?</\1>"
+    r"|<script[^>]*type\s*=\s*['\"]?"
+    r"(?:text/(?:plain|template)|application/json|application/ld\+json)"
+    r"['\"]?[^>]*>.*?</script>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _host_of(value: str) -> str:
@@ -99,6 +117,10 @@ def _js_assignment_is_load_time(body: str, match: "re.Match[str]") -> bool:
     interact first — that is a SAFE interstitial pattern, not an open redirect.
     We inspect the preceding context for a gesture marker; if one is present the
     assignment is gated behind interaction and is not redirect evidence.
+
+    Note: `body` here is already the inert-stripped scan body, so matches inside
+    HTML comments or inert containers (<code>/<pre>/<template>/<noscript>/
+    <textarea>/non-JS <script type>) never reach this function.
     """
     start = match.start()
     ctx = body[max(0, start - _JS_CONTEXT_WINDOW):start]
@@ -122,20 +144,27 @@ def _detect(resp: HttpResp) -> Optional[tuple[str, str]]:
             return ("location_header", loc)
 
     body = resp.body or ""
+    # Strip inert regions (HTML comments, <pre>/<code>/<template>/<noscript>/
+    # <textarea>, non-JS <script type>) once, up front. Redirect code inside
+    # these never executes, so the meta and JS channels must scan the stripped
+    # body — otherwise disabled/legacy code (e.g. a commented-out
+    # `location.href = ...`) or quoted samples read as live redirect evidence.
+    scan_body = _INERT_RE.sub(" ", body)
+
     # 2) HTML meta-refresh — the browser follows this automatically (no user
     #    interaction), so a matching directive to the attacker host is a real
     #    redirect.
-    m = _META_RE.search(body)
+    m = _META_RE.search(scan_body)
     if m and _points_to_attacker(m.group(1)):
         return ("meta_refresh", m.group(1).strip())
 
     # 3) JS location assignment — only when it executes at LOAD time. Reject
     #    assignments gated behind a user gesture (click/submit handlers): those
     #    are the safe-interstitial pattern that drove the audit false positive.
-    for j in _JS_RE.finditer(body):
+    for j in _JS_RE.finditer(scan_body):
         if not _points_to_attacker(j.group(1)):
             continue
-        if _js_assignment_is_load_time(body, j):
+        if _js_assignment_is_load_time(scan_body, j):
             return ("js_location", j.group(1).strip())
 
     return None

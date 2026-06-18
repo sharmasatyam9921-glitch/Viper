@@ -75,6 +75,29 @@ _METADATA_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+# A correctly-defending SSRF guard returns a 4xx block page whose body merely
+# DESCRIBES the metadata service it refuses to reach ("blocked for your
+# security", "denied by WAF", "...the cloud metadata service is not allowed").
+# That descriptive prose is the server's OWN text — not a reflection of our
+# payload, so _markers' payload-stripping can't remove it, and the example.com
+# baseline lacks it. The tell is the denial language. If a marker-stripped body
+# reads like a security refusal, it is a defending endpoint, not a proxied IMDS
+# hit. (A genuine SSRF returns the SERVICE'S 2xx output, never a block page.)
+_DENIAL_LANGUAGE = re.compile(
+    r"\b(blocked|forbidden|denied|not allowed|for your security|by policy|"
+    r"ssrf|waf|firewall)\b",
+    re.IGNORECASE,
+)
+
+# A description can NAME "AccessKeyId" but cannot fabricate a real credential
+# VALUE. An AKIA/ASIA-prefixed 16-char key (or an exposed SecretAccessKey)
+# proves the metadata service actually emitted its secret body — content a
+# block page cannot contain. Used to upgrade confidence when only the weaker
+# name-markers are present.
+_CREDENTIAL_VALUE = re.compile(
+    r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|SecretAccessKey",
+)
+
 
 def _candidate_params(url: str) -> list[str]:
     """URL-like params already present on the target, else a small default set."""
@@ -114,8 +137,27 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
         resp = await fetch("GET", probe_url, timeout=timeout)
         if not resp:
             continue
+        # Gate 1: a real proxied IMDS hit returns the service's own 2xx (or 3xx)
+        # body. An SSRF guard refuses the internal URL with 401/403/4xx, so a
+        # marker on a non-successful response is almost always a block/error page
+        # that merely names the metadata service — not a fetch of it.
+        if not (200 <= resp.status < 400):
+            continue
+        # Gate 2: even on a 2xx, reject bodies that read like a denial/security
+        # explanation (some guards 200 a JSON "blocked" envelope). Match the
+        # marker-stripped body so the payload can't smuggle in denial words.
+        stripped = (resp.body or "").replace(payload, "")
+        if _DENIAL_LANGUAGE.search(stripped):
+            continue
         # Strip the reflected payload so pure reflection can't fabricate a marker.
         found = _markers(resp, payload) - base_markers
+        # Gate 3: a single weak name-marker (e.g. "instance-id") alone is
+        # describable prose. Require corroboration a description cannot
+        # fabricate: an actual credential VALUE (AKIA.../SecretAccessKey) OR
+        # >=2 distinct service markers co-occurring in the fetched body.
+        has_value = bool(_CREDENTIAL_VALUE.search(stripped))
+        if found and not has_value and len(found) < 2:
+            found = set()
         if found:
             findings.append({
                 "type": "ssrf",

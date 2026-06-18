@@ -66,9 +66,26 @@ _SENSITIVE_FLAT = {
 # sensitive field (see _SENSITIVE_FLAT) before flagging; the benign badge fields
 # alone are at best a lead, not a finding. Off these paths (collections of OTHER
 # users, registration schemas) the original behavior is unchanged.
+#
+# The gate is SEMANTIC, not a hardcoded allowlist (round-2 audit fix): the
+# singular current-user routes `/api/user` and `/rest/user` (Laravel Sanctum's
+# default `/api/user`, GitHub's `/user`, countless SPA backends) return the
+# requester's OWN record exactly like `/api/me` — yet a static path set always
+# misses some of them. Instead we classify by the path's FINAL SEGMENT: a
+# singular self-noun (user/me/account/profile/whoami/self) with no trailing id
+# or collection suffix is a self-profile. The explicit set below stays only as
+# documentation of the canonical examples.
 _SELF_PROFILE_PATHS = {
     "/api/me", "/api/profile", "/api/account", "/profile", "/account",
-    "/rest/user/whoami",
+    "/rest/user/whoami", "/api/user", "/rest/user", "/user",
+}
+
+# Final-segment nouns that denote "the current user's own record" rather than a
+# collection of other objects. SINGULAR only — a plural like `users` is a
+# collection of OTHER users (a real mass-assignment surface) and must NOT match.
+_SELF_PROFILE_NOUNS = {
+    "user", "me", "account", "profile", "whoami", "self", "currentuser",
+    "current_user", "myaccount", "my_account",
 }
 
 _MAX_EVIDENCE = 240
@@ -77,6 +94,37 @@ _MAX_EVIDENCE = 240
 def _origin(url: str) -> str:
     p = urlsplit(url)
     return f"{p.scheme}://{p.netloc}" if p.netloc else url.rstrip("/")
+
+
+def _is_self_profile_path(path: str) -> bool:
+    """True if `path` addresses the REQUESTER'S OWN record (a self-profile).
+
+    Semantic, not a hardcoded allowlist: the final path segment must be a
+    singular self-noun (user/me/account/profile/whoami/self) with no trailing
+    id or collection suffix. This catches `/api/user` and `/rest/user`
+    (Sanctum/GitHub/SPA singular current-user routes) identically to `/api/me`,
+    without the static set ever needing to be exhaustive.
+
+    Deliberately does NOT match:
+      * plurals — `/api/users` is a collection of OTHER users (real MA surface),
+      * id-addressed records — `/api/users/42`, `/user/jdoe` (someone else),
+      * registration schemas — `/register`, `/api/register`.
+    """
+    # Trim query/fragment defensively, normalize, split into non-empty segments.
+    clean = path.split("?", 1)[0].split("#", 1)[0]
+    segments = [s for s in clean.strip("/").lower().split("/") if s]
+    if not segments:
+        return False
+    last = segments[-1]
+    flat = last.replace("-", "").replace("_", "")
+    # A trailing id/slug (e.g. .../users/42, .../user/jdoe) means "some specific
+    # record", not "my own" — let those fall through to the normal heuristic.
+    if flat not in {n.replace("_", "") for n in _SELF_PROFILE_NOUNS}:
+        return False
+    # Guard: if the segment BEFORE the noun is itself a self-noun container the
+    # last segment could be a sub-resource (e.g. /user/whoami is fine; that's
+    # still self). Plurals never reach here because they're not in the noun set.
+    return True
 
 
 def _json_objects(body: str) -> List[dict]:
@@ -166,7 +214,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
         if obj_url in seen_paths:
             continue
         seen_paths.add(obj_url)
-        is_self_profile = path in _SELF_PROFILE_PATHS
+        is_self_profile = (
+            path in _SELF_PROFILE_PATHS or _is_self_profile_path(path)
+        )
 
         resp: Optional[HttpResp] = await fetch(
             "GET", obj_url,

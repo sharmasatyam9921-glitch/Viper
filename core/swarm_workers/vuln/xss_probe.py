@@ -8,6 +8,7 @@ marker is constructed so a real XSS would echo it back verbatim.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from typing import List
 from urllib.parse import parse_qs, urlsplit
@@ -35,6 +36,44 @@ _HTML_CTYPES = {
     "text/xml",
     "",
 }
+
+# XML-family content types (plus the sniffable-empty case) where '<'/'>' inside
+# a CDATA section or a comment is inert character data, NOT markup. A reflection
+# that survives ONLY in such an inert region is not XSS, so we strip those
+# regions before substring-matching. Search/data feeds (Atom/RSS/OpenSearch/SRU)
+# routinely wrap user input in CDATA, which is exactly this case.
+_XML_FAMILY_CTYPES = {
+    "application/xml",
+    "text/xml",
+    "image/svg+xml",
+    "application/xhtml+xml",
+    "",
+}
+
+# <![CDATA[ ... ]]> — minimal match so adjacent sections aren't merged.
+_CDATA_RE = re.compile(r"<!\[CDATA\[.*?\]\]>", re.DOTALL)
+# <!-- ... --> XML/HTML comments — also inert.
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _content_type(resp) -> str:
+    return (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+
+
+def _strip_inert_regions(body: str, ctype: str) -> str:
+    """For XML-family responses, remove CDATA sections and comments.
+
+    Inside <![CDATA[...]]> or <!-- ... -->, angle brackets are character data,
+    not markup — a payload reflected only there cannot execute. Stripping them
+    before matching prevents a HIGH-severity false positive on XML search feeds
+    that echo the query verbatim inside CDATA. Non-XML responses are returned
+    unchanged (HTML comments can still host markup-adjacent injection, and the
+    existing content-type gate already handles those credibly)."""
+    if ctype not in _XML_FAMILY_CTYPES:
+        return body
+    body = _CDATA_RE.sub("", body)
+    body = _COMMENT_RE.sub("", body)
+    return body
 
 
 def _html_context(resp) -> bool:
@@ -70,7 +109,11 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
     # sniffable) context. JSON/plain/csv/js echoes are inert data, not XSS.
     if not _html_context(resp):
         return []
-    body = resp.body
+    # Strip inert regions (CDATA + comments) from XML-family responses: a
+    # reflection that survives only inside <![CDATA[...]]> or <!-- ... --> is
+    # character data, not markup, and cannot execute. This kills the XML
+    # search-feed false positive without weakening live-markup detection.
+    body = _strip_inert_regions(resp.body, _content_type(resp))
     findings: list[dict] = []
     # Tier 1: full payload echoed (most credible)
     if payload in body:

@@ -93,3 +93,50 @@ def test_metadata_fetched_true_positive_still_fires():
     assert f["cwe"] == "CWE-918"
     assert f["parameter"] == "url"
     assert f["payload"] == "http://169.254.169.254/latest/meta-data/"
+
+
+# --- (c) NEW FALSE POSITIVE: defensive 4xx block page that NAMES the resource -
+def test_block_page_describing_metadata_false_positive_not_flagged():
+    """A server-side URL fetcher with CORRECT SSRF protection. The benign
+    example.com baseline fetches fine (200, no markers). Every internal/metadata
+    payload is DENIED by the app's SSRF guard, which returns a 403 block page
+    that — to be helpful — NAMES the resource it refuses to reach ("cloud
+    metadata service", "instance-id", "local-hostname", "iam/security-
+    credentials"). This prose is the SERVER'S OWN text, not a reflection of the
+    submitted payload, so payload-stripping does not remove it and the
+    example.com baseline lacks it. The endpoint is defending itself correctly
+    and MUST NOT be reported as SSRF.
+
+    Scenario C: HTML block page. Scenario D: JSON WAF block citing rule+fields.
+    """
+    # --- Scenario C: 403 HTML security block page -----------------------------
+    async def fake_html(method, url, **kw):
+        if "example.com" in url:
+            return HttpResp(200, {"content-type": "text/html"},
+                            "<html><body>Example Domain</body></html>", url)
+        body = (
+            "<html><head><title>403 Forbidden</title></head><body>"
+            "<h1>Request blocked for your security</h1>"
+            "<p>This request was denied by our SSRF protection policy. "
+            "Fetching the cloud metadata service is not allowed. The "
+            "requested host resolves to a link-local address used to expose "
+            "instance-id and local-hostname information, which is forbidden.</p>"
+            "</body></html>"
+        )
+        return HttpResp(403, {"content-type": "text/html"}, body, url)
+
+    assert _run(fake_html) == []
+
+    # --- Scenario D: 403 JSON WAF block citing rule + fields ------------------
+    async def fake_json(method, url, **kw):
+        if "example.com" in url:
+            return HttpResp(200, {"content-type": "text/html"},
+                            "Example Domain", url)
+        body = (
+            '{"error":"forbidden","reason":"Request denied by WAF managed rule "'
+            '"SSRF-Metadata-Block","detail":"Access to iam/security-credentials "'
+            '"and instance-id on the metadata endpoint is not allowed by policy."}'
+        )
+        return HttpResp(403, {"content-type": "application/json"}, body, url)
+
+    assert _run(fake_json) == []

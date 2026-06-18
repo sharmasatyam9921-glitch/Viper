@@ -153,6 +153,54 @@ def _resp_signature(resp: Optional[HttpResp]) -> Optional[tuple]:
     return (resp.status, len(resp.body or ""))
 
 
+_RECORD_RE = re.compile(r'\{[^{}]*"[A-Za-z_][\w-]*"\s*:')
+
+
+def _record_count(body: str) -> int:
+    """Rough count of record-shaped JSON objects (``{"key":``) in a body.
+
+    Used as an injection co-signal: a genuine NoSQL operator that makes a query
+    match every row returns MORE records than a non-matching baseline. This is
+    structure-based, so it ignores HTML template chrome whose byte size has
+    nothing to do with how many rows the query matched.
+    """
+    if not body:
+        return 0
+    return len(_RECORD_RE.findall(body))
+
+
+def _drop_param(url: str, key: str) -> str:
+    """Return `url` with parameter `key` REMOVED entirely (control request).
+
+    A request with the key gone models "empty / missing query". On a benign
+    search/listing page that means browse-all, which looks identical to a
+    successful operator injection but has nothing to do with NoSQL - this is the
+    control that lets us tell the two apart.
+    """
+    p = urlsplit(url)
+    raw_q = [(k, v) for (k, v) in urllib.parse.parse_qsl(p.query) if k != key]
+    new_q = urllib.parse.urlencode(raw_q)
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, new_q, p.fragment))
+
+
+def _looks_like_dropout(sig: tuple, dropout_sig: Optional[tuple]) -> bool:
+    """True if `sig` is explained by param-dropout (empty-query browse-all).
+
+    The payload's divergence is NOT injection if removing the key entirely
+    produces the same kind of response: the same status and a body within a
+    small tolerance of the dropout body (the operator-bracket key also drops the
+    real param under a strict parser, so the two requests are equivalent).
+    """
+    if dropout_sig is None:
+        return False
+    if sig[0] != dropout_sig[0]:
+        return False
+    larger = max(sig[1], dropout_sig[1]) or 1
+    # Within ~15% of the browse-all body == attributable to dropout, not a query
+    # that newly started matching rows.
+    return abs(sig[1] - dropout_sig[1]) <= 0.15 * larger
+
+
 async def _probe_query(url: str, timeout: float) -> List[dict]:
     """Mode (2): operator/tautology in query params, detect divergence."""
     params = _params(url)
@@ -167,6 +215,16 @@ async def _probe_query(url: str, timeout: float) -> List[dict]:
         base_sig = _resp_signature(baseline)
         if base_sig is None or base_sig[0] >= 500:
             continue
+        # Param-dropout control: the SAME URL with this key removed entirely
+        # ("empty / missing query"). On a benign search page that yields the
+        # full catalog (browse-all) - which is indistinguishable from a
+        # successful injection by status/size alone. The operator-bracket
+        # payload (key[$ne]=) ALSO drops the real key under every strict query
+        # parser, so any divergence it produces that merely reproduces this
+        # control is dropout, not NoSQL injection. We only flag divergence that
+        # the dropout control does NOT explain.
+        dropout_resp = await fetch("GET", _drop_param(url, key), timeout=timeout)
+        dropout_sig = _resp_signature(dropout_resp)
         for payload in _QUERY_PAYLOADS:
             # `[$ne]=` injects an operator on the key itself (key[$ne]=x); the
             # tautology payloads inject into the value.
@@ -187,10 +245,32 @@ async def _probe_query(url: str, timeout: float) -> List[dict]:
             # A successful operator/tautology injection makes the false-baseline
             # query start matching: a 2xx where the baseline was 4xx, or a clear
             # body-size jump on the same status.
-            diverged = (
-                (sig[0] < 400 <= base_sig[0]) or
-                (sig[0] == base_sig[0] and sig[1] > base_sig[1] * 2 and sig[1] > 256)
+            status_flip = sig[0] < 400 <= base_sig[0]
+            size_jump = (
+                sig[0] == base_sig[0] and sig[1] > base_sig[1] * 2 and sig[1] > 256
             )
+            diverged = status_flip or size_jump
+            # Suppress param-dropout / empty-query browse-all: if removing the
+            # key entirely reproduces this same divergence, the body grew because
+            # the app browses-all on an empty query, NOT because a Mongo operator
+            # was interpreted. (The operator-bracket key drops the real param
+            # under a strict parser, so it is equivalent to the dropout control.)
+            if diverged and _looks_like_dropout(sig, dropout_sig):
+                continue
+            # A bare same-status body-size ratio on an HTML response with no
+            # JSON/array structure is dominated by template chrome unrelated to
+            # query matching - too weak to report on its own. Require either a
+            # status flip, or some record-shaped structure (JSON / array) in the
+            # payload response that the false-value baseline lacked.
+            if diverged and not status_flip:
+                ctype = ((resp.headers or {}).get("content-type", "")
+                         if resp and resp.headers else "")
+                body = (resp.body or "") if resp else ""
+                base_body = (baseline.body or "") if baseline else ""
+                has_structure = ("json" in ctype.lower()) or (
+                    _record_count(body) > _record_count(base_body))
+                if "html" in ctype.lower() and not has_structure:
+                    continue
             if diverged:
                 findings.append({
                     "type": "nosql_injection_param",

@@ -98,3 +98,103 @@ def test_nosql_login_true_positive_still_fires():
     assert f["severity"] == "critical"
     assert f["cwe"] == "CWE-943"
     assert "/rest/user/login" in f["url"]
+
+
+# --- Round-2 audit: benign catalog "browse-all on empty query" FP -----------
+#
+# Mode-2 (query-param) FP on a NON-Mongo search/listing endpoint:
+# GET /search?q=shoes on a normal e-commerce catalog. The worker rewrites the
+# key to q[$ne]=viper_nomatch_7c12; every strict query parser treats `q[$ne]`
+# as a DISTINCT param, so the real `q` is simply ABSENT. Like virtually every
+# real search page, the app renders its FULL default catalog for an
+# empty/missing query, but a tiny "No products match ..." page for a query that
+# matches nothing (the worker's viper_nomatch_7c12 baseline). No Mongo operator
+# is ever interpreted — the body just grows because empty-query == browse-all.
+# The old heuristic (sig[1] > base_sig[1]*2 and sig[1] > 256) fires and emits a
+# HIGH nosql_injection:query / CWE-943 finding. That is a false positive.
+#
+# Fix: add a param-dropout control (the key removed / emptied). If that control
+# already diverges from baseline the same way the payload does, the divergence
+# is browse-all on empty query, NOT injection — suppress the finding.
+
+
+def _query_only(url):
+    from urllib.parse import urlsplit, parse_qsl
+    return dict(parse_qsl(urlsplit(url).query))
+
+
+# A full catalog page (browse-all) and a tiny "no match" page. Sizes are chosen
+# so the catalog is >2x the no-match page and >256B, exactly tripping the old
+# byte-ratio heuristic.
+_CATALOG_HTML = (
+    "<html><head><title>Shop</title></head><body><h1>All products</h1>"
+    + "".join("<div class='product'>Product %02d</div>" % i for i in range(40))
+    + "</body></html>"
+)
+_NOMATCH_HTML = (
+    "<html><head><title>Shop</title></head><body>"
+    "<p>No products match your search.</p></body></html>"
+)
+
+
+def _catalog_fake(method, url, **kw):
+    """Benign catalog: full listing when `q` is absent/empty, a small no-match
+    page when `q` has a value that matches nothing. Login paths 404."""
+    if "/search" not in url:
+        return HttpResp(404, {"content-type": "text/html"}, "", url)
+    q = _query_only(url)
+    # The real param is `q`. Any bracketed-operator key (q[$ne], q[$gt]) is a
+    # DISTINCT param under a strict parser, so `q` is absent -> browse-all.
+    qval = q.get("q")
+    if qval is None or qval == "":
+        body = _CATALOG_HTML            # empty/missing query -> full catalog
+    elif qval == "viper_nomatch_7c12":
+        body = _NOMATCH_HTML            # sentinel matches nothing -> tiny page
+    else:
+        body = _CATALOG_HTML            # a real term -> some results page
+    return HttpResp(200, {"content-type": "text/html"}, body, url)
+
+
+def test_nosql_query_browse_all_empty_query_not_flagged():
+    """Benign catalog endpoint where dropping `q` yields browse-all. The
+    operator-bracket payload q[$ne]= drops the real param, so the response grows
+    to the full catalog vs the tiny no-match baseline. That divergence is param
+    dropout, NOT injection, and must NOT be reported."""
+    assert _run(_catalog_fake, target="http://t/search?q=shoes") == [], (
+        "benign catalog (browse-all on empty/missing query) was wrongly flagged "
+        "as a NoSQL query injection"
+    )
+
+
+def test_nosql_query_true_positive_still_fires():
+    """A GENUINELY injectable Mongo-backed query: the viper_nomatch_7c12 sentinel
+    returns a small empty-result page, removing `q` entirely returns the SAME
+    small empty page (no browse-all — this app requires a query), but the
+    operator payload q[$ne]= makes the Mongo filter match every row and returns
+    a large result set. Divergence is attributable to the operator, not dropout,
+    so the worker MUST still report it."""
+    big = (
+        "<html><body>" + "".join(
+            '{"id":%d,"name":"row%d"}' % (i, i) for i in range(60)
+        ) + "</body></html>"
+    )
+    small = '<html><body>{"results":[]}</body></html>'
+
+    def fake(method, url, **kw):
+        if "/search" not in url:
+            return HttpResp(404, {"content-type": "text/html"}, "", url)
+        q = _query_only(url)
+        # Genuine NoSQL: the operator key q[$ne] is interpreted by Mongo as
+        # "field q not-equal sentinel" -> matches everything -> big body.
+        if any(k.startswith("q[") for k in q):
+            return HttpResp(200, {"content-type": "text/html"}, big, url)
+        # `q` absent/empty OR sentinel value -> empty result set (no browse-all).
+        return HttpResp(200, {"content-type": "text/html"}, small, url)
+
+    result = _run(fake, target="http://t/search?q=shoes")
+    assert result, "genuinely injectable NoSQL query was missed"
+    f = result[0]
+    assert f["vuln_type"] == "nosql_injection:query"
+    assert f["severity"] == "high"
+    assert f["cwe"] == "CWE-943"
+    assert f["parameter"] == "q"

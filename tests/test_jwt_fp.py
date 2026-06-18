@@ -118,3 +118,72 @@ def test_live_cookie_weak_key_still_fires():
     cracked = [r for r in result if r.get("vuln_type") == "jwt:weak_key"]
     assert cracked, f"expected a weak_key finding from the Set-Cookie token; got {result}"
     assert cracked[0]["severity"] == "critical"
+
+
+# ---------------------------------------------------------------------------
+# ROUND 2 — NEW false positive
+# ---------------------------------------------------------------------------
+#
+# Scenario: a benign 200 page sets an *anonymous, pre-login* CSRF cookie that
+# happens to be a JWT carrying only a CSRF nonce (no identity), signed with a
+# copy-pasted tutorial default HMAC key ("your-256-bit-secret" / "secret").
+# Double-submit CSRF-token cookies set on every anonymous visitor are ubiquitous
+# (Angular `XSRF-TOKEN`, Spring `_csrf`, Django), and some wrap the nonce in a
+# JWT whose signing key was left at a tutorial default.
+#
+# Cracking that key forges nothing of value: the token authorizes no identity —
+# it carries only an anti-CSRF nonce. Round-1 gated on token SOURCE (Set-Cookie)
+# but never inspected what the token AUTHORIZES, so it (wrongly) emits CRITICAL
+# jwt:weak_key. The round-2 fix adds a claims/identity gate: a credential-sourced
+# token whose payload carries no identity claim (sub/user/uid/email/role/scope)
+# AND/OR is a conventionally non-credential cookie (XSRF-TOKEN, _csrf, *consent*,
+# feature-flag/bucket) must NOT escalate to critical.
+
+
+def test_anonymous_xsrf_jwt_cookie_not_flagged_critical():
+    """(c) ROUND-2 FALSE POSITIVE: an anonymous XSRF-TOKEN cookie that is a JWT
+    carrying only a CSRF nonce, signed with a tutorial-default key, must NOT
+    raise weak_key/alg_none. It authorizes no identity — forging it escalates
+    nothing. Pre-fix this FAILS (worker emits CRITICAL jwt:weak_key)."""
+    token = _make_jwt(
+        {"alg": "HS256", "typ": "JWT"},
+        {"xsrf": "3f1c9a", "iat": 1516239022},  # nonce only — no identity claim
+        "your-256-bit-secret",
+    )
+    resp = HttpResp(
+        200,
+        {"set-cookie": f"XSRF-TOKEN={token}; Path=/; SameSite=Strict",
+         "content-type": "text/html; charset=utf-8"},
+        "<html><body>Welcome</body></html>",
+        "http://t/",
+    )
+    result = _run(resp)
+
+    severe = [r for r in result if r.get("vuln_type") in ("jwt:weak_key", "jwt:alg_none")]
+    assert severe == [], (
+        "anonymous XSRF-TOKEN JWT (nonce only, no identity claim) must not raise "
+        f"weak_key/alg_none; got {[(r['vuln_type'], r['severity']) for r in severe]}"
+    )
+    high = [r for r in result if r.get("severity") in ("critical", "high")]
+    assert high == [], f"no high/critical findings expected from a non-identity CSRF cookie; got {high}"
+
+
+def test_ab_bucket_jwt_cookie_not_flagged_critical():
+    """(d) ROUND-2 sibling FP: an A/B feature-flag bucket cookie that is a weak
+    JWT with no identity claim must also stay below critical."""
+    token = _make_jwt(
+        {"alg": "HS256", "typ": "JWT"},
+        {"bucket": "B", "iat": 1516239022},  # experiment bucket — not a session
+        "secret",
+    )
+    resp = HttpResp(
+        200,
+        {"set-cookie": f"ab_experiment={token}; Path=/",
+         "content-type": "text/html"},
+        "<html></html>",
+        "http://t/",
+    )
+    result = _run(resp)
+
+    severe = [r for r in result if r.get("severity") in ("critical", "high")]
+    assert severe == [], f"A/B bucket JWT (no identity) must not raise high/critical; got {severe}"

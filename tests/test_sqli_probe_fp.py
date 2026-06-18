@@ -189,3 +189,70 @@ def test_true_positive_boolean_blind_still_fires():
     blinds = [f for f in findings if "blind" in f.get("vuln_type", "")]
     assert blinds, "TRUE POSITIVE missed: genuine boolean-blind not flagged"
     assert blinds[0]["cwe"] == "CWE-89"
+
+
+# ---------------------------------------------------------------------------
+# (c) ROUND-2 FALSE POSITIVE — WAF / input-filter block page on a single quote
+# ---------------------------------------------------------------------------
+#
+# A non-vulnerable production endpoint sits behind a WAF (or has its own input
+# filter) that BLOCKS any parameter value containing a single quote and serves a
+# templated block page whose explanatory copy quotes SQL-Server-style error text
+# ("incorrect syntax near"). The request never reaches app code or a database;
+# the WAF that PROTECTS the endpoint is what trips the probe:
+#
+#   benign  ?id=1   -> clean 200
+#   quote   ?id=1'  -> 403 block page (body mentions "incorrect syntax near"
+#                      plus block-page markers: "Web Application Firewall",
+#                      "request was flagged", "Reference ID").
+#
+# The differential error-banner path fires (banner present only under the quote
+# + status shift 200->403) and emits a high-severity, confidence-0.9 finding —
+# a false positive. A 403/406/429 is the signature of a WAF block, NOT a DB
+# error: real SQL errors surface as a reflected 200 or a 500, essentially never
+# a 403. The worker MUST return [] here.
+
+
+_WAF_BLOCK_HTML = (
+    "<!doctype html><html><head><title>Request Blocked</title></head><body>"
+    "<h1>Forbidden</h1>"
+    "<p>Your request was flagged by our Web Application Firewall security "
+    "policy. Requests containing characters that could form SQL such as an "
+    "unbalanced quote (for example, &#39;incorrect syntax near&#39;) are "
+    "blocked to protect this site.</p>"
+    "<p>If you believe this is an error, contact support and quote "
+    "Reference ID: 7f3a1c9e-block.</p>"
+    "</body></html>"
+)
+
+
+def test_waf_quote_block_page_not_flagged():
+    """WAF/input-filter block page on a single quote: NOT SQLi.
+
+    Benign ?id=1 is a clean 200; the quote payload ?id=1' is intercepted by the
+    WAF and returns a 403 block page that merely *quotes* SQL-Server error prose
+    in its explanation. No SQL is reached. Worker MUST return [].
+    (Pre-fix this returns a high-severity sqli finding from the differential
+    error-banner path.)
+    """
+    clean = HttpResp(200, {"content-type": "text/html"},
+                     "<html><body>Product #1: Running shoe</body></html>",
+                     "http://shop.example.com/item?id=1")
+    blocked = HttpResp(403, {"content-type": "text/html"},
+                       _WAF_BLOCK_HTML,
+                       "http://shop.example.com/item?id=1'")
+
+    async def fake(method, url, *, headers=None, timeout=10.0, **kw):
+        # The single quote is url-encoded as %27 in the request URL. The WAF
+        # blocks ONLY the quote variant; every other request is clean.
+        if "id=1%27" in url or "id=1'" in url:
+            return blocked
+        return clean
+
+    async def go():
+        with patch("core.swarm_workers.vuln.sqli_probe.fetch", side_effect=fake):
+            run = get_worker_runner("vuln", "sqli_probe")
+            return await run(_agent("http://shop.example.com/item?id=1"))
+
+    findings = asyncio.run(go())
+    assert findings == [], f"FALSE POSITIVE: WAF block page flagged as sqli: {findings}"

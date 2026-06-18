@@ -131,4 +131,92 @@ def test_html_reflection_still_fires():
     high = [r for r in result if r["severity"] == "high"]
     assert high, f"expected high-severity reflected XSS, got {result}"
     assert high[0]["cwe"] == "CWE-79"
+
+
+# ---------------------------------------------------------------------------
+# (c) ROUND-2 FALSE POSITIVE — reflection that survives ONLY inside a CDATA
+# section of an XML feed is character data, not XSS. Must return [].
+# ---------------------------------------------------------------------------
+
+
+def test_cdata_only_reflection_in_xml_feed_not_flagged():
+    """XML search feed (Atom/RSS/OpenSearch) echoing the query in CDATA.
+
+    The full payload appears verbatim, but it lives inside <![CDATA[...]]>,
+    where '<' and '>' are inert character data — a browser/XML parser never
+    treats it as markup. The content-type is application/xml with nosniff.
+    The worker previously emitted a HIGH-severity xss_reflected finding;
+    after the fix it must return nothing.
+    """
+    def fake_xml(method, url, **kw):
+        payload = _echoed_payload(url)
+        body = (
+            '<?xml version="1.0"?>'
+            '<feed xmlns="http://www.w3.org/2005/Atom">'
+            f'<title type="text"><![CDATA[Search results for {payload}]]></title>'
+            '<entry><summary type="text">'
+            f'<![CDATA[No matches for {payload}]]>'
+            '</summary></entry>'
+            '</feed>'
+        )
+        headers = {
+            "content-type": "application/xml; charset=utf-8",
+            "x-content-type-options": "nosniff",
+        }
+        return HttpResp(200, headers, body, url)
+
+    async def af_xml(method, url, **kw):
+        return fake_xml(method, url, **kw)
+
+    xml = _run_against(af_xml)
+    assert xml == [], (
+        f"FALSE POSITIVE: CDATA-only reflection in XML feed flagged as XSS: {xml}"
+    )
+
+
+def test_xml_comment_only_reflection_not_flagged():
+    """A reflection surviving only inside an XML/HTML comment is not XSS."""
+    def fake_xml_comment(method, url, **kw):
+        payload = _echoed_payload(url)
+        body = (
+            '<?xml version="1.0"?>'
+            '<results>'
+            f'<!-- echoed query: {payload} -->'
+            '<count>0</count>'
+            '</results>'
+        )
+        headers = {"content-type": "text/xml; charset=utf-8"}
+        return HttpResp(200, headers, body, url)
+
+    async def af(method, url, **kw):
+        return fake_xml_comment(method, url, **kw)
+
+    res = _run_against(af)
+    assert res == [], (
+        f"FALSE POSITIVE: comment-only reflection in XML flagged as XSS: {res}"
+    )
+
+
+def test_xml_real_element_reflection_still_fires():
+    """An XML response that reflects the payload as actual markup (NOT in
+    CDATA/comment) is a genuine XSS sink and must still be detected."""
+    def fake_xml_live(method, url, **kw):
+        payload = _echoed_payload(url)
+        # Payload reflected as live markup inside the document body.
+        body = (
+            '<?xml version="1.0"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml">'
+            f'<body><h1>Results for {payload}</h1></body>'
+            '</html>'
+        )
+        headers = {"content-type": "application/xhtml+xml; charset=utf-8"}
+        return HttpResp(200, headers, body, url)
+
+    async def af(method, url, **kw):
+        return fake_xml_live(method, url, **kw)
+
+    res = _run_against(af)
+    high = [r for r in res if r["severity"] == "high"]
+    assert high, f"expected high-severity reflected XSS in live XML, got {res}"
+    assert high[0]["cwe"] == "CWE-79"
     assert high[0]["type"] == "xss_reflected"

@@ -47,6 +47,34 @@ _ERR_BANNERS = re.compile(
     r"valid MySQL result)",
     re.IGNORECASE,
 )
+# A single quote also routinely trips a WAF block or a non-SQL parser, neither
+# of which is a SQL injection. These statuses are the signature of a WAF/edge
+# block (or an explicit input filter), NOT a database error: a real SQL error
+# surfaces as a reflected 200 or a 500 — essentially never a 403/406/429. When
+# the quote response carries one of these statuses we refuse the error-banner
+# path (the page may quote SQL-Server prose in its block explanation).
+_WAF_BLOCK_STATUSES = frozenset({403, 406, 429})
+
+# Block-page / security-explainer markers. A quote response that contains any of
+# these ALONGSIDE a banner phrase is a WAF block page or a help/security page
+# that merely TALKS about SQL — not a DB error spilled from a broken query.
+_BLOCK_PAGE_MARKERS = re.compile(
+    r"(web application firewall|"
+    r"request was flagged|"
+    r"security policy|"
+    r"\bblocked\b|"
+    r"\bforbidden\b|"
+    r"access denied|"
+    r"reference id|"
+    r"ray id|"
+    r"cf-ray|"
+    r"akamai|"
+    r"imperva|"
+    r"incapsula|"
+    r"mod_security|"
+    r"\bwaf\b)",
+    re.IGNORECASE,
+)
 _DEFAULT_PARAMS = ["id", "user", "page", "q", "name", "search"]
 _ERR_PAYLOAD = "1'"
 _BENIGN_PAYLOAD = "1"
@@ -88,8 +116,31 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
     err_resp = await fetch("GET", err_url, timeout=timeout)
     if err_resp and _ERR_BANNERS.search(err_resp.body) and not base_has_banner:
         # The banner appeared ONLY under the quote payload, not the benign
-        # baseline → the injected quote broke a real SQL statement. A status
-        # change (e.g. 200 -> 500) further corroborates a server-side error.
+        # baseline. Before attributing it to a broken SQL statement, rule out the
+        # two realistic look-alikes a lone single quote also triggers:
+        #
+        #  (1) A WAF / edge block. A 403/406/429 to the quote is the signature of
+        #      a block, not a DB error — real SQL errors come back as a reflected
+        #      200 or a 500. The block page's explanatory copy often quotes
+        #      SQL-Server prose ("incorrect syntax near"), which is what trips the
+        #      banner. Refuse these statuses outright.
+        #  (2) A block / security-explainer page (any status) whose body carries
+        #      WAF markers ("web application firewall", "request was flagged",
+        #      "reference id", a Cloudflare/Akamai/Imperva ray-id, etc.) next to
+        #      the banner — again the WAF talking about SQL, not the DB erroring.
+        #
+        # Either way the request never reached app code or a database, so we do
+        # NOT emit a finding (the boolean-blind path below still runs and can flag
+        # genuine injection without depending on a quote-only error banner).
+        if err_resp.status in _WAF_BLOCK_STATUSES:
+            return findings
+        if _BLOCK_PAGE_MARKERS.search(err_resp.body):
+            return findings
+
+        # Banner appeared under the quote, status is consistent with a real DB
+        # error (reflected 200 or 5xx), and the page is not a block/security
+        # page -> the injected quote broke a real SQL statement. A status change
+        # (e.g. 200 -> 500) further corroborates a server-side error.
         status_shift = bool(base_resp) and base_resp.status != err_resp.status
         findings.append({
             "type": "sqli",
