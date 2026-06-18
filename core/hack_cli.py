@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Session Cookie header applied to every request.")
     p.add_argument("--auth-header", action="append", default=[], metavar="K:V",
                    help="Extra auth header 'Name: value' (repeatable).")
+    p.add_argument("--proxy", metavar="URL",
+                   help="Route every worker request through this proxy so you can "
+                        "watch/intercept the hunt in Burp Suite or ZAP. HTTPS is "
+                        "MITM-intercepted (cert verification is already off).")
+    p.add_argument("--burp", action="store_true",
+                   help="Shortcut for --proxy http://127.0.0.1:8080 (Burp default).")
 
     # --- Two-account BOLA / IDOR (specialist) -----------------------------
     # Identity A is the primary session above (--cookie / --auth-bearer /
@@ -224,6 +230,12 @@ def run_hack_cli(argv: list[str]) -> int:
     # identity-A markers are present — otherwise the worker self-gates off.
     bola_config = _build_bola_config(args, auth_headers)
 
+    # Optional intercepting proxy (Burp/ZAP) for the whole hunt.
+    proxy = args.proxy or ("http://127.0.0.1:8080" if args.burp else None)
+    if proxy and not args.quiet:
+        print(f"[i] routing all worker traffic through {proxy} "
+              "(watch it in Burp/ZAP)", file=sys.stderr)
+
     scope_reasoner: Optional[ScopeReasoner] = None
     # Resume path doesn't yet know `profile`, so always build the reasoner
     # if a scope file was provided
@@ -269,6 +281,7 @@ def run_hack_cli(argv: list[str]) -> int:
             hm.profile.time_budget_s = args.time * 60.0
         if args.workers is not None:
             hm.profile.max_concurrent = max(1, args.workers)
+        hm._proxy = proxy  # route the resumed hunt through Burp/ZAP too
         audit = hm.audit
     else:
         audit = AuditLogger.for_hunt(
@@ -284,6 +297,7 @@ def run_hack_cli(argv: list[str]) -> int:
             scope_reasoner=scope_reasoner,
             auth_headers=auth_headers or None,
             bola_config=bola_config,
+            proxy=proxy,
         )
     try:
         with bind_hunt_id(audit.hunt_id):

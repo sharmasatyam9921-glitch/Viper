@@ -80,6 +80,32 @@ def get_auth() -> dict[str, str]:
     return _auth_var.get()
 
 
+# --- Upstream proxy (Burp / ZAP) --------------------------------------------
+# A hunt may route every worker request through an intercepting proxy so the
+# operator can watch, log, and match-replace VIPER's traffic in Burp Suite (or
+# ZAP). Lives in a ContextVar (concurrent-hunt safe); default None → direct.
+# HTTPS through an intercepting proxy is a MITM, so the opener already disables
+# cert verification (see _build_opener) — that's required for Burp to see TLS.
+_proxy_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "viper_upstream_proxy", default=None)
+
+
+def set_proxy(url: Optional[str]) -> None:
+    """Route every worker request through `url` (e.g. 'http://127.0.0.1:8080').
+
+    None/empty clears it (direct connection).
+    """
+    _proxy_var.set(url.strip() if url and url.strip() else None)
+
+
+def clear_proxy() -> None:
+    _proxy_var.set(None)
+
+
+def get_proxy() -> Optional[str]:
+    return _proxy_var.get()
+
+
 @dataclass
 class HttpResp:
     status: int
@@ -92,11 +118,18 @@ class HttpResp:
         return 200 <= self.status < 400
 
 
-def _build_opener(*, follow_redirects: bool) -> urllib.request.OpenerDirector:
+def _build_opener(*, follow_redirects: bool,
+                  proxy: Optional[str] = None) -> urllib.request.OpenerDirector:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # bug-bounty / CTF targets often have bad certs
     handlers = [urllib.request.HTTPSHandler(context=ctx)]
+    if proxy:
+        # Route both schemes through the intercepting proxy (Burp/ZAP).
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    else:
+        # Empty mapping = bypass any environment proxy (predictable direct path).
+        handlers.append(urllib.request.ProxyHandler({}))
     if not follow_redirects:
         class _NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **kw): return None
@@ -112,12 +145,13 @@ def _fetch_sync(
     body: Optional[bytes] = None,
     timeout: float = 10.0,
     follow_redirects: bool = True,
+    proxy: Optional[str] = None,
 ) -> Optional[HttpResp]:
     if not url:
         return None
     h = {"User-Agent": "viper-swarm/1.0", **(headers or {})}
     req = urllib.request.Request(url, data=body, headers=h, method=method)
-    opener = _build_opener(follow_redirects=follow_redirects)
+    opener = _build_opener(follow_redirects=follow_redirects, proxy=proxy)
     try:
         with opener.open(req, timeout=timeout) as r:
             data = r.read(256 * 1024)
@@ -195,7 +229,7 @@ async def fetch(
     return await asyncio.to_thread(
         _fetch_sync, method, url,
         headers=headers, body=body, timeout=timeout,
-        follow_redirects=follow_redirects,
+        follow_redirects=follow_redirects, proxy=_proxy_var.get(),
     )
 
 

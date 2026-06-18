@@ -143,6 +143,7 @@ class HackMode:
         ] = None,
         auth_headers: Optional[dict] = None,
         bola_config: Optional[dict] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         """
         coordinator_factory: optional override for tests. Takes
@@ -165,6 +166,7 @@ class HackMode:
         self.approval_gate = approval_gate
         self._auth_headers = dict(auth_headers) if auth_headers else {}
         self._bola_config = dict(bola_config) if bola_config else None
+        self._proxy = proxy or None
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
         # Phase 5: a single FindingDedup is shared by every coordinator
@@ -508,6 +510,15 @@ class HackMode:
             return False
 
     def _install_scope_guard(self) -> None:
+        # Intercepting proxy (Burp/ZAP) applies to every worker request, in any
+        # scope mode — install it first so even early probes are visible in Burp.
+        if self._proxy:
+            try:
+                from .swarm_workers.vuln._http import set_proxy
+                set_proxy(self._proxy)
+                self.narrator.info(f"worker traffic routed through {self._proxy}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not install upstream proxy: %s", exc)
         # Session auth applies regardless of scope mode (lab/CTF too), so install
         # it before the scope early-return below.
         if self._auth_headers:
@@ -539,9 +550,12 @@ class HackMode:
 
     def _clear_scope_guard(self) -> None:
         try:
-            from .swarm_workers.vuln._http import clear_scope_guard, clear_auth
+            from .swarm_workers.vuln._http import (
+                clear_auth, clear_proxy, clear_scope_guard,
+            )
             clear_scope_guard()
             clear_auth()
+            clear_proxy()
         except Exception:
             pass
         try:

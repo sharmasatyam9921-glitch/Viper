@@ -42,7 +42,7 @@ def _capture_run(target, technique, responder):
     sent_headers: list[dict] = []
 
     def fake_sync(method, url, *, headers=None, body=None, timeout=10.0,
-                  follow_redirects=True):
+                  follow_redirects=True, proxy=None):
         sent_headers.append(dict(headers or {}))
         return responder(method, url, headers or {})
 

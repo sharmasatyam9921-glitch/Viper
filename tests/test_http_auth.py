@@ -18,7 +18,7 @@ def _capture():
     holder = {}
 
     def fake_sync(method, url, *, headers=None, body=None, timeout=10.0,
-                 follow_redirects=True):
+                 follow_redirects=True, proxy=None):
         holder["headers"] = headers or {}
         return HttpResp(200, {}, "ok", url)
 
