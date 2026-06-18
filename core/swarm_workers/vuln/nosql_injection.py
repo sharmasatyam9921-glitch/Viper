@@ -54,9 +54,21 @@ _OP_BODIES = [
 # Query-string payloads: bracketed operator + a boolean tautology.
 _QUERY_PAYLOADS = ["[$ne]=", "'||'1'=='1", '"||"1"=="1', "[$gt]="]
 
-# A JWT (header.payload.signature) or a JSON token field signals a live session.
+# A JWT (header.payload.signature) signals a live session unambiguously.
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
-_TOKEN_KEYS = re.compile(r'"(token|authentication|access_token|auth_token|jwt)"', re.I)
+# A token-shaped JSON field carrying a real VALUE — a non-empty token-like
+# string of >=16 chars. We deliberately require the VALUE, never a bare key
+# name: a benign validation/error envelope routinely contains keys like
+# "authentication" or "token" with a human-readable message ("failed", null,
+# or a short CSRF nonce), and a key alone proves no session was issued.
+_TOKEN_VALUE_RE = re.compile(
+    r'"(?:token|access_token|auth_token|jwt|id_token|session|sessionid|'
+    r'session_token|bearer)"\s*:\s*"([A-Za-z0-9._\-+/=]{16,})"',
+    re.I)
+# A Set-Cookie issuing a real session value is also a live-session signal.
+_SET_COOKIE_SESSION_RE = re.compile(
+    r'(?:^|;|,|\s)(?:session|sessionid|sid|connect\.sid|jwt|token|auth)[^=;]*='
+    r'[A-Za-z0-9._\-+/%]{16,}', re.I)
 
 
 def _origin(url: str) -> str:
@@ -65,9 +77,22 @@ def _origin(url: str) -> str:
 
 
 def _has_token(resp: Optional[HttpResp]) -> bool:
-    if not resp or resp.status != 200 or not resp.body:
+    """True only when a response carries a REAL session credential.
+
+    Accept a JWT anywhere in the body, a token-shaped JSON field whose VALUE is
+    a non-empty token-like string (>=16 chars), or a Set-Cookie issuing a real
+    session value. A bare key name (e.g. {"authentication": "failed"}) is NOT a
+    token — that's the validation-error envelope that produced the audited FP.
+    """
+    if not resp or resp.status != 200:
         return False
-    return bool(_JWT_RE.search(resp.body) or _TOKEN_KEYS.search(resp.body))
+    if resp.body:
+        if _JWT_RE.search(resp.body) or _TOKEN_VALUE_RE.search(resp.body):
+            return True
+    cookie = (resp.headers or {}).get("set-cookie", "") if resp.headers else ""
+    if cookie and _SET_COOKIE_SESSION_RE.search(cookie):
+        return True
+    return False
 
 
 async def _post_json(url: str, body_obj: dict, *, timeout: float) -> Optional[HttpResp]:

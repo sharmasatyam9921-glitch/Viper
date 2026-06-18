@@ -11,10 +11,18 @@ BOTH framing defences are absent / permissive:
 
 If X-Frame-Options is DENY/SAMEORIGIN, OR CSP carries a restrictive
 frame-ancestors directive, the page is protected and NO finding is
-emitted. The two corresponding FP guards are:
+emitted. The three corresponding FP guards are:
 
   - protected-by-XFO
   - protected-by-CSP-frame-ancestors
+  - protected-by-SameSite-cookie
+
+The SameSite guard mirrors the header guards: when the response sets a
+session/auth cookie carrying SameSite=Strict (or Lax), a cross-site
+iframe sends NO session cookie, so the framed page renders unauthenticated
+and no state-changing action can be triggered through the overlay. A
+clickjacking finding on such a page is a false positive, so it is
+suppressed.
 
 Severity is held at LOW: a missing X-Frame-Options header on its own is
 low-impact without a sensitive, state-changing action on the page. The
@@ -98,6 +106,80 @@ def _csp_protects(csp: str) -> bool:
     return True
 
 
+# Cookie names that indicate an authenticated/session context. A cross-site
+# iframe only fails to carry SUCH cookies — a SameSite guard on a non-session
+# cookie (e.g. a CSRF or locale cookie) does not neutralise clickjacking, so we
+# require the protected cookie to look session-bearing before suppressing.
+_SESSION_COOKIE_HINTS = (
+    "session", "sess", "sid", "auth", "token", "jwt", "login",
+    "csrftoken", "remember", "secure",
+)
+
+
+def _samesite_session_cookie_present(set_cookie: str) -> bool:
+    """True if any Set-Cookie sets a SESSION-LIKE cookie with SameSite=Strict|Lax.
+
+    `set_cookie` is the raw (possibly multi-cookie comma-joined) Set-Cookie
+    header value. Each cookie is `name=value; Attr; Attr=val; ...`. A cookie is
+    a clickjacking mitigation only when BOTH hold:
+
+      - its name looks session/auth-bearing (so a cross-site frame loses the
+        session and cannot drive a state-changing action), AND
+      - it carries SameSite=Strict or SameSite=Lax (Lax already blocks the
+        cookie on cross-site sub-resource/iframe loads).
+
+    SameSite=None (or absent → browser-default, increasingly Lax but explicitly
+    cross-site when None) does NOT protect.
+    """
+    if not set_cookie:
+        return False
+    # Splitting multiple cookies on comma is ambiguous (Expires dates contain
+    # commas), but we only inspect the cookie NAME (before the first '=') and
+    # the SameSite attribute, both comma-free, so a coarse split is safe enough.
+    # Inspect the whole header per-cookie by splitting on the cookie boundary
+    # heuristically: a new cookie starts after "; " is unlikely — cookies are
+    # joined with ", ". We scan the raw string for any session-name token that
+    # is followed (within its own cookie) by a SameSite=Strict/Lax attribute.
+    raw = set_cookie
+    # Normalise: split into candidate cookie segments. urllib joins duplicate
+    # Set-Cookie headers with ", "; within one cookie attributes use "; ".
+    # Re-join then re-split on ", " that precedes a `name=` token.
+    segments = [seg.strip() for seg in raw.split(",") if seg.strip()]
+    # Re-merge segments that are actually Expires continuations (a date like
+    # "Wed" / "09 Jun 2027 ...") — those start with a weekday or digit and have
+    # no '=' before the first ';'.
+    cookies: list[str] = []
+    for seg in segments:
+        head = seg.split(";", 1)[0]
+        if "=" in head and not head.strip().lower().startswith(
+            ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        ):
+            cookies.append(seg)
+        elif cookies:
+            cookies[-1] = cookies[-1] + ", " + seg
+        else:
+            cookies.append(seg)
+
+    for cookie in cookies:
+        attrs = [a.strip() for a in cookie.split(";")]
+        if not attrs:
+            continue
+        name = attrs[0].split("=", 1)[0].strip().lower()
+        if not name:
+            continue
+        if not any(hint in name for hint in _SESSION_COOKIE_HINTS):
+            continue
+        samesite = ""
+        for a in attrs[1:]:
+            if a.lower().startswith("samesite"):
+                _, _, val = a.partition("=")
+                samesite = val.strip().lower()
+                break
+        if samesite in ("strict", "lax"):
+            return True
+    return False
+
+
 async def run(agent: SwarmAgent) -> List[dict]:
     url = normalize_target_url(agent.target)
     if not url:
@@ -111,6 +193,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
 
     xfo = (resp.headers.get("x-frame-options") or "").strip()
     csp = (resp.headers.get("content-security-policy") or "").strip()
+    set_cookie = (resp.headers.get("set-cookie") or "").strip()
 
     # FP guard 1: protected-by-XFO
     if _xfo_protects(xfo):
@@ -120,6 +203,16 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # FP guard 2: protected-by-CSP-frame-ancestors
     if _csp_protects(csp):
         logger.debug("clickjacking: protected-by-CSP-frame-ancestors — no finding")
+        return findings
+
+    # FP guard 3: protected-by-SameSite-cookie
+    # If the page establishes its session/auth via a SameSite=Strict|Lax cookie,
+    # a cross-site iframe carries NO session, so the framed page is
+    # unauthenticated and no state-changing action can be reached through the
+    # clickjacking overlay. Suppress the finding.
+    if _samesite_session_cookie_present(set_cookie):
+        logger.debug(
+            "clickjacking: protected-by-SameSite-cookie — no finding")
         return findings
 
     # FRAMEABLE: both defences absent/permissive.

@@ -54,6 +54,23 @@ _JS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A js_location match is only a redirect if the assignment runs at page LOAD —
+# not inside a user-gesture handler (addEventListener("click",...)/onclick),
+# and not merely displayed inside an escaped code sample (<code>/<pre>). The
+# audit FP was a safe interstitial that reflected the URL into a click handler.
+# We look at the context immediately BEFORE the assignment for handler/gesture
+# markers; if any is present the assignment is gated behind interaction and is
+# NOT an open redirect.
+_JS_GESTURE_RE = re.compile(
+    r"""addeventlistener\s*\(\s*['"](?:click|mousedown|mouseup|submit|"""
+    r"""touchstart|touchend|keydown|keyup|keypress|change|focus|blur)['"]"""
+    r"""|on(?:click|mousedown|mouseup|submit|touchstart|touchend|keydown|"""
+    r"""keyup|keypress|change|focus|blur)\s*=""",
+    re.IGNORECASE,
+)
+# How many characters of preceding context to inspect for a gesture marker.
+_JS_CONTEXT_WINDOW = 200
+
 
 def _host_of(value: str) -> str:
     """Best-effort host extraction, tolerant of scheme-relative URLs."""
@@ -73,24 +90,53 @@ def _points_to_attacker(value: str) -> bool:
     return _host_of(value) == _ATTACKER_HOST
 
 
+def _js_assignment_is_load_time(body: str, match: "re.Match[str]") -> bool:
+    """True if a `location = "..."` match runs at page load, not on a gesture.
+
+    A browser only follows a `location.href = ...` automatically when it
+    executes as the script loads. If the assignment sits inside a click/submit
+    handler (``addEventListener("click", ...)`` / ``onclick=``) the user must
+    interact first — that is a SAFE interstitial pattern, not an open redirect.
+    We inspect the preceding context for a gesture marker; if one is present the
+    assignment is gated behind interaction and is not redirect evidence.
+    """
+    start = match.start()
+    ctx = body[max(0, start - _JS_CONTEXT_WINDOW):start]
+    return _JS_GESTURE_RE.search(ctx) is None
+
+
 def _detect(resp: HttpResp) -> Optional[tuple[str, str]]:
-    """Return (channel, evidence_value) if the response redirects to attacker."""
-    # 1) Location header (only meaningful on a 3xx, but check regardless of
-    #    code since some apps emit Location on 200 too).
-    loc = (resp.headers.get("location") or "").strip()
-    if loc and _points_to_attacker(loc):
-        return ("location_header", loc)
+    """Return (channel, evidence_value) if the response redirects to attacker.
+
+    A finding requires the response to actually REDIRECT to the attacker host —
+    not merely reflect the URL somewhere in the body. So each channel is gated
+    on real redirect behavior: a 3xx Location, an auto-firing meta-refresh, or a
+    load-time JS assignment (never a click-handler reflection).
+    """
+    # 1) Location header — only honor it on a real redirect status (3xx). A
+    #    200/4xx response carrying a Location is not a redirect the browser
+    #    follows, so a reflected/echoed Location on a 200 is not evidence.
+    if 300 <= resp.status < 400:
+        loc = (resp.headers.get("location") or "").strip()
+        if loc and _points_to_attacker(loc):
+            return ("location_header", loc)
 
     body = resp.body or ""
-    # 2) HTML meta-refresh
+    # 2) HTML meta-refresh — the browser follows this automatically (no user
+    #    interaction), so a matching directive to the attacker host is a real
+    #    redirect.
     m = _META_RE.search(body)
     if m and _points_to_attacker(m.group(1)):
         return ("meta_refresh", m.group(1).strip())
 
-    # 3) JS location assignment
-    j = _JS_RE.search(body)
-    if j and _points_to_attacker(j.group(1)):
-        return ("js_location", j.group(1).strip())
+    # 3) JS location assignment — only when it executes at LOAD time. Reject
+    #    assignments gated behind a user gesture (click/submit handlers): those
+    #    are the safe-interstitial pattern that drove the audit false positive.
+    for j in _JS_RE.finditer(body):
+        if not _points_to_attacker(j.group(1)):
+            continue
+        if _js_assignment_is_load_time(body, j):
+            return ("js_location", j.group(1).strip())
 
     return None
 

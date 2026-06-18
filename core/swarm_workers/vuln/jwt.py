@@ -91,20 +91,32 @@ async def run(agent: SwarmAgent) -> List[dict]:
     if not resp:
         return []
 
-    # Collect candidate tokens from cookies, Authorization, body
-    sources: list[str] = []
-    cookie = resp.headers.get("set-cookie") or ""
-    sources.append(cookie)
-    sources.append(resp.headers.get("authorization") or "")
-    sources.append(resp.body[:32 * 1024])
+    # Collect candidate tokens, tracking the SOURCE of each. A token that
+    # arrives via Set-Cookie or an Authorization response header is a real,
+    # application-issued credential — cracking its key means we can forge a
+    # session. A token that merely appears in the HTML body is almost always
+    # documentation/sample text (e.g. the jwt.io example token signed with
+    # the published "your-256-bit-secret"), NOT a live credential. We must
+    # never raise weak_key/alg_none from a body-scraped token, or every API
+    # docs page that prints a sample JWT becomes a false critical.
+    #
+    # `credential=True` → token came from a header the server set on this
+    # response (cookie / auth). Only those are eligible for the high/critical
+    # forgeability findings; body tokens are downgraded to info-only.
+    candidates: dict[str, bool] = {}  # token -> credential?
 
-    tokens = set()
-    for s in sources:
-        for m in _JWT_RE.finditer(s):
-            tokens.add(m.group(0))
+    def _collect(text: str, credential: bool) -> None:
+        for m in _JWT_RE.finditer(text):
+            tok = m.group(0)
+            # credential source wins if the same token shows up in both places
+            candidates[tok] = candidates.get(tok, False) or credential
+
+    _collect(resp.headers.get("set-cookie") or "", credential=True)
+    _collect(resp.headers.get("authorization") or "", credential=True)
+    _collect(resp.body[:32 * 1024], credential=False)
 
     findings: list[dict] = []
-    for tok in tokens:
+    for tok, credential in candidates.items():
         parsed = _parse_jwt(tok)
         if not parsed:
             continue
@@ -114,8 +126,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # Detection 1: alg=none indicates obvious misuse (no real server
         # should sign with none, but the *header* with alg=none + empty
         # sig is what we'd forge — finding it in a live token is rare
-        # but still informational)
-        if alg == "NONE":
+        # but still informational). Only flag for credential-sourced tokens;
+        # a body sample showing alg=none is just documentation.
+        if alg == "NONE" and credential:
             findings.append({
                 "type": "jwt_alg_none",
                 "vuln_type": "jwt:alg_none",
@@ -127,28 +140,55 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 "evidence": f"token header alg=none, payload={json.dumps(payload)[:200]}",
             })
 
-        # Detection 2: HS256 with weak key (cracked offline)
+        # Detection 2: HS256 with weak key (cracked offline). Only a
+        # critical when the token is a LIVE credential — cracking the key of a
+        # sample JWT printed in HTML proves nothing about the application
+        # (the docs author chose the example secret, the server never signs
+        # real sessions with it). For body-scraped tokens we still report the
+        # crack, but as info-only "sample JWT seen in body" so an operator can
+        # eyeball it without it polluting the critical queue.
         cracked = _try_weak_keys(tok)
         if cracked is not None:
-            findings.append({
-                "type": "jwt_weak_key",
-                "vuln_type": "jwt:weak_key",
-                "title": f"JWT HMAC key crackable: {cracked!r}",
-                "severity": "critical",
-                "url": url,
-                "cwe": "CWE-326",
-                "confidence": 0.99,
-                "evidence": (
-                    f"HMAC signature verified locally with key={cracked!r}. "
-                    f"alg={alg}. Token can be forged with arbitrary claims."
-                ),
-            })
+            if credential:
+                findings.append({
+                    "type": "jwt_weak_key",
+                    "vuln_type": "jwt:weak_key",
+                    "title": f"JWT HMAC key crackable: {cracked!r}",
+                    "severity": "critical",
+                    "url": url,
+                    "cwe": "CWE-326",
+                    "confidence": 0.99,
+                    "evidence": (
+                        f"HMAC signature verified locally with key={cracked!r}. "
+                        f"alg={alg}. Token can be forged with arbitrary claims. "
+                        "Source: server-set session credential (Set-Cookie / "
+                        "Authorization)."
+                    ),
+                })
+            else:
+                findings.append({
+                    "type": "jwt_weak_key_sample",
+                    "vuln_type": "jwt:weak_key_sample",
+                    "title": f"Sample JWT in page body cracks with {cracked!r}",
+                    "severity": "info",
+                    "url": url,
+                    "cwe": "CWE-326",
+                    "confidence": 0.4,
+                    "evidence": (
+                        f"A JWT found in the response body verified locally with "
+                        f"key={cracked!r} (alg={alg}). This token is NOT a "
+                        "server-issued credential (no Set-Cookie/Authorization "
+                        "source) and is almost certainly documentation/example "
+                        "text — verify manually before treating as forgeable."
+                    ),
+                })
 
         # Detection 3: alg field present + visible token (informational)
+        src = "credential" if credential else "body"
         findings.append({
             "type": "jwt_observed",
             "vuln_type": f"jwt:observed:{alg}",
-            "title": f"JWT observed (alg={alg})",
+            "title": f"JWT observed (alg={alg}, source={src})",
             "severity": "info",
             "url": url,
             "confidence": 1.0,

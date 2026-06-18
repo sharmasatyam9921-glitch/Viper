@@ -40,19 +40,24 @@ async def run(agent: SwarmAgent) -> List[dict]:
     if resp:
         aco = (resp.headers.get("access-control-allow-origin") or "").strip()
         acc = (resp.headers.get("access-control-allow-credentials") or "").strip().lower()
-        if aco == "*":
-            sev = "high" if acc == "true" else "low"
+        # A bare `ACAO: *` WITHOUT credentials is the INTENDED, safe config for
+        # public read-only APIs / CDNs: per the Fetch spec a wildcard origin is
+        # invalid together with credentials, so `*` alone exposes only data the
+        # server already chose to make publicly readable to any origin. That is
+        # not CWE-942 (which requires a credentialed or origin-trusting
+        # misconfig). Only flag the genuinely severe credentialed-wildcard case
+        # (`* ` + `Allow-Credentials: true`), which browsers reject but some
+        # non-browser clients honor.
+        if aco == "*" and acc == "true":
             findings.append({
                 "type": "cors_misconfig",
                 "vuln_type": "cors_wildcard",
-                "title": "CORS: Access-Control-Allow-Origin: *" + (
-                    " with Allow-Credentials: true" if acc == "true" else ""
-                ),
-                "severity": sev,
+                "title": "CORS: Access-Control-Allow-Origin: * with Allow-Credentials: true",
+                "severity": "high",
                 "url": url,
                 "cwe": "CWE-942",
-                "confidence": 0.95 if acc == "true" else 0.7,
-                "evidence": f"ACAO=*, ACAC={acc or 'unset'}",
+                "confidence": 0.95,
+                "evidence": "ACAO=*, ACAC=true",
             })
         elif aco == attacker:
             sev = "high" if acc == "true" else "medium"

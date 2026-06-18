@@ -50,9 +50,27 @@ _PRIVILEGED_FIELDS = [
     "privilege", "privileges", "superuser", "is_superuser",
 ]
 
-# Field tokens that, while privileged-sounding, are routinely surfaced in benign
-# UIs (a self profile legitimately shows your own role label etc.). Kept out of
-# the high-signal set so a single common field alone doesn't fire.
+# Genuinely sensitive fields: a normal user can NEVER legitimately control these
+# on their own record, so their presence in a self-profile is still a real lead.
+# (Subset of _PRIVILEGED_FIELDS, normalized flat — underscores removed.)
+_SENSITIVE_FLAT = {
+    "isadmin", "admin", "isstaff", "permissions", "permission",
+    "privilege", "privileges", "superuser", "issuperuser",
+    "balance", "credit", "wallet", "roles",
+}
+
+# Self-profile paths return the REQUESTER'S OWN record. Almost every authenticated
+# REST API surfaces your own `role` badge label, email-`verified` checkmark,
+# `account_type` and `created_at` here for the account page — read-only display
+# data, NOT mass-assignment evidence. On these paths we require a genuinely
+# sensitive field (see _SENSITIVE_FLAT) before flagging; the benign badge fields
+# alone are at best a lead, not a finding. Off these paths (collections of OTHER
+# users, registration schemas) the original behavior is unchanged.
+_SELF_PROFILE_PATHS = {
+    "/api/me", "/api/profile", "/api/account", "/profile", "/account",
+    "/rest/user/whoami",
+}
+
 _MAX_EVIDENCE = 240
 
 
@@ -105,6 +123,17 @@ def _privileged_keys(obj: dict) -> List[str]:
     return hits
 
 
+def _sensitive_keys(keys: List[str]) -> List[str]:
+    """Subset of `keys` that are genuinely sensitive (never user-controllable
+    on one's own record): isAdmin/permissions/balance/wallet/roles/..."""
+    out: list[str] = []
+    for key in keys:
+        flat = key.strip().lower().replace("-", "").replace("_", "")
+        if flat in _SENSITIVE_FLAT:
+            out.append(key)
+    return out
+
+
 def _looks_like_user_object(obj: dict) -> bool:
     """A user/account object has an identity-ish key alongside the privileged one.
 
@@ -137,6 +166,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
         if obj_url in seen_paths:
             continue
         seen_paths.add(obj_url)
+        is_self_profile = path in _SELF_PROFILE_PATHS
 
         resp: Optional[HttpResp] = await fetch(
             "GET", obj_url,
@@ -156,6 +186,15 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 continue
             priv = _privileged_keys(obj)
             if not priv:
+                continue
+
+            # Self-profile endpoints return the requester's OWN record. A bare
+            # `role` badge / `verified` checkmark / `account_type` there is
+            # read-only display data, not mass-assignment evidence (the audit
+            # FP). Only flag a self-profile when a genuinely sensitive field
+            # (isAdmin/permissions/balance/...) is present — that's a real
+            # over-binding lead. Off self-profile paths, signal is unchanged.
+            if is_self_profile and not _sensitive_keys(priv):
                 continue
 
             # De-dup the field list, preserve order, cap evidence size.

@@ -6,14 +6,22 @@ For file-ish query parameters (`file`, `path`, `page`, `template`, `doc`,
 both *nix and Windows targets, plus a PHP base64 wrapper, and confirms a hit
 only when the response body leaks a recognizable system-file signature:
 
-  * ``/etc/passwd``        — line shaped like ``root:x:0:0:`` / ``root:...:0:0:``
+  * ``/etc/passwd``        — the canonical root line ``root:...:0:0:``
   * ``C:\\windows\\win.ini`` — section headers ``[fonts]`` / ``[extensions]``
   * ``php://filter`` wrapper — a base64 blob that decodes to PHP source
 
-A benign control value (a normal-looking filename) is fetched first; if the
-control response already contains the signature it is treated as a baseline
-artifact and that parameter is skipped — keeps the false-positive rate low on
-pages that legitimately echo such strings.
+Two controls suppress false positives:
+  1. A benign control value (a normal-looking filename) is fetched first; if the
+     control response already contains the signature it is treated as a baseline
+     artifact and that parameter is skipped.
+  2. A keyword-only control — a bare TOPICAL keyword (e.g. ``etc`` / ``windows``)
+     with NO ``../`` traversal and NOT the exact filename. A real filesystem read
+     requires the traversal sequence to escape the docroot; a full-text doc
+     /search endpoint surfaces the same article for the topical keyword alone. If
+     the keyword-only probe leaks the same signature, the parameter is search
+     /docs-driven (not LFI) and is skipped — this kills the documentation/search
+     -echo false positive where the payload string ``etc/passwd`` merely matches
+     a tutorial that quotes a passwd line.
 
 READ-ONLY: every payload only *reads* (or attempts to read) a file. Nothing is
 written, deleted, or otherwise mutated.
@@ -68,8 +76,28 @@ except Exception:  # noqa: BLE001 — library is optional; never break the worke
 # A harmless, normal-looking control value used for the baseline request.
 _CONTROL = "index"
 
-# /etc/passwd root line: root:x:0:0:... or root:<anything>:0:0:...
-_PASSWD_RE = re.compile(r"root:.*?:0:0:")
+# Keyword-only "search controls": a bare topical keyword WITHOUT any traversal
+# and WITHOUT the exact filename token. A real filesystem read needs the `../`
+# sequence to escape the docroot; a full-text doc/search endpoint surfaces the
+# SAME tutorial/article for the topical keyword alone (e.g. a search for "etc"
+# finds the "Understanding /etc/passwd" article). So if one of these keyword-only
+# probes ALSO leaks the signature, the param is keyword-driven (search/docs), NOT
+# a path traversal, and the param is skipped. This is the decisive guard against
+# documentation/search endpoints that merely echo a passwd/win.ini snippet
+# matching the search term.
+#
+# We deliberately AVOID using the exact filename ("passwd", "win.ini") as a probe
+# so a target that happens to expose a file literally named that in CWD isn't
+# misclassified — a topical keyword ("etc", "windows") still triggers the corpus
+# match on a real search endpoint while never naming a real file.
+#   kind -> tuple of keyword-only probe values (no `../`, no exact filename).
+_KEYWORD_CONTROLS = {
+    "passwd": ("etc", "etcetera"),
+    "win.ini": ("windows", "win"),
+}
+
+# The canonical /etc/passwd root line: root:<pwd>:0:0:... (uid 0, gid 0).
+_PASSWD_ROOT_RE = re.compile(r"root:[^:\n]*:0:0:", re.I)
 # win.ini canonical section headers.
 _WININI_RE = re.compile(r"\[(?:fonts|extensions)\]", re.I)
 # base64 blob candidates (long, base64 alphabet) to test for decoded PHP.
@@ -96,19 +124,40 @@ def _decodes_to_php(body: str) -> Optional[str]:
     return None
 
 
+def _match_passwd(body: str) -> Optional[str]:
+    """Signature of a leaked /etc/passwd: the canonical root line (uid 0, gid 0).
+
+    The structural strength (one example line vs a whole enumerated file) is no
+    longer the FP discriminator — the keyword-only control in ``run`` is. Here we
+    just confirm a passwd-shaped root line is present and report it as evidence.
+    """
+    m = _PASSWD_ROOT_RE.search(body)
+    return m.group(0) if m else None
+
+
+def _match_winini(body: str) -> Optional[str]:
+    """Signature of a leaked win.ini: a canonical section header.
+
+    As with passwd, the FP discriminator is the keyword-only control, not the
+    header count.
+    """
+    m = _WININI_RE.search(body)
+    return m.group(0) if m else None
+
+
 def _match_signature(body: str) -> Optional[tuple[str, str]]:
     """Return (kind, evidence) if `body` leaks a known system-file signature."""
     if not body:
         return None
-    m = _PASSWD_RE.search(body)
-    if m:
-        return ("passwd", m.group(0))
-    m = _WININI_RE.search(body)
-    if m:
-        return ("win.ini", m.group(0))
+    passwd = _match_passwd(body)
+    if passwd:
+        return ("passwd", passwd)
+    winini = _match_winini(body)
+    if winini:
+        return ("win.ini", winini)
     php = _decodes_to_php(body)
     if php:
-        return ("php-wrapper", f"base64→PHP: {php}…")
+        return ("php-wrapper", f"base64->PHP: {php}...")
     return None
 
 
@@ -125,6 +174,34 @@ async def run(agent: SwarmAgent) -> List[dict]:
         return []
     timeout = min(agent.timeout_s, 10.0)
     findings: list[dict] = []
+
+    # Cache keyword-control verdicts per (param, kind) so we fetch each at most
+    # once even across multiple payloads of the same kind.
+    keyword_driven: dict[tuple[str, str], bool] = {}
+
+    async def _is_keyword_driven(param: str, kind: str) -> bool:
+        """True if the param leaks `kind`'s signature for the bare keyword alone.
+
+        Fetches the file keyword WITHOUT any `../` traversal. A real path
+        traversal needs the `../`; a full-text doc/search endpoint surfaces the
+        same article for the keyword by itself. If a keyword-only probe leaks the
+        SAME signature kind, the endpoint is search/docs-driven, not LFI.
+        """
+        cache_key = (param, kind)
+        if cache_key in keyword_driven:
+            return keyword_driven[cache_key]
+        verdict = False
+        for probe in _KEYWORD_CONTROLS.get(kind, ()):  # php-wrapper has none
+            probe_url = add_query(url, param, probe)
+            kresp = await fetch("GET", probe_url, timeout=timeout)
+            if kresp is None:
+                continue
+            khit = _match_signature(kresp.body)
+            if khit and khit[0] == kind:
+                verdict = True
+                break
+        keyword_driven[cache_key] = verdict
+        return verdict
 
     for param in _candidate_params(url):
         # Baseline with a benign control value: if the signature already shows
@@ -143,6 +220,12 @@ async def run(agent: SwarmAgent) -> List[dict]:
             if not hit:
                 continue
             kind, evidence = hit
+            # Decisive FP guard: if the bare file keyword (no `../`) also leaks
+            # this signature kind, the param is keyword/search-driven (a docs or
+            # full-text-search endpoint echoing a tutorial), NOT a real file
+            # read. Skip the entire param — it cannot be confirmed as LFI.
+            if await _is_keyword_driven(param, kind):
+                break
             findings.append({
                 "type": "lfi",
                 "vuln_type": f"lfi:{param}",
@@ -155,7 +238,8 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 "confidence": 0.9,
                 "evidence": (
                     f"{kind} signature leaked in response: {evidence!r} "
-                    f"(absent in control={_CONTROL!r})"
+                    f"(absent in control={_CONTROL!r}; keyword-only control "
+                    f"did not leak it, so not a search/docs echo)"
                 ),
             })
             # One confirmed leak per parameter is enough.

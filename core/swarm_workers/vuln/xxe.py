@@ -64,16 +64,50 @@ _CONTROL_PAYLOAD = '<?xml version="1.0"?><r>viper-xxe-control</r>'
 _PASSWD_RE = re.compile(r"root:.?:0:0:")
 
 # Parser leaked that it processed (or failed to process) the external entity.
+#
+# These are PARSER-EMITTED phrasings only. The bare tokens `DOCTYPE` and
+# `external entity` were deliberately removed: every XXE payload literally
+# carries `<!DOCTYPE ... ENTITY ...>`, so an endpoint that merely REFLECTS the
+# request body (a generic validation echo) would match them without ever having
+# parsed XML — the confirmed false positive. What survives is wording an actual
+# expat/lxml parser produces ("failed to load external entity", "undefined
+# entity", "entity ... not defined", "XMLParseError", "lxml.etree") that a raw
+# echo of our payload never contains.
 _ENTITY_ERR_RE = re.compile(
     r"failed to load external entity"
-    r"|external entity"
-    r"|DOCTYPE"
     r"|undefined entity"
     r"|entity .* not defined"
     r"|XMLParseError"
-    r"|lxml\.etree",
+    r"|XMLSyntaxError"
+    r"|lxml\.etree"
+    r"|not well[- ]formed"
+    r"|expat",
     re.I,
 )
+
+# Verbatim fragments of OUR OWN payload. If the response body contains these,
+# it is echoing what we sent (reflection), not a parser diagnostic. We blank
+# such echoes out before scanning for an entity-error signal so that a
+# reflecting endpoint can never trip the detector on our own DOCTYPE/ENTITY text.
+_PAYLOAD_ECHO_FRAGMENTS = (
+    _XXE_PAYLOAD,
+    '<!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]>',
+    'file:///etc/passwd',
+)
+
+
+def _strip_payload_echo(body: str) -> str:
+    """Remove verbatim echoes of the payload we sent.
+
+    A reflected request body is not evidence the server parsed XML — it is the
+    server handing our own bytes back. Stripping the echo means any remaining
+    entity-error match came from the parser itself, not our payload.
+    """
+    out = body
+    for frag in _PAYLOAD_ECHO_FRAGMENTS:
+        if frag in out:
+            out = out.replace(frag, " ")
+    return out
 
 
 def _origin(url: str) -> str:
@@ -106,7 +140,11 @@ def _accepts_xml(resp: Optional[HttpResp]) -> bool:
 
 
 def _entity_signal(resp: Optional[HttpResp]) -> bool:
-    return bool(resp and resp.body and _ENTITY_ERR_RE.search(resp.body))
+    if not (resp and resp.body):
+        return False
+    # Scan only the text the server ADDED, not a reflection of our payload.
+    cleaned = _strip_payload_echo(resp.body)
+    return bool(_ENTITY_ERR_RE.search(cleaned))
 
 
 async def run(agent: SwarmAgent) -> List[dict]:

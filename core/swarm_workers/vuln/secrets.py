@@ -61,9 +61,34 @@ _EXPOSURE_PATHS = [
 ]
 
 
-def _scan_body(body: str, url: str) -> List[dict]:
+# A response is HTML when the server says so OR the body opens with an HTML
+# preamble. A real .env / .git / .aws / actuator dump is NEVER served as HTML,
+# so an HTML body on an exposure path is a catch-all SPA index, not a leak.
+_HTML_OPENERS = ("<!doctype html", "<html")
+
+
+def _looks_like_html(resp) -> bool:
+    ctype = (resp.headers.get("content-type", "") if resp.headers else "").lower()
+    if "text/html" in ctype:
+        return True
+    head = resp.body.lstrip()[:14].lower()
+    return head.startswith(_HTML_OPENERS)
+
+
+# A dotenv file has at least one UPPERCASE KEY=value line (env-var convention),
+# unlike an HTML page whose only `=` come from attribute syntax (lang="en").
+_DOTENV_LINE = re.compile(r"(?m)^[A-Z][A-Z0-9_]*=\S")
+
+
+def _scan_body(body: str, url: str, *, is_html: bool = False) -> List[dict]:
     findings: list[dict] = []
     for name, pat, sev in _SECRET_PATTERNS:
+        # The password_assignment regex matches any `password="<8 chars>"`,
+        # which fires constantly on benign HTML (form markup, JS state, demo
+        # placeholders). Suppress it on HTML bodies — real credential leaks in
+        # HTML come from the high-confidence, shape-specific patterns above.
+        if is_html and name == "password_assignment":
+            continue
         for m in pat.finditer(body[:512 * 1024]):  # cap body scan
             secret = m.group(0)
             findings.append({
@@ -93,7 +118,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # 1. Main page
     resp = await fetch("GET", url, timeout=timeout)
     if resp:
-        findings.extend(_scan_body(resp.body, url))
+        findings.extend(_scan_body(resp.body, url, is_html=_looks_like_html(resp)))
 
     # 2. Common exposure paths — in parallel. These are ROOT-relative: the
     # worker may be dispatched against a discovered endpoint asset (e.g.
@@ -107,9 +132,18 @@ async def run(agent: SwarmAgent) -> List[dict]:
         r = await fetch("GET", full, timeout=timeout, follow_redirects=False)
         if not r or not r.ok or not r.body:
             return []
-        out: list[dict] = _scan_body(r.body, full)
-        # Even without secret hits, exposing /.env or /.git is itself a finding
-        if path in ("/.env",) and ("=" in r.body or "API_KEY" in r.body.upper()):
+        # A catch-all SPA / CDN re-serves its index.html (HTTP 200, text/html)
+        # for EVERY unmatched route, including /.env, /.git, /.aws, /actuator.
+        # That HTML is not an exposed secret file — none of these are ever
+        # served as HTML — so suppress the exposure signals (and the noisy
+        # HTML-only secret regexes) when the body looks like an HTML page.
+        is_html = _looks_like_html(r)
+        out: list[dict] = _scan_body(r.body, full, is_html=is_html)
+        # Even without secret hits, exposing /.env is itself a finding — but
+        # only when the body is an actual dotenv file: not HTML, with at least
+        # one UPPERCASE KEY=value line (a bare `=` is satisfied by any HTML
+        # attribute, the root of the catch-all-SPA false positive).
+        if path == "/.env" and not is_html and _DOTENV_LINE.search(r.body):
             out.append({
                 "type": "env_exposed",
                 "vuln_type": f"env_exposed:{path}",
