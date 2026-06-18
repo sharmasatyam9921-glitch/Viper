@@ -113,6 +113,7 @@ async def find_bola(
     timeout: float = 10.0,
     max_urls: int = 60,
     unauth_control: bool = True,
+    reachability: Optional[dict] = None,
 ) -> List[dict]:
     """Run two-account BOLA detection.
 
@@ -120,6 +121,11 @@ async def find_bola(
     attacker       : the second identity (user B) that should NOT see A's data.
     candidate_urls : object URLs observed for the owner (use id_bearing_urls()).
     fetch          : async (method, url, *, headers, timeout) -> resp|None.
+    reachability   : optional ``(role_name, url) -> status`` matrix (from a
+                     SessionContext). Used ONLY to skip provably-pointless probes
+                     (owner can't access her own object, or the attacker is
+                     already denied). It can never turn a non-finding into a
+                     finding — it only avoids wasted requests.
 
     Returns a list of confirmed-BOLA finding dicts (read-only, low-FP).
     """
@@ -132,6 +138,13 @@ async def find_bola(
     findings: list[dict] = []
     tested = 0
     for url in id_bearing_urls(candidate_urls)[:max_urls]:
+        if reachability is not None:
+            o_st = reachability.get((owner.name, url))
+            a_st = reachability.get((attacker.name, url))
+            if o_st is not None and not (200 <= o_st < 300):
+                continue   # owner cannot reach her own object -> nothing to leak
+            if a_st in (401, 403):
+                continue   # attacker already denied here -> cannot be a leak
         tested += 1
         # 1. Owner must actually own private data here (2xx + owner's marker).
         r_owner = await fetch("GET", url, headers=owner.headers, timeout=timeout)

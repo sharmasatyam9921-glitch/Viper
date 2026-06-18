@@ -25,6 +25,7 @@ phases can plug them in without rewriting the orchestrator.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ from .hack_profile import (
 )
 from .narrator import Narrator
 from .scope_reasoner import ScopeReasoner
+from .session_context import SessionContext
 from .world_model import WorldModel
 from .swarm_coordinator import (
     CoordinatorResult,
@@ -95,6 +97,9 @@ class HackResult:
     elapsed_s: float = 0.0
     stop_reason: str = ""
     timed_out: bool = False
+    # Compact, secret-free summary of the per-hunt SessionContext (roles seen,
+    # endpoints observed, reachability entries). Set at teardown.
+    session_context: dict = field(default_factory=dict)
 
     @property
     def findings_count(self) -> int:
@@ -123,6 +128,7 @@ class HackResult:
             "findings_count": self.findings_count,
             "submittable_count": self.submittable_count,
             "surface_count": self.surface_count,
+            "session_context": self.session_context,
             # Normalized findings list so consumers (reports, the benchmark
             # scorer) can read individual findings, not just the count.
             "findings": [
@@ -202,9 +208,28 @@ class HackMode:
         self.scope_reasoner = scope_reasoner
         self.approval_gate = approval_gate
         self._auth_headers = dict(auth_headers) if auth_headers else {}
-        self._bola_config = dict(bola_config) if bola_config else None
+        # Deep copy so a coordinator/worker mutating an inner dict (headers/
+        # markers) cannot reach back into the caller's config or the seeded roles.
+        self._bola_config = copy.deepcopy(bola_config) if bola_config else None
         self._proxy = proxy or None
         self._validate = validate
+        # Per-hunt shared session context: holds the authenticated identities
+        # under test and the (role, url) -> status reachability matrix that
+        # captured traffic populates. Seeded from the supplied identities so the
+        # BOLA bridge is ready even before any browser/HAR capture runs.
+        self._session_context = SessionContext(
+            hunt_id=getattr(audit, "hunt_id", "") or "")
+        if self._auth_headers:
+            self._session_context.add_role("session", self._auth_headers, [])
+        if self._bola_config:
+            self._session_context.add_role(
+                self._bola_config.get("owner_name", "A"),
+                self._bola_config.get("owner_headers"),
+                self._bola_config.get("owner_markers"))
+            self._session_context.add_role(
+                self._bola_config.get("attacker_name", "B"),
+                self._bola_config.get("attacker_headers"),
+                self._bola_config.get("attacker_markers"))
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
         # Phase 5: a single FindingDedup is shared by every coordinator
@@ -459,6 +484,12 @@ class HackMode:
         # Independent validation gate BEFORE scope/auth/proxy are torn down, so
         # re-tests stay in scope and authenticated. Tags validated/submittable.
         await self._run_validation_gate(result)
+        # Capture the compact, secret-free session-context summary AFTER the gate
+        # so it reflects the final state of the hunt.
+        try:
+            result.session_context = self._session_context.summary()
+        except Exception:
+            pass
         self._clear_scope_guard()
         try:
             await self.bus.stop()
@@ -824,11 +855,19 @@ class HackMode:
             "scope_reasoner": self.scope_reasoner,
             # Empty techniques list → use all registered for the phase
             "techniques": techniques or None,
+            # Shared per-hunt session/reachability state (additive; workers that
+            # don't read it are unaffected).
+            "session_context": self._session_context,
         }
         # Two-account BOLA/IDOR specialist config — only the vuln phase's
-        # bola_multi worker consumes it; harmless on other phases.
+        # bola_multi worker consumes it; harmless on other phases. The captured
+        # reachability matrix lets find_bola skip provably-pointless probes.
         if self._bola_config and phase == "vuln":
-            payload["bola"] = self._bola_config
+            bola = dict(self._bola_config)
+            reach = self._session_context.reachability_matrix()
+            if reach:
+                bola["reachability"] = reach
+            payload["bola"] = bola
 
         # Chain overrides: scope this phase to explicit assets/findings.
         if assets is not None:

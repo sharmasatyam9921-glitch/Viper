@@ -62,7 +62,8 @@ async def run(agent: SwarmAgent) -> List[dict]:
 
     return await find_bola(owner, attacker, [url], fetch=_fetch,
                            timeout=timeout,
-                           unauth_control=cfg.get("unauth_control", True))
+                           unauth_control=cfg.get("unauth_control", True),
+                           reachability=cfg.get("reachability"))
 
 
 register_worker("vuln", TECHNIQUE, run)
