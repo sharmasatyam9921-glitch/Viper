@@ -214,6 +214,16 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # See the constants block: each sleep probe is differenced against a
         # benign control taken IMMEDIATELY before it, so a slow/degrading base
         # cancels out. delta = probe - adjacent_control must be ~the sleep.
+        #
+        # Known, accepted limits of timing-only detection (documented, not bugs):
+        #  * It cannot distinguish a real shell `sleep N` from a server that
+        #    deliberately simulates that latency (an anti-automation tarpit /
+        #    honeypot). This is structural — hence confidence stays 0.7 and the
+        #    evidence flags it as timing-only for the triager to corroborate.
+        #  * A server vulnerable via only ONE shell separator AND with heavy
+        #    request-to-request base jitter (>=~0.5s on a 6s sleep) can be missed
+        #    (false negative). Raise _SLEEP_SAMPLES (median of 5-7) to recover
+        #    recall there, at the cost of more requests per probe.
         blind_budget = agent.timeout_s if agent.timeout_s else (_SLEEP_LONG + _BLIND_HEADROOM)
         if blind_budget < _SLEEP_LONG + 1.5:
             continue  # too little budget to observe a LONG sleep even on a fast base
@@ -295,7 +305,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
                     f"+{d_long - d_short:.2f}s) and a bare-number control with no "
                     "shell metacharacter did NOT reproduce it — consistent with "
                     "`sleep` in a shell, not slow/degrading latency or a "
-                    "number-parsing endpoint."
+                    "number-parsing endpoint. Timing-only signal (confidence 0.7): "
+                    "corroborate before reporting — a server that deliberately "
+                    "simulates sleep latency (anti-automation tarpit) would also match."
                 ),
             })
             blind_hit = True
