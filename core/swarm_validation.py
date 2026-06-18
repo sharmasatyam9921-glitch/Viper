@@ -130,8 +130,14 @@ async def _recheck_xss(finding, fetch, timeout):
     # Remove non-executing regions (textarea/title/script/style/comment); a tag
     # that only survives inside one of those is inert RCDATA/RAWTEXT, not XSS.
     live = _INERT_REGION.sub("", body)
-    if f"<{tag}>" in live and f"&lt;{tag}&gt;" not in body:
-        return True, 0.8, "injected tag reflected as LIVE markup (not encoded, not in an inert region)"
+    idx = live.find(f"<{tag}>")
+    if idx != -1 and f"&lt;{tag}&gt;" not in body:
+        # It is a LIVE element only if it lands in element CONTENT, not inside an
+        # open tag's attribute value (value="<tag>" — the < is inert text there).
+        before = live[:idx]
+        if before.rfind("<") <= before.rfind(">"):
+            return True, 0.8, "injected tag reflected as a LIVE element (element content, not an attribute)"
+        return False, 0.2, "reflection lands inside an HTML attribute value — inert, not exploitable"
     return False, 0.2, "reflection encoded or only inside a non-executing context — not exploitable"
 
 
@@ -186,10 +192,17 @@ async def _recheck_ssti(finding, fetch, timeout):
         # the ${} delimiters, so it fails the bare test.
         if prod in lb and prod not in cb and expr not in lb and prod not in bb:
             confirmed += 1
-    if confirmed >= 2:
-        return True, 0.8, ("delimited expressions evaluated but bare arithmetic did "
-                           "not — a template engine, not a calculator")
-    return False, 0.2, "fresh operands not template-evaluated (or a plain math evaluator)"
+    if confirmed < 2:
+        return False, 0.2, "fresh operands not template-evaluated (or a plain math evaluator)"
+    # A delimiter-gated CALCULATOR (a "formula field") also passes the numeric
+    # test. Require a STRING operation only a real template engine evaluates.
+    for tmpl in ('${"VIP"+"ER"}', '{{"VIP"~"ER"}}', '${"VIP".concat("ER")}'):
+        rs = await fetch("GET", add_query(url, param, tmpl), timeout=timeout)
+        if rs is not None and "VIPER" in _body(rs) and tmpl not in _body(rs):
+            return True, 0.8, ("arithmetic AND string concatenation evaluated "
+                               "(consumed) — a template engine, not a calculator")
+    return False, 0.3, ("arithmetic evaluated but string ops did not — a "
+                        "delimiter-gated calculator, not a template engine (lead)")
 
 
 async def _recheck_secrets(finding, fetch, timeout):
@@ -389,9 +402,14 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         body = getattr(r, "body", "") or ""
         if "text/html" in _ctype(r):
             return False, 0.2, "HTML body — not a raw env file"
-        if _ENV_LINE.search(body) and _SECRET_SHAPE.search(body):
-            return True, 0.85, "env file with KEY=value lines AND a real credential value"
-        return False, 0.2, "env-shaped but no live secret value — likely a sample/placeholder (lead)"
+        m = _SECRET_SHAPE.search(body)
+        if _ENV_LINE.search(body) and m:
+            ctx = body[max(0, m.start() - 12):m.end() + 12]
+            # Same placeholder guard the secrets branch uses — reject AWS's canonical
+            # AKIA…EXAMPLE / YOUR_KEY / <token> documented values.
+            if not _SECRET_PLACEHOLDER.search(m.group(0)) and not _SECRET_PLACEHOLDER.search(ctx):
+                return True, 0.85, "env file with KEY=value lines AND a real (non-placeholder) credential"
+        return False, 0.2, "env-shaped but no live secret value — placeholder/sample (lead)"
 
     # Exposed .git
     if head == "git_exposed":

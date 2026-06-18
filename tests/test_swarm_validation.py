@@ -187,9 +187,13 @@ def test_sqli_corpus_search_is_lead():
 def _ssti_engine(m, url, h):
     import re as _re2
     v = _injected(url)
-    mm = _re2.search(r"\$\{(\d+)\*(\d+)\}", v)   # ONLY evaluate inside ${...}
-    if mm:
-        return HttpResp(200, {}, f"Result: {int(mm.group(1))*int(mm.group(2))}", url)
+    am = _re2.search(r"\$\{(\d+)\*(\d+)\}", v)   # arithmetic ONLY inside ${...}
+    if am:
+        return HttpResp(200, {}, f"Result: {int(am.group(1))*int(am.group(2))}", url)
+    if any(op in v for op in ('"+"', '"~"', '.concat(')):   # a real engine evals strings
+        words = _re2.findall(r'"(\w+)"', v)
+        if len(words) >= 2:
+            return HttpResp(200, {}, "Result: " + "".join(words), url)
     return HttpResp(200, {}, f"Result: {v}", url)
 
 
@@ -288,6 +292,42 @@ def test_access_control_forbidden_is_lead():
     f = _run1({"vuln_type": "access_control:missing_authorization",
                "url": "http://t/api/Users"}, resp)
     assert not f["submittable"]
+
+
+def test_xss_attribute_context_is_lead():
+    # GATE-FP regression: reflection only inside a quoted attribute value (the < is
+    # inert text there — the secure pattern).
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        f'<input type="text" name="q" value="{_injected(url)}">', url)
+    f = _run1({"vuln_type": "xss_text:q", "url": "http://t/s?q=x", "parameter": "q"}, resp)
+    assert not f["submittable"]
+
+
+def test_ssti_delimiter_gated_calculator_is_lead():
+    # GATE-FP regression: a "formula field" evaluates arithmetic ONLY inside ${},
+    # but is not a template engine (no string ops, no object access).
+    def resp(m, url, h):
+        import re as _re2
+        v = _injected(url)
+        am = _re2.search(r"\$\{(\d+)\*(\d+)\}", v)
+        if am:
+            return HttpResp(200, {}, f"= {int(am.group(1))*int(am.group(2))}", url)
+        return HttpResp(200, {}, f"= {v}", url)   # bare arithmetic AND strings echoed
+    f = _run1({"vuln_type": "ssti", "url": "http://t/calc?q=1", "parameter": "q"}, resp)
+    assert not f["submittable"]
+
+
+def test_env_example_key_value_is_lead():
+    # GATE-FP regression: a live /.env whose only credential is AWS's canonical
+    # documentation EXAMPLE key.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/plain"},
+                        "APP_ENV=production\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\n", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "env_exposed:/.env", "url": "http://t/.env"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
 
 
 def test_sqli_dsl_parser_is_lead():
