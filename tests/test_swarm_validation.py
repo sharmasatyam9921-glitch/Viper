@@ -217,6 +217,47 @@ def test_access_control_forbidden_is_lead():
     assert not f["submittable"]  # 403 anonymously -> access control works
 
 
+_A_MARKER = "alice@victim.io"
+
+
+def _bola_cfg():
+    return {"owner_headers": {"Cookie": "s=alice"}, "owner_markers": [_A_MARKER],
+            "attacker_headers": {"Cookie": "s=bob"}}
+
+
+def test_single_session_idor_without_two_sessions_is_lead():
+    def resp(m, url, h):
+        return HttpResp(200, {}, "{}", url)
+    f = _run1({"vuln_type": "idor:user", "url": "http://t/api/users/5"}, resp)
+    assert not f["submittable"]
+    assert "two sessions" in f["validation_reason"]
+
+
+def test_single_session_idor_escalates_to_bola_submittable():
+    def resp(m, url, h):
+        ck = (h or {}).get("Cookie", "")
+        if "s=alice" in ck or "s=bob" in ck:          # both authed see A's object
+            return HttpResp(200, {}, '{"owner":"%s"}' % _A_MARKER, url)
+        return HttpResp(401, {}, "", url)             # anon control -> not public
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "idor:user", "url": "http://t/api/users/5"}],
+        fetch=_fetch_returning(resp), bola_config=_bola_cfg()))
+    assert out[0]["submittable"] and out[0]["validation_confidence"] >= 0.9
+    assert "two-account BOLA" in out[0]["validation_reason"]
+
+
+def test_single_session_idor_proper_authz_stays_lead():
+    def resp(m, url, h):
+        ck = (h or {}).get("Cookie", "")
+        if "s=alice" in ck:
+            return HttpResp(200, {}, '{"owner":"%s"}' % _A_MARKER, url)
+        return HttpResp(403, {}, "", url)             # B forbidden -> no cross-user read
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "idor:user", "url": "http://t/api/users/5"}],
+        fetch=_fetch_returning(resp), bola_config=_bola_cfg()))
+    assert not out[0]["submittable"]
+
+
 def test_cmdi_not_reproduced_is_lead():
     # cmdi re-test re-runs the hardened worker against the finding URL (its own
     # fetch, not this fake). An unreachable / non-injectable target won't

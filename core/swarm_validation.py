@@ -211,7 +211,40 @@ async def _recheck_lfi(finding, fetch, timeout):
     return True, 0.75, "/etc/passwd signature under traversal, absent for benign control"
 
 
-async def _reconfirm(finding: dict, fetch, timeout: float) -> Tuple[bool, float, str]:
+async def _recheck_idor(finding, fetch, timeout, bola_config):
+    """Single-session IDOR is only a CANDIDATE (two accounts are needed to prove a
+    cross-user read). If the operator supplied two sessions (bola_config), escalate
+    to the two-account BOLA test: replay the candidate object URL as identity B and
+    confirm it leaks identity A's private marker. Otherwise it stays a lead."""
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    cfg = bola_config or {}
+    if not (cfg.get("owner_headers") and cfg.get("attacker_headers")
+            and cfg.get("owner_markers")):
+        return False, 0.0, ("single-session IDOR candidate — supply two sessions "
+                            "(--cookie/--cookie-b + --owner-marker) to auto-confirm")
+    from core.specialist.bola_engine import Session, find_bola
+    owner = Session(cfg.get("owner_name", "A"), cfg["owner_headers"], cfg["owner_markers"])
+    attacker = Session(cfg.get("attacker_name", "B"), cfg["attacker_headers"],
+                       cfg.get("attacker_markers", []))
+
+    async def _f(method, u, *, headers=None, timeout=timeout):
+        return await fetch(method, u, headers=headers, timeout=timeout,
+                           use_session_auth=False)
+    try:
+        fs = await find_bola(owner, attacker, [url], fetch=_f, timeout=timeout,
+                             unauth_control=cfg.get("unauth_control", True))
+    except Exception as e:  # noqa: BLE001
+        return False, 0.0, f"BOLA escalation error: {e}"
+    if fs:
+        return True, 0.9, ("escalated to two-account BOLA: identity B read identity "
+                           "A's private object (CWE-639)")
+    return False, 0.2, "two-account replay did not confirm cross-user access"
+
+
+async def _reconfirm(finding: dict, fetch, timeout: float,
+                     bola_config=None) -> Tuple[bool, float, str]:
     """Independently re-test a swarm finding by its OWN shape (fresh request).
 
     Confirms the config/exposure classes an unauthenticated hunt actually finds,
@@ -285,6 +318,10 @@ async def _reconfirm(finding: dict, fetch, timeout: float) -> Tuple[bool, float,
     # owner+attacker+anon probes — that IS the independent confirmation.
     if ":bola:" in vt_full or head == "bola":
         return True, 0.85, "two-account cross-user object read confirmed by the BOLA engine"
+    # Single-session IDOR candidate: auto-escalate to the two-account BOLA test
+    # when two sessions are configured; otherwise stay a lead.
+    if head == "idor":
+        return await _recheck_idor(finding, fetch, timeout, bola_config)
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)
@@ -365,6 +402,7 @@ async def validate_findings(
     timeout: float = 10.0,
     validator=None,
     fetch=None,
+    bola_config=None,
 ) -> List[dict]:
     """Annotate each finding with an INDEPENDENT re-confirmation verdict.
 
@@ -396,7 +434,7 @@ async def validate_findings(
                 probe["attack"] = norm
                 ok, conf, reason = await validator.validate(probe, target)
             else:
-                ok, conf, reason = await _reconfirm(g, fetch, timeout)
+                ok, conf, reason = await _reconfirm(g, fetch, timeout, bola_config)
         except Exception as e:  # noqa: BLE001 — fail closed on any error
             ok, conf, reason = False, 0.0, f"validation error: {e}"
         g["validated"] = bool(ok)

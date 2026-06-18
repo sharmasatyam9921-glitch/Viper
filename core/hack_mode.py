@@ -516,7 +516,8 @@ class HackMode:
         try:
             from core.swarm_validation import partition, validate_findings
             annotated = await validate_findings(
-                result.findings, default_target=self.target)
+                result.findings, default_target=self.target,
+                bola_config=self._bola_config)
             result.findings[:] = annotated
             sub, leads = partition(annotated)
             self.audit.event(
