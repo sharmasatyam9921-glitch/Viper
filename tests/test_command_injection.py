@@ -95,26 +95,40 @@ def _injected_sleep_seconds(url: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
-# Scaled-down constants so the tests run fast but still exercise the real
-# paired-control differential. Ratios mirror production (SHORT=0.3, LONG=0.7,
-# ABS_TOL=0.08, DELTA_HI=0.35, SCALE_TOL=0.12). The detector now differences each
-# sleep probe against a benign control taken immediately before it, so the fakes
-# model latency as (base + injected_sleep) for sleep probes and base for controls.
-def _patch_fast_timing():
-    return [
-        patch("core.swarm_workers.vuln.command_injection._SLEEP_SHORT", 0.3),
-        patch("core.swarm_workers.vuln.command_injection._SLEEP_LONG", 0.7),
-        patch("core.swarm_workers.vuln.command_injection._ABS_TOL", 0.08),
-        patch("core.swarm_workers.vuln.command_injection._DELTA_HI", 0.35),
-        patch("core.swarm_workers.vuln.command_injection._SCALE_TOL", 0.12),
-        patch("core.swarm_workers.vuln.command_injection._BLIND_HEADROOM", 2.0),
-    ]
+def _trailing_number(url: str) -> float:
+    """The last number embedded ANYWHERE in the injected value (no `sleep` needed).
+    Models a number-parsing endpoint (?limit/?count/?page) whose latency tracks an
+    integer in the query — including the bare-number control 'viperctl6'."""
+    m = _re.findall(r"[\d.]+", _unquote_plus(url))
+    return float(m[-1]) if m else 0.0
 
 
-def _run_fast(fake, agent=None):
+# Virtual-clock harness: instead of REAL sleeps (which made median-of-N tests take
+# minutes), each test supplies a latency_fn(url, state)->seconds. A fake fetch
+# advances a virtual clock by that latency, and command_injection._clock is patched
+# to read it — so the worker measures the exact simulated time with ZERO real
+# sleeping, and asyncio's own clock is untouched. Tests run at PRODUCTION constants
+# (SHORT=2, LONG=6, _SLEEP_SAMPLES=3), exercising the real thresholds, instantly.
+class _VClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def now(self):
+        return self.t
+
+
+def _run_vclock(latency_fn, agent=None):
+    clock = _VClock()
+    state = {}
+
+    async def fake(method, url, **kw):
+        clock.t += max(0.0, latency_fn(url, state))  # advance virtual time
+        return _resp(body="done")
+
     async def go():
-        patches = _patch_fast_timing() + [
-            patch("core.swarm_workers.vuln.command_injection.fetch", side_effect=fake)
+        patches = [
+            patch("core.swarm_workers.vuln.command_injection._clock", clock.now),
+            patch("core.swarm_workers.vuln.command_injection.fetch", side_effect=fake),
         ]
         for p in patches:
             p.start()
@@ -126,18 +140,13 @@ def _run_fast(fake, agent=None):
     return asyncio.run(go())
 
 
-_BASE = 0.02  # simulated base latency for the fakes
+_BASE = 0.02  # simulated base latency
 
 
 def test_time_based_blind_fallback_scaling_true_positive():
     """A server that actually sleeps the injected duration: each sleep probe adds
     ~N over its adjacent control and the deltas scale -> blind finding."""
-    async def fake(method, url, **kw):
-        n = _injected_sleep_seconds(url)
-        await asyncio.sleep(_BASE + n)  # control(n=0) -> base; sleep probe -> base+N
-        return _resp(body="done")
-
-    findings = _run_fast(fake)
+    findings = _run_vclock(lambda url, st: _BASE + _injected_sleep_seconds(url))
     assert len(findings) == 1
     f = findings[0]
     assert f["vuln_type"].startswith("rce:cmdi:")
@@ -149,88 +158,82 @@ def test_time_based_blind_fallback_scaling_true_positive():
 def test_time_based_uniform_slow_not_flagged():
     """A uniformly slow / laggy server (every request ~constant, sleep ignored).
     The control taken moments before is just as slow -> delta ~0 -> not flagged."""
-    async def fake(method, url, **kw):
-        await asyncio.sleep(0.5)  # constant, regardless of the injected command
-        return _resp(body="done")
-
-    findings = _run_fast(fake)
+    findings = _run_vclock(lambda url, st: 5.0)  # constant, command ignored
     assert findings == [], f"uniformly-slow latency wrongly flagged as RCE: {findings}"
 
 
 def test_time_based_monotonic_degradation_not_flagged():
     """Regression (HIGH-sev FP found by adversarial review): a server whose latency
-    GROWS over time (GC pressure / memory leak under scan load), ignoring the
-    command. Each successive probe is slower, which defeated a floor+scaling+repeat
-    check. The paired control (taken moments before each probe) cancels the drift:
-    delta ~= one request-gap, far below the commanded sleep -> not flagged."""
-    calls = {"n": 0}
-
-    async def fake(method, url, **kw):
-        calls["n"] += 1
-        await asyncio.sleep(0.04 * calls["n"])  # each request slower than the last
-        return _resp(body="done")
-
-    findings = _run_fast(fake)
+    GROWS with each request (GC pressure / memory leak under scan load), ignoring
+    the command. The paired control (taken moments before each probe) cancels the
+    drift: delta ~= one request-gap, far below the commanded sleep -> not flagged."""
+    def lat(url, st):
+        st["n"] = st.get("n", 0) + 1
+        return 0.5 * st["n"]  # each request slower than the last
+    findings = _run_vclock(lat)
     assert findings == [], f"monotonic latency drift wrongly flagged as RCE: {findings}"
 
 
 def test_time_based_probe_spike_not_flagged():
     """A sleep probe that spikes FAR beyond the commanded duration is a latency
-    spike, not a sleep — the upper bound (delta <= N + _DELTA_HI) rejects it."""
-    async def fake(method, url, **kw):
-        n = _injected_sleep_seconds(url)
-        await asyncio.sleep(_BASE + (n + 1.0 if n else 0.0))  # +1.0s over commanded
-        return _resp(body="done")
-
-    findings = _run_fast(fake)
+    spike, not a sleep — the short upper bound (delta <= N + _DELTA_HI) rejects it."""
+    findings = _run_vclock(
+        lambda url, st: _BASE + (_injected_sleep_seconds(url) + 5.0
+                                 if _injected_sleep_seconds(url) else 0.0))
     assert findings == [], f"over-long spike wrongly flagged as RCE: {findings}"
 
 
 def test_time_based_subsleep_not_flagged():
     """Responses come back FASTER than commanded (server never actually slept):
     delta < N -> rejected by the lower bound of the paired differential."""
-    async def fake(method, url, **kw):
-        n = _injected_sleep_seconds(url)
-        await asyncio.sleep(_BASE + n * 0.4)  # only 40% of the commanded sleep
-        return _resp(body="done")
-
-    findings = _run_fast(fake)
+    findings = _run_vclock(lambda url, st: _BASE + _injected_sleep_seconds(url) * 0.4)
     assert findings == [], f"sub-sleep latency wrongly flagged as RCE: {findings}"
 
 
-def test_time_based_reproduction_guard():
-    """First short+long pair passes, but the reproduction (repeat long) probe
-    collapses — a coincidental spike that won't repeat must not flag."""
-    long_seen = {"n": 0}
-
-    async def fake(method, url, **kw):
+def test_time_based_inconsistent_long_not_flagged():
+    """The long delay must be CONSISTENT: if a MAJORITY of the long samples
+    collapse (so the median is low), it is noise, not a `sleep` — no finding."""
+    def lat(url, st):
         n = _injected_sleep_seconds(url)
-        if abs(n - 0.7) < 1e-6:                 # a LONG sleep probe
-            long_seen["n"] += 1
-            if long_seen["n"] >= 2:             # reproduction probe: collapses to base
-                await asyncio.sleep(_BASE)
-            else:
-                await asyncio.sleep(_BASE + 0.7)
-        elif n:                                  # SHORT sleep probe
-            await asyncio.sleep(_BASE + n)
-        else:                                    # control
-            await asyncio.sleep(_BASE)
-        return _resp(body="done")
+        if abs(n - 6.0) < 1e-6:                 # a LONG sleep probe
+            st["lng"] = st.get("lng", 0) + 1
+            return _BASE if st["lng"] >= 2 else _BASE + 6.0  # 2 of 3 collapse
+        return _BASE + n                         # short probe / control
+    findings = _run_vclock(lat)
+    assert findings == [], f"inconsistent long delay wrongly flagged: {findings}"
 
-    findings = _run_fast(fake)
-    assert findings == [], f"non-reproducing spike wrongly flagged as RCE: {findings}"
+
+def test_time_based_jitter_median_recovers_true_positive():
+    """Regression (FN found by adversarial review): a GENUINELY vulnerable server
+    with request-to-request jitter — one long sample comes up short. The median of
+    several samples recovers the true sleep, so the real injection is still flagged
+    (the old single-sample + reproduction check missed it)."""
+    def lat(url, st):
+        n = _injected_sleep_seconds(url)
+        if abs(n - 6.0) < 1e-6:                 # LONG probe: first draw jittery-short
+            st["lng"] = st.get("lng", 0) + 1
+            return _BASE + (3.5 if st["lng"] == 1 else 6.0)
+        return _BASE + n
+    findings = _run_vclock(lat)
+    assert len(findings) == 1, "median should recover a real sleep through jitter"
+
+
+def test_time_based_numeric_latency_not_flagged():
+    """Regression (FP found by adversarial review): a non-executing endpoint whose
+    latency scales with a NUMBER parsed from the query (?limit/?count/?page). The
+    probes embed 2 then 6, so the delta scales — but the bare-number control
+    'viperctl6' (no shell metacharacter) reproduces the delay, proving the latency
+    tracks the number, not shell execution. Must NOT be flagged."""
+    # latency follows ANY trailing number (incl. the bare-number control) — no shell
+    findings = _run_vclock(lambda url, st: _BASE + _trailing_number(url))
+    assert findings == [], f"number-driven latency wrongly flagged as RCE: {findings}"
 
 
 def test_time_based_slow_base_true_positive():
     """Regression (FN found by adversarial review): a genuinely vulnerable server
-    with a SLOW base page (was missed by the old noise-floor skip gate). The
-    paired control absorbs the base, so the sleep delta is still ~N -> flagged."""
-    async def fake(method, url, **kw):
-        n = _injected_sleep_seconds(url)
-        await asyncio.sleep(0.5 + n)  # slow 0.5s base on EVERY request + real sleep
-        return _resp(body="done")
-
-    findings = _run_fast(fake)
+    with a SLOW base page. The paired control absorbs the base, so the sleep delta
+    is still ~N -> flagged."""
+    findings = _run_vclock(lambda url, st: 3.0 + _injected_sleep_seconds(url))
     assert len(findings) == 1, "slow-base vulnerable server should still be flagged"
     assert findings[0]["vuln_type"].startswith("rce:cmdi:")
 
@@ -267,7 +270,9 @@ if __name__ == "__main__":
     test_time_based_monotonic_degradation_not_flagged()
     test_time_based_probe_spike_not_flagged()
     test_time_based_subsleep_not_flagged()
-    test_time_based_reproduction_guard()
+    test_time_based_inconsistent_long_not_flagged()
+    test_time_based_jitter_median_recovers_true_positive()
+    test_time_based_numeric_latency_not_flagged()
     test_time_based_slow_base_true_positive()
     test_reflected_payload_is_not_command_injection()
     print("ok")

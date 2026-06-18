@@ -202,7 +202,9 @@ def _message_text(msg: dict) -> str:
         parts.extend(html)
     elif isinstance(html, str):
         parts.append(html)
-    return "\n".join(p for p in parts if p)
+    # mail.tm 'html' is normally a list of strings, but a flaky/edge response may
+    # carry a non-string element; filter to str so join() can never raise.
+    return "\n".join(p for p in parts if isinstance(p, str) and p)
 
 
 def extract_links(msg: dict) -> list[str]:

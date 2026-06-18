@@ -61,6 +61,9 @@ _ABS_TOL = 0.6      # how far below N the (probe - adjacent control) delta may f
 _DELTA_HI = 2.5     # how far ABOVE N the delta may rise before it's a spike, not a sleep
 _SCALE_TOL = 1.25   # slack on the (LONG-SHORT) scaling of the deltas
 _BLIND_HEADROOM = 6.0  # extra seconds over _SLEEP_LONG allowed for base+jitter
+_SLEEP_SAMPLES = 3  # trials per duration; the MEDIAN delta beats per-request jitter
+                    # (probe and control base latencies are independent draws, so a
+                    # single difference is defeated by request-to-request jitter).
 
 # A benign control value: alphanumeric, no shell metacharacters, never reflects
 # the marker.
@@ -137,13 +140,19 @@ def _executed_not_reflected(body: str, marker: str, injected_value: str) -> bool
     return marker in stripped
 
 
+# Clock seam: real time in production; tests patch this to a virtual clock so the
+# timing logic can be exercised without real sleeps (and without touching the
+# asyncio event loop's own time.monotonic).
+_clock = time.monotonic
+
+
 async def _timed_fetch(url: str, timeout: float):
     """GET `url`, returning (elapsed_seconds, resp). (None, None) on failure."""
-    t = time.monotonic()
+    t = _clock()
     resp = await fetch("GET", url, timeout=timeout)
     if resp is None:
         return None, None
-    return time.monotonic() - t, resp
+    return _clock() - t, resp
 
 
 async def run(agent: SwarmAgent) -> List[dict]:
@@ -221,29 +230,54 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 return None
             return pe - cb
 
+        async def _median_delta(sep_tmpl, dur):
+            """Median paired delta over _SLEEP_SAMPLES trials. The probe's and
+            control's base latencies are INDEPENDENT draws, so one difference is
+            defeated by request-to-request jitter (cold serverless, GC pauses,
+            noisy neighbours); the median concentrates near the true sleep and
+            requires the delay to be CONSISTENT (subsuming a reproduction probe)."""
+            ds = []
+            for _ in range(_SLEEP_SAMPLES):
+                d = await _paired_delta(sep_tmpl, dur)
+                if d is not None:
+                    ds.append(d)
+            if len(ds) * 2 <= _SLEEP_SAMPLES:   # need a usable majority
+                return None
+            ds.sort()
+            return ds[len(ds) // 2]
+
         expected_delta = _SLEEP_LONG - _SLEEP_SHORT
         blind_hit = False
         for sep in _SLEEP_SEPARATORS:
-            # 1) Short sleep must add ~SHORT over an adjacent control — and not
-            #    wildly more (a spike), and not ~0 (a slow base that never slept).
-            d_short = await _paired_delta(sep, _SLEEP_SHORT)
+            # 1) Short = pre-gate: median delay ~SHORT over an adjacent control, not
+            #    a spike (both bounds), not ~0 (a slow base that never slept).
+            d_short = await _median_delta(sep, _SLEEP_SHORT)
             if d_short is None or not (
                     _SLEEP_SHORT - _ABS_TOL <= d_short <= _SLEEP_SHORT + _DELTA_HI):
                 continue
-            # 2) Long sleep must add ~LONG over its own adjacent control.
-            d_long = await _paired_delta(sep, _SLEEP_LONG)
-            if d_long is None or not (
-                    _SLEEP_LONG - _ABS_TOL <= d_long <= _SLEEP_LONG + _DELTA_HI):
+            # 2) Long = decisive: median delay must be AT LEAST ~LONG. No upper bound
+            #    here — a real `sleep` can only ADD time, so a high long delay is
+            #    still consistent with execution; rejecting it caused false negatives
+            #    on jittery targets. Spikes are absorbed by the median; non-executing
+            #    latency is caught by the scaling and number-control checks below.
+            d_long = await _median_delta(sep, _SLEEP_LONG)
+            if d_long is None or d_long < _SLEEP_LONG - _ABS_TOL:
                 continue
-            # 3) The deltas themselves must scale with the sleep — rules out a
-            #    server whose latency just grows over time (monotonic drift).
+            # 3) The deltas must scale with the sleep — rules out a uniformly-slow or
+            #    monotonically-degrading server (both deltas collapse toward zero).
             if (d_long - d_short) < expected_delta - _SCALE_TOL:
                 continue
-            # 4) Reproduce the long differential once more.
-            d_rep = await _paired_delta(sep, _SLEEP_LONG)
-            if d_rep is None or not (
-                    _SLEEP_LONG - _ABS_TOL <= d_rep <= _SLEEP_LONG + _DELTA_HI):
-                continue
+            # 4) Number-driven-latency guard: a value with the SAME integer but NO
+            #    shell metacharacter ("viperctl6") must NOT reproduce the delay. If
+            #    it does, the latency tracks a parsed number (?limit/?count/?page),
+            #    not shell execution — a real `sleep` needs the metacharacter to
+            #    break out, so the bare number stays fast on a vulnerable target.
+            cb_n, _ = await _timed_fetch(control_url, bt)
+            num_url = add_query(url, param, f"{_CONTROL_VALUE}{_SLEEP_LONG}")
+            pe_n, _ = await _timed_fetch(num_url, bt)
+            if cb_n is not None and pe_n is not None \
+                    and (pe_n - cb_n) >= _SLEEP_LONG - _ABS_TOL:
+                continue  # latency is a function of the number, not the shell
             findings.append({
                 "type": "command_injection",
                 "vuln_type": f"rce:cmdi:{param}",
@@ -255,13 +289,13 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 "cwe": "CWE-78",
                 "confidence": 0.7,
                 "evidence": (
-                    "each sleep probe, measured against a control taken moments "
-                    "earlier, added ~the commanded duration and the delays scaled: "
-                    f"sleep {_SLEEP_SHORT}s -> +{d_short:.2f}s, "
-                    f"sleep {_SLEEP_LONG}s -> +{d_long:.2f}s, "
-                    f"repeat sleep {_SLEEP_LONG}s -> +{d_rep:.2f}s over the adjacent "
-                    "control. A slow, laggy, or degrading server cancels in the "
-                    "difference, so this is consistent with `sleep` in a shell."
+                    "time-based: the median delay over an adjacent control tracked "
+                    f"the injected sleep (short {_SLEEP_SHORT}s -> +{d_short:.2f}s, "
+                    f"long {_SLEEP_LONG}s -> +{d_long:.2f}s, scaled "
+                    f"+{d_long - d_short:.2f}s) and a bare-number control with no "
+                    "shell metacharacter did NOT reproduce it — consistent with "
+                    "`sleep` in a shell, not slow/degrading latency or a "
+                    "number-parsing endpoint."
                 ),
             })
             blind_hit = True

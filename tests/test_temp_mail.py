@@ -147,3 +147,16 @@ def test_malformed_responses_never_raise(monkeypatch):
     monkeypatch.setattr(temp_mail, "_send",
                         _fake_transport({("GET", "/domains"): (200, {"hydra:member": [1, "x"]})}))
     assert asyncio.run(new_mailbox()) is None
+
+
+def test_message_text_html_list_with_non_strings_never_raises():
+    # Regression: mail.tm 'html' is normally a list of strings, but a non-string
+    # element (truthy int) used to survive the `if p` guard and crash str.join.
+    from core.specialist.temp_mail import extract_links
+    msg = {"subject": "hi", "text": "see https://target.test/email/confirm?id=1",
+           "html": [None, 42, "<a href='https://target.test/x'>x</a>"]}
+    links = extract_links(msg)  # must not raise
+    assert "https://target.test/email/confirm?id=1" in links
+    assert verification_link(msg) == "https://target.test/email/confirm?id=1"
+    # an all-non-string html list degrades to [] links, still no raise
+    assert extract_links({"html": [1, 2, 3], "text": "", "subject": ""}) == []
