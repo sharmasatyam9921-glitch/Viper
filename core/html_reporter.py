@@ -459,10 +459,10 @@ def _build_findings(findings: List[Dict]) -> str:
     if not findings:
         return "<h2>3. Technical Findings</h2>\n<p>No findings to report.</p>"
 
-    # Submittable (independently re-confirmed) findings first, then by severity.
-    sorted_findings = sorted(
-        findings,
-        key=lambda f: (not f.get("submittable", False), SEVERITY_ORDER.get(_sev(f), 9)))
+    # Rank by a combined priority: submittable (gate-confirmed) + severity + gate
+    # confidence, so the highest-value, highest-certainty findings come first.
+    from core.prioritization import priority_label, priority_score
+    sorted_findings = sorted(findings, key=priority_score, reverse=True)
     n_sub = sum(1 for f in findings if f.get("submittable"))
     cards = ""
     for i, f in enumerate(sorted_findings, 1):
@@ -510,9 +510,18 @@ def _build_findings(findings: List[Dict]) -> str:
                     f'{"PASS" if submittable else "LEAD"} — re-confirmed conf {gate_pct}'
                     f'{" — " + _esc(str(vreason)[:160]) if vreason else ""}</td></tr>')
 
+        pscore = priority_score(f)
+        plabel = priority_label(pscore)
+        _pcolor = {"P1": "#dc2626", "P2": "#ea580c", "P3": "#ca8a04", "P4": "#64748b"}[plabel]
+        prio_badge = (f'<span style="background:{_pcolor};color:#fff;padding:2px 7px;'
+                      f'border-radius:4px;font-size:0.8em;font-weight:700" '
+                      f'title="priority {pscore}/100">{plabel}</span>')
+        prio_row = f'<tr><td>Priority</td><td>{plabel} (score {pscore}/100)</td></tr>'
+
         cards += f"""
 <details class="finding-card"{' open' if submittable else ''}>
     <summary>
+        {prio_badge}
         <span class="badge badge-{sev}">{SEVERITY_LABELS.get(sev, sev.upper())}</span>
         <span class="title">VIPER-{fid} | {_esc(vtype)}</span>
         {gate_badge}
@@ -523,6 +532,7 @@ def _build_findings(findings: List[Dict]) -> str:
             <tr><td>URL</td><td><code>{_esc(url)}</code></td></tr>
             <tr><td>Severity</td><td><span class="badge badge-{sev}">{sev.upper()}</span></td></tr>
             <tr><td>Confidence</td><td>{confidence:.0%}</td></tr>
+            {prio_row}
             {gate_row}
             <tr><td>Source</td><td>{_esc(source)}</td></tr>
             {'<tr><td>Payload</td><td><pre>' + _esc(payload) + '</pre></td></tr>' if payload else ''}
