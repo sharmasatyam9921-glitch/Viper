@@ -14,6 +14,14 @@ business-context reasoning. Currently:
 """
 
 from .bola_engine import Session, find_bola, id_bearing_urls
+from .bola_runner import run_bola
+from .burp_import import (
+    BurpItem,
+    load_burp,
+    object_urls,
+    parse_burp_xml,
+    session_headers,
+)
 from .temp_mail import (
     MailTmProvider,
     TempMailbox,
@@ -23,7 +31,8 @@ from .temp_mail import (
 )
 
 __all__ = [
-    "Session", "find_bola", "id_bearing_urls",
+    "Session", "find_bola", "id_bearing_urls", "run_bola",
+    "BurpItem", "load_burp", "parse_burp_xml", "object_urls", "session_headers",
     "MailTmProvider", "TempMailbox", "new_mailbox",
     "extract_links", "verification_link",
 ]
