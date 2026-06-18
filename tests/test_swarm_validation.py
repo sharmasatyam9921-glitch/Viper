@@ -85,6 +85,73 @@ def test_partition_splits_submittable_and_leads():
     assert len(leads) == 1 and leads[0]["vuln_type"] == "xss_text:q"
 
 
+from core.swarm_workers.vuln._http import HttpResp  # noqa: E402
+
+
+def _fetch_returning(responder):
+    async def fake(method, url, *, headers=None, timeout=10.0, **kw):
+        return responder(method, url, headers or {})
+    return fake
+
+
+def test_cors_reflecting_arbitrary_origin_is_submittable():
+    def resp(method, url, headers):
+        return HttpResp(200, {"access-control-allow-origin": headers.get("Origin", ""),
+                              "access-control-allow-credentials": "true"}, "{}", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "cors_origin_reflect", "url": "http://t/api"}],
+        fetch=_fetch_returning(resp)))
+    assert out[0]["validated"] and out[0]["submittable"]
+    assert out[0]["validation_confidence"] >= 0.9  # credentials=true
+
+
+def test_cors_not_reflecting_probe_origin_is_lead():
+    def resp(method, url, headers):
+        return HttpResp(200, {"access-control-allow-origin": "https://trusted.example"}, "{}", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "cors_wildcard", "url": "http://t/api"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
+
+
+def test_env_exposed_reconfirmed_submittable():
+    def resp(method, url, headers):
+        return HttpResp(200, {"content-type": "text/plain"},
+                        "DB_PASSWORD=s3cret\nAPI_KEY=abc123xyz\n", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "env_exposed:/.env", "url": "http://t/.env"}],
+        fetch=_fetch_returning(resp)))
+    assert out[0]["validated"] and out[0]["submittable"]
+
+
+def test_env_html_page_is_lead_not_submittable():
+    def resp(method, url, headers):
+        return HttpResp(200, {"content-type": "text/html"}, "<html>KEY=val here</html>", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "env_exposed", "url": "http://t/.env"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
+
+
+def test_directory_listing_reconfirmed_submittable():
+    def resp(method, url, headers):
+        return HttpResp(200, {}, "<html><h1>Index of /ftp</h1><a href='x'>x</a></html>", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "information_disclosure:listing:/ftp", "url": "http://t/ftp"}],
+        fetch=_fetch_returning(resp)))
+    assert out[0]["validated"] and out[0]["submittable"]
+
+
+def test_injection_class_stays_lead():
+    def resp(method, url, headers):
+        return HttpResp(200, {}, "x", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "sqli:id", "url": "http://t/x?id=1"}],
+        fetch=_fetch_returning(resp)))
+    assert not out[0]["submittable"]
+    assert "manual review" in out[0]["validation_reason"]
+
+
 def test_fetchhttp_returns_status0_stub_on_network_failure(monkeypatch):
     from core.swarm_workers.vuln import _http
 
