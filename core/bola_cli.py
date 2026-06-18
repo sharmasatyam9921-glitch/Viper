@@ -30,6 +30,7 @@ import asyncio
 import json
 import sys
 from typing import List, Optional
+from urllib.parse import urlsplit
 
 from core.specialist import (
     load_burp,
@@ -62,7 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "identity B and confirm cross-user reads (read-only).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("target", nargs="?", help="Target base URL (for context/labels).")
+    p.add_argument("target", nargs="?",
+                   help="Target base URL. Defines the IN-SCOPE host: replays only "
+                        "go to this host (and any explicit --url host), never to "
+                        "third-party hosts found in an imported Burp capture.")
     # Identity A
     p.add_argument("--burp-import", metavar="FILE",
                    help="Burp XML export captured as identity A: supplies A's "
@@ -134,6 +138,19 @@ def run_bola_cli(argv: List[str]) -> int:
             print(f"[ERR] cannot read --urls-file: {e}", file=sys.stderr)
             return 2
 
+    # --- Host allowlist: operator-typed inputs ONLY (target + explicit --url).
+    # The imported Burp file's hosts are NEVER trusted to define scope, so a
+    # third-party request in the capture can't get identity A/B's session.
+    allowed_hosts = set()
+    if args.target:
+        h = urlsplit(args.target).hostname
+        if h:
+            allowed_hosts.add(h.lower())
+    for u in (args.url or []):
+        h = urlsplit(u).hostname
+        if h:
+            allowed_hosts.add(h.lower())
+
     # --- Validate ---
     problems = []
     if not owner_headers:
@@ -147,6 +164,9 @@ def run_bola_cli(argv: List[str]) -> int:
     if not candidates:
         problems.append("no object URLs to test (give --burp-import / --url / "
                         "--urls-file)")
+    if not allowed_hosts:
+        problems.append("no in-scope host: give the target URL (positional) or a "
+                        "--url so replays are restricted to a host you authorized")
     if problems:
         print("[ERR] cannot run BOLA:", file=sys.stderr)
         for p in problems:
@@ -154,7 +174,12 @@ def run_bola_cli(argv: List[str]) -> int:
         return 2
 
     proxy = args.proxy or (_BURP_DEFAULT if args.burp else None)
-    print(f"[i] replaying {len(candidates)} candidate URL(s) as identity B"
+    in_scope = [u for u in candidates if urlsplit(u).netloc.lower() in allowed_hosts]
+    skipped = len(candidates) - len(in_scope)
+    if skipped:
+        print(f"[i] {skipped} candidate URL(s) on other hosts will NOT be replayed "
+              f"(allowed: {', '.join(sorted(allowed_hosts))})", file=sys.stderr)
+    print(f"[i] replaying {len(in_scope)} in-scope candidate URL(s) as identity B"
           f"{' via ' + proxy if proxy else ''} ...", file=sys.stderr)
 
     findings = asyncio.run(run_bola(
@@ -166,6 +191,7 @@ def run_bola_cli(argv: List[str]) -> int:
         proxy=proxy,
         unauth_control=not args.no_unauth_control,
         timeout=args.timeout,
+        allowed_hosts=allowed_hosts,
     ))
 
     print(f"\n[+] BOLA findings: {len(findings)}")

@@ -78,6 +78,28 @@ def test_malformed_xml_returns_empty():
     assert session_headers([]) == {}
 
 
+def test_object_urls_drops_non_http_schemes():
+    # A hand-edited / merged export with a file:// (or ftp:) id-bearing URL must
+    # never become a replay candidate (would otherwise hit urllib's FileHandler).
+    xml = ('<items>'
+           '<item><url>file:///C:/secrets/1/data.txt</url><method>GET</method>'
+           '<status>200</status></item>'
+           '<item><url>ftp://host/files/42</url><method>GET</method>'
+           '<status>200</status></item>'
+           '<item><url>https://target.test/api/orders/9</url><method>GET</method>'
+           '<status>200</status></item>'
+           '</items>')
+    urls = object_urls(parse_burp_xml(xml))
+    assert urls == ["https://target.test/api/orders/9"]
+
+
+def test_fetch_sync_refuses_non_http_scheme():
+    from core.swarm_workers.vuln._http import _fetch_sync
+    # Even if a file:// URL reaches the fetcher, it must be refused (no file read).
+    assert _fetch_sync("GET", "file:///etc/hostname") is None
+    assert _fetch_sync("GET", "ftp://host/x") is None
+
+
 def test_non_base64_request_body_parsed():
     raw = "GET /api/users/5 HTTP/1.1\nHost: t\nCookie: s=bob\n\n"
     xml = ('<items><item><url>https://t/api/users/5</url><method>GET</method>'

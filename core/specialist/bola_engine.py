@@ -82,6 +82,8 @@ def id_bearing_urls(urls: List[str]) -> List[str]:
     for u in urls:
         if not u:
             continue
+        if urlsplit(u).scheme.lower() not in ("http", "https"):
+            continue  # only http(s) objects are replay targets — never file://, etc.
         if _NUMERIC.search(u) or _UUID.search(u) or _ID_QUERY.search(u):
             if u not in seen:
                 seen.add(u)

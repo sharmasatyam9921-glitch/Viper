@@ -69,6 +69,43 @@ def test_successful_bola_run(server, tmp_path):
     assert A_MARKER in findings[0]["evidence"]
 
 
+def test_cross_host_url_in_burp_is_not_replayed(server, tmp_path):
+    # A Burp export of A's browsing that also contains a THIRD-PARTY id-bearing
+    # request (analytics/CDN) must not get A/B's session replayed to it. With the
+    # target = server, only the server host is in scope; the foreign URL is dropped.
+    import base64
+    foreign = "https://track.thirdparty.example/api/users/55"
+    raw1 = "GET /api/orders/1001 HTTP/1.1\r\nHost: x\r\nCookie: s=alice\r\n\r\n"
+    raw2 = "GET /api/users/55 HTTP/1.1\r\nHost: track.thirdparty.example\r\nCookie: s=alice\r\n\r\n"
+
+    def item(url, raw):
+        b = base64.b64encode(raw.encode()).decode()
+        return (f'<item><url>{url}</url><method>GET</method><status>200</status>'
+                f'<request base64="true">{b}</request></item>')
+    xml = ("<items>" + item(f"{server}/api/orders/1001", raw1)
+           + item(foreign, raw2) + "</items>")
+    burp = tmp_path / "A.xml"
+    burp.write_text(xml, encoding="utf-8")
+    out = tmp_path / "out.json"
+    rc = run_bola_cli([server, "--burp-import", str(burp), "--cookie-b", "s=bob",
+                       "--owner-marker", A_MARKER, "--output", str(out)])
+    assert rc == 0
+    findings = json.loads(out.read_text(encoding="utf-8"))
+    # Only the in-scope basket IDOR is found; nothing replayed to the third party.
+    assert all("thirdparty.example" not in f["url"] for f in findings)
+    assert len(findings) == 1 and findings[0]["cwe"] == "CWE-639"
+
+
+def test_burp_import_only_without_target_errors(tmp_path):
+    # No target and no --url -> no in-scope host can be defined -> refuse to run.
+    burp = tmp_path / "A.xml"
+    burp.write_text("<items><item><url>https://t/api/orders/1</url><method>GET"
+                    "</method><status>200</status></item></items>", encoding="utf-8")
+    rc = run_bola_cli(["--burp-import", str(burp), "--cookie", "s=a",
+                       "--cookie-b", "s=b", "--owner-marker", A_MARKER])
+    assert rc == 2  # missing in-scope host
+
+
 def test_burp_import_supplies_session_and_urls(server, tmp_path, monkeypatch):
     # A Burp export of identity A's browsing: supplies A's cookie AND the object URL.
     import base64

@@ -40,6 +40,11 @@ def clear_scope_guard() -> None:
     _scope_guard_var.set(None)
 
 
+def get_scope_guard() -> Optional[Callable[[str], bool]]:
+    """The currently-installed scope predicate (None if unrestricted)."""
+    return _scope_guard_var.get()
+
+
 def is_in_scope(url: str) -> bool:
     """True if `url` may be requested. No guard installed → unrestricted."""
     guard = _scope_guard_var.get()
@@ -148,6 +153,12 @@ def _fetch_sync(
     proxy: Optional[str] = None,
 ) -> Optional[HttpResp]:
     if not url:
+        return None
+    # Defense-in-depth: the default urllib opener includes a FileHandler, so a
+    # stray file:// (or ftp://, etc.) URL would read a local resource. Worker
+    # traffic is HTTP only — refuse anything else regardless of where it came from.
+    if urllib.parse.urlsplit(url).scheme.lower() not in ("http", "https"):
+        logger.debug("refusing non-http(s) scheme: %s", url)
         return None
     h = {"User-Agent": "viper-swarm/1.0", **(headers or {})}
     req = urllib.request.Request(url, data=body, headers=h, method=method)
