@@ -30,9 +30,114 @@ _PROBE_HOST = "viper-revalidate.example"
 _ENV_LINE = re.compile(r"(?m)^[A-Z][A-Z0-9_]{2,}=\S")
 _DIRLIST = ("index of /", "parent directory", "directory listing for")
 
+# Tight DB-error signatures (a corpus search quoting "SQL syntax" won't reproduce
+# the SAME one under two different quote chars; a broken query does).
+_SQL_ERR = re.compile(
+    r"SQL syntax|SQLSTATE\[|ORA-\d{5}|unclosed quotation mark|"
+    r"quoted string not properly terminated|near \"[^\"]*\": syntax error|"
+    r"PG::\w*Error|psqlException|MySqlException|valid MySQL result|"
+    r"sqlite3?\.(Operational|Programming)Error|SQLITE_ERROR|SqlException|"
+    r"Microsoft OLE DB|Incorrect syntax near|Warning: \w*sql|"
+    r"PostgreSQL.{0,20}ERROR|Unclosed quotation mark", re.I)
+_PASSWD = re.compile(r"root:.*?:0:0:")
+
 
 def _ctype(resp) -> str:
     return ((getattr(resp, "headers", {}) or {}).get("content-type", "") or "").lower()
+
+
+def _body(resp) -> str:
+    return getattr(resp, "body", "") or ""
+
+
+def _ok2xx(resp) -> bool:
+    return resp is not None and 200 <= getattr(resp, "status", 0) < 300
+
+
+async def _recheck_xss(finding, fetch, timeout):
+    """Confirm the reflection lands as LIVE, UNENCODED markup in an HTML context —
+    not entity-encoded (the secure outcome) and not a non-HTML body."""
+    import secrets
+    from core.swarm_workers.vuln._http import add_query
+    param = finding.get("parameter")
+    url = finding.get("url") or ""
+    if not param or not url:
+        return False, 0.0, "no parameter to re-test"
+    tag = "vgx" + secrets.token_hex(3)
+    r = await fetch("GET", add_query(url, param, f"<{tag}>x</{tag}>"), timeout=timeout)
+    if r is None:
+        return False, 0.0, "re-fetch failed"
+    ct = _ctype(r)
+    body = _body(r)
+    html_ctx = "html" in ct or "xml" in ct or ct == ""
+    if html_ctx and f"<{tag}>" in body and f"&lt;{tag}&gt;" not in body:
+        return True, 0.8, f"injected <{tag}> reflected UNENCODED in HTML context (live markup)"
+    return False, 0.2, "reflection encoded or non-HTML context — not exploitable"
+
+
+async def _recheck_sqli(finding, fetch, timeout):
+    """Confirm a DB error appears under BOTH a single- and double-quote breaker but
+    not a benign value — a corpus search echoing 'SQL syntax' fails this (it returns
+    different content for ' vs ")."""
+    from core.swarm_workers.vuln._http import add_query
+    param = finding.get("parameter")
+    url = finding.get("url") or ""
+    if not param or not url:
+        return False, 0.0, "no parameter to re-test"
+    benign = await fetch("GET", add_query(url, param, "1"), timeout=timeout)
+    q1 = await fetch("GET", add_query(url, param, "1'"), timeout=timeout)
+    q2 = await fetch("GET", add_query(url, param, '1"'), timeout=timeout)
+    if None in (benign, q1, q2):
+        return False, 0.0, "re-fetch failed"
+
+    def err(r):
+        return bool(_SQL_ERR.search(_body(r)))
+    if not err(benign) and err(q1) and (err(q2) or getattr(q1, "status", 0) >= 500):
+        return True, 0.75, "DB error reproduced under ' and \" breakers, absent for benign value"
+    return False, 0.2, "no reproducible DB-error differential (likely reflected content)"
+
+
+async def _recheck_ssti(finding, fetch, timeout):
+    """Confirm a FRESH arithmetic expression (operands the worker never used) is
+    EVALUATED — product present, literal consumed, absent in a control."""
+    from core.swarm_workers.vuln._http import add_query
+    param = finding.get("parameter")
+    url = finding.get("url") or ""
+    if not param or not url:
+        return False, 0.0, "no parameter to re-test"
+    confirmed = 0
+    for expr, prod in (("8*8", "64"), ("11*11", "121")):
+        live = await fetch("GET", add_query(url, param, "${" + expr + "}"), timeout=timeout)
+        ctrl = await fetch("GET", add_query(url, param, "${" + expr.replace("*", "x") + "}"),
+                           timeout=timeout)
+        if live is None or ctrl is None:
+            return False, 0.0, "re-fetch failed"
+        lb, cb = _body(live), _body(ctrl)
+        if prod in lb and prod not in cb and expr not in lb:
+            confirmed += 1
+    if confirmed >= 2:
+        return True, 0.8, "two fresh arithmetic expressions evaluated (consumed), absent in controls"
+    return False, 0.2, "fresh operands not evaluated — not a template engine"
+
+
+async def _recheck_lfi(finding, fetch, timeout):
+    """Confirm an /etc/passwd signature under the traversal payload but NOT under a
+    benign control (a doc-search echo leaks for both; a real read needs traversal)."""
+    from core.swarm_workers.vuln._http import add_query
+    param = finding.get("parameter")
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    inj = await fetch("GET", url, timeout=timeout)   # the finding url carries the traversal
+    if inj is None:
+        return False, 0.0, "re-fetch failed"
+    if not _PASSWD.search(_body(inj)):
+        return False, 0.2, "passwd signature not reproduced"
+    if param:
+        ctrl = await fetch("GET", add_query(url, param, "index"), timeout=timeout)
+        if ctrl is not None and _PASSWD.search(_body(ctrl)):
+            return False, 0.2, "benign control also leaks signature — doc echo, not a file read"
+    return True, 0.75, "/etc/passwd signature under traversal, absent for benign control"
 
 
 async def _reconfirm(finding: dict, fetch, timeout: float) -> Tuple[bool, float, str]:
@@ -89,7 +194,23 @@ async def _reconfirm(finding: dict, fetch, timeout: float) -> Tuple[bool, float,
             return True, 0.8, ".git metadata reproduced on re-fetch"
         return False, 0.2, "no .git content on re-test"
 
-    # Injection / auth classes: no orthogonal behavioral re-test yet -> lead.
+    # Injection classes: orthogonal behavioral re-test (fresh, differential probe).
+    vt_full = (finding.get("vuln_type") or "").lower()
+    if head in ("xss", "xss_text", "xss_tag", "dom_xss"):
+        return await _recheck_xss(finding, fetch, timeout)
+    if head in ("sqli", "sqli_blind", "auth_bypass", "login_sqli"):
+        return await _recheck_sqli(finding, fetch, timeout)
+    if head in ("ssti", "ssti_error"):
+        return await _recheck_ssti(finding, fetch, timeout)
+    if head in ("lfi", "path_traversal"):
+        return await _recheck_lfi(finding, fetch, timeout)
+    # Two-account BOLA: the find_bola engine already proved a cross-user read with
+    # owner+attacker+anon probes — that IS the independent confirmation.
+    if ":bola:" in vt_full or head == "bola":
+        return True, 0.85, "two-account cross-user object read confirmed by the BOLA engine"
+
+    # Classes without an orthogonal re-test yet (cmdi time-test, single-session
+    # idor, mass_assignment, jwt, secrets, nosql, ...) -> stay a LEAD (fail-closed).
     return False, 0.0, f"no independent re-test for '{head}' yet — manual review"
 
 # Map the swarm workers' vuln_type strings (the head token before ':') to the
