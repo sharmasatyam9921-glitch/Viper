@@ -120,6 +120,32 @@ async def _recheck_ssti(finding, fetch, timeout):
     return False, 0.2, "fresh operands not evaluated — not a template engine"
 
 
+async def _recheck_cmdi(finding, fetch, timeout):
+    """Re-run the hardened command-injection time-test from a fresh context. Its
+    paired-control median scaling already rejects load/latency noise; a SECOND
+    independent run that still fires confirms the delay is reproducible (a
+    transient load spike — the cmdi failure mode — won't repeat)."""
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    try:
+        import core.swarm_workers  # noqa: F401  (registers workers)
+        from core.swarm_engine import SwarmAgent
+        from core.swarm_workers import get_worker_runner
+        run = get_worker_runner("vuln", "command_injection")
+        if run is None:
+            return False, 0.0, "cmdi worker unavailable"
+        ag = SwarmAgent(agent_id="gate", objective="revalidate", target=url,
+                        technique="command_injection", payload={},
+                        timeout_s=min(timeout if timeout else 12.0, 12.0))
+        fs = await run(ag)
+    except Exception as e:  # noqa: BLE001
+        return False, 0.0, f"cmdi re-run error: {e}"
+    if any("cmdi" in str(f.get("vuln_type", "")) for f in (fs or [])):
+        return True, 0.7, "command injection reproduced by an independent re-run of the time-test"
+    return False, 0.2, "not reproduced on re-run (likely a transient/load spike)"
+
+
 async def _recheck_lfi(finding, fetch, timeout):
     """Confirm an /etc/passwd signature under the traversal payload but NOT under a
     benign control (a doc-search echo leaks for both; a real read needs traversal)."""
@@ -204,13 +230,15 @@ async def _reconfirm(finding: dict, fetch, timeout: float) -> Tuple[bool, float,
         return await _recheck_ssti(finding, fetch, timeout)
     if head in ("lfi", "path_traversal"):
         return await _recheck_lfi(finding, fetch, timeout)
+    if head in ("rce", "cmdi", "command_injection"):
+        return await _recheck_cmdi(finding, fetch, timeout)
     # Two-account BOLA: the find_bola engine already proved a cross-user read with
     # owner+attacker+anon probes — that IS the independent confirmation.
     if ":bola:" in vt_full or head == "bola":
         return True, 0.85, "two-account cross-user object read confirmed by the BOLA engine"
 
-    # Classes without an orthogonal re-test yet (cmdi time-test, single-session
-    # idor, mass_assignment, jwt, secrets, nosql, ...) -> stay a LEAD (fail-closed).
+    # Classes without an orthogonal re-test yet (single-session idor,
+    # mass_assignment, jwt, secrets, nosql, ...) -> stay a LEAD (fail-closed).
     return False, 0.0, f"no independent re-test for '{head}' yet — manual review"
 
 # Map the swarm workers' vuln_type strings (the head token before ':') to the

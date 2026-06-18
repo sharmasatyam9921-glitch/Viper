@@ -112,6 +112,7 @@ class HackResult:
                     "confidence": f.get("confidence"),
                     "validated": f.get("validated"),
                     "validation_confidence": f.get("validation_confidence"),
+                    "validation_reason": f.get("validation_reason"),
                     "submittable": f.get("submittable"),
                 }
                 for f in self.findings
@@ -518,6 +519,9 @@ class HackMode:
                              or f.get("details") or ""),
                 "confidence": f.get("confidence", 0.0),
                 "validated": f.get("validated", True),
+                "submittable": f.get("submittable", False),
+                "validation_confidence": f.get("validation_confidence"),
+                "validation_reason": f.get("validation_reason", ""),
             })
         metadata = {
             "start_time": time.strftime(

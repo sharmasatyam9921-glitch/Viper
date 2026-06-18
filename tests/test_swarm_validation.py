@@ -184,11 +184,15 @@ def test_bola_finding_trusted_submittable():
     assert f["submittable"] and f["validation_confidence"] >= 0.8
 
 
-def test_cmdi_stays_lead():
+def test_cmdi_not_reproduced_is_lead():
+    # cmdi re-test re-runs the hardened worker against the finding URL (its own
+    # fetch, not this fake). An unreachable / non-injectable target won't
+    # reproduce -> lead. (Fast: fetches to a bogus host fail immediately.)
     def resp(m, url, h):
         return HttpResp(200, {}, "x", url)
-    f = _run1({"vuln_type": "rce:cmdi:id", "url": "http://t/x?id=1", "parameter": "id"}, resp)
-    assert not f["submittable"]  # no orthogonal re-test yet -> conservative lead
+    f = _run1({"vuln_type": "rce:cmdi:id",
+               "url": "http://127.0.0.1:9/x?id=1", "parameter": "id"}, resp)
+    assert not f["submittable"]
 
 
 def test_cors_reflecting_arbitrary_origin_is_submittable():

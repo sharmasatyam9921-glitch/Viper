@@ -459,7 +459,11 @@ def _build_findings(findings: List[Dict]) -> str:
     if not findings:
         return "<h2>3. Technical Findings</h2>\n<p>No findings to report.</p>"
 
-    sorted_findings = sorted(findings, key=lambda f: SEVERITY_ORDER.get(_sev(f), 9))
+    # Submittable (independently re-confirmed) findings first, then by severity.
+    sorted_findings = sorted(
+        findings,
+        key=lambda f: (not f.get("submittable", False), SEVERITY_ORDER.get(_sev(f), 9)))
+    n_sub = sum(1 for f in findings if f.get("submittable"))
     cards = ""
     for i, f in enumerate(sorted_findings, 1):
         sev = _sev(f)
@@ -471,6 +475,9 @@ def _build_findings(findings: List[Dict]) -> str:
         confidence = f.get("confidence", 0)
         source = f.get("source", "manual")
         validated = f.get("validated", False)
+        submittable = f.get("submittable", False)
+        vconf = f.get("validation_confidence")
+        vreason = f.get("validation_reason", "")
 
         # Compliance data
         comp = f.get("compliance", {})
@@ -493,14 +500,22 @@ def _build_findings(findings: List[Dict]) -> str:
             if reasoning:
                 triage_html = f'<tr><td>LLM Triage</td><td><em>{_esc(reasoning[:300])}</em></td></tr>'
 
-        validated_badge = '<span style="color:#2ecc71">Validated</span>' if validated else '<span style="color:var(--fg2)">Unvalidated</span>'
+        if submittable:
+            gate_badge = ('<span style="background:#16a34a;color:#fff;padding:2px 8px;'
+                          'border-radius:4px;font-size:0.8em;font-weight:700">SUBMITTABLE</span>')
+        else:
+            gate_badge = '<span style="color:var(--fg2);font-size:0.85em">lead (manual review)</span>'
+        gate_pct = f"{vconf:.0%}" if isinstance(vconf, (int, float)) else "n/a"
+        gate_row = (f'<tr><td>Validation gate</td><td>'
+                    f'{"PASS" if submittable else "LEAD"} — re-confirmed conf {gate_pct}'
+                    f'{" — " + _esc(str(vreason)[:160]) if vreason else ""}</td></tr>')
 
         cards += f"""
-<details class="finding-card">
+<details class="finding-card"{' open' if submittable else ''}>
     <summary>
         <span class="badge badge-{sev}">{SEVERITY_LABELS.get(sev, sev.upper())}</span>
         <span class="title">VIPER-{fid} | {_esc(vtype)}</span>
-        <span style="color:var(--fg2);font-size:0.85em">{validated_badge}</span>
+        {gate_badge}
     </summary>
     <div class="body">
         <table>
@@ -508,6 +523,7 @@ def _build_findings(findings: List[Dict]) -> str:
             <tr><td>URL</td><td><code>{_esc(url)}</code></td></tr>
             <tr><td>Severity</td><td><span class="badge badge-{sev}">{sev.upper()}</span></td></tr>
             <tr><td>Confidence</td><td>{confidence:.0%}</td></tr>
+            {gate_row}
             <tr><td>Source</td><td>{_esc(source)}</td></tr>
             {'<tr><td>Payload</td><td><pre>' + _esc(payload) + '</pre></td></tr>' if payload else ''}
             {'<tr><td>Evidence</td><td><pre>' + _esc(str(evidence)[:500]) + '</pre></td></tr>' if evidence else ''}
@@ -517,7 +533,13 @@ def _build_findings(findings: List[Dict]) -> str:
     </div>
 </details>"""
 
-    return f"<h2>3. Technical Findings</h2>\n{cards}"
+    header = "<h2>3. Technical Findings</h2>"
+    if n_sub:
+        header += (f'<p><span style="background:#16a34a;color:#fff;padding:2px 8px;'
+                   f'border-radius:4px;font-weight:700">{n_sub} SUBMITTABLE</span> '
+                   f'independently re-confirmed; {len(findings) - n_sub} lead(s) '
+                   f'need manual review.</p>')
+    return f"{header}\n{cards}"
 
 
 def _build_mitre_mapping(findings: List[Dict]) -> str:
