@@ -80,6 +80,11 @@ class HackResult:
     def findings_count(self) -> int:
         return len(self.findings)
 
+    @property
+    def submittable_count(self) -> int:
+        """Findings an INDEPENDENT validation pass re-confirmed (see the gate)."""
+        return sum(1 for f in self.findings if f.get("submittable"))
+
     def to_dict(self) -> dict:
         return {
             "target": self.target,
@@ -91,6 +96,7 @@ class HackResult:
             "stop_reason": self.stop_reason,
             "timed_out": self.timed_out,
             "findings_count": self.findings_count,
+            "submittable_count": self.submittable_count,
             # Normalized findings list so consumers (reports, the benchmark
             # scorer) can read individual findings, not just the count.
             "findings": [
@@ -104,6 +110,9 @@ class HackResult:
                     "payload": f.get("payload"),
                     "evidence": f.get("evidence"),
                     "confidence": f.get("confidence"),
+                    "validated": f.get("validated"),
+                    "validation_confidence": f.get("validation_confidence"),
+                    "submittable": f.get("submittable"),
                 }
                 for f in self.findings
             ],
@@ -144,6 +153,7 @@ class HackMode:
         auth_headers: Optional[dict] = None,
         bola_config: Optional[dict] = None,
         proxy: Optional[str] = None,
+        validate: bool = True,
     ) -> None:
         """
         coordinator_factory: optional override for tests. Takes
@@ -167,6 +177,7 @@ class HackMode:
         self._auth_headers = dict(auth_headers) if auth_headers else {}
         self._bola_config = dict(bola_config) if bola_config else None
         self._proxy = proxy or None
+        self._validate = validate
         self.bus = AgentBus(max_queue_size=bus_queue_size)
         self._coord_factory = coordinator_factory or self._default_coordinator
         # Phase 5: a single FindingDedup is shared by every coordinator
@@ -418,6 +429,9 @@ class HackMode:
             return
         self._stopped = True
         result.elapsed_s = time.time() - started_at
+        # Independent validation gate BEFORE scope/auth/proxy are torn down, so
+        # re-tests stay in scope and authenticated. Tags validated/submittable.
+        await self._run_validation_gate(result)
         self._clear_scope_guard()
         try:
             await self.bus.stop()
@@ -462,6 +476,31 @@ class HackMode:
                 "report.failed", target=self.target,
                 payload={"error": f"{type(exc).__name__}: {exc}"},
             )
+
+    async def _run_validation_gate(self, result: "HackResult") -> None:
+        """Re-confirm every finding via an INDEPENDENT code path and tag each
+        validated/submittable. A worker that finds a bug is not allowed to be the
+        only thing that confirms it — this is what keeps autonomous runs from
+        submitting false positives. Fail-open on gate error (findings still
+        reported, just untagged); fail-CLOSED per-finding (un-reconfirmed =
+        not submittable)."""
+        if not self._validate or not result.findings:
+            return
+        try:
+            from core.swarm_validation import partition, validate_findings
+            annotated = await validate_findings(
+                result.findings, default_target=self.target)
+            result.findings[:] = annotated
+            sub, leads = partition(annotated)
+            self.audit.event(
+                "findings.validated", target=self.target,
+                payload={"total": len(annotated), "submittable": len(sub),
+                         "leads": len(leads)})
+            self.narrator.info(
+                f"validation gate: {len(sub)} submittable, {len(leads)} lead(s) "
+                f"of {len(annotated)} finding(s)")
+        except Exception as exc:  # noqa: BLE001 — gate must never break the hunt
+            logger.warning("validation gate failed: %s", exc)
 
     def _write_report(self, result: "HackResult", started_at: float) -> None:
         """Render hunt_<id>.html from in-memory findings (no LLM, blocking)."""

@@ -83,6 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "MITM-intercepted (cert verification is already off).")
     p.add_argument("--burp", action="store_true",
                    help="Shortcut for --proxy http://127.0.0.1:8080 (Burp default).")
+    p.add_argument("--no-validate", action="store_true",
+                   help="Skip the independent validation gate. By default every "
+                        "finding is re-confirmed via a separate code path and only "
+                        "those that pass are marked 'submittable'.")
 
     # --- Two-account BOLA / IDOR (specialist) -----------------------------
     # Identity A is the primary session above (--cookie / --auth-bearer /
@@ -282,6 +286,7 @@ def run_hack_cli(argv: list[str]) -> int:
         if args.workers is not None:
             hm.profile.max_concurrent = max(1, args.workers)
         hm._proxy = proxy  # route the resumed hunt through Burp/ZAP too
+        hm._validate = not args.no_validate
         audit = hm.audit
     else:
         audit = AuditLogger.for_hunt(
@@ -298,6 +303,7 @@ def run_hack_cli(argv: list[str]) -> int:
             auth_headers=auth_headers or None,
             bola_config=bola_config,
             proxy=proxy,
+            validate=not args.no_validate,
         )
     try:
         with bind_hunt_id(audit.hunt_id):
@@ -329,6 +335,10 @@ def run_hack_cli(argv: list[str]) -> int:
     print(f"[+] audit:      {result.audit_path}")
     print(f"[+] summary:    {summary_path}")
     print(f"[+] findings:   {result.findings_count}")
+    if not args.no_validate:
+        sub = result.submittable_count
+        print(f"[+] submittable:{sub}  (independently re-confirmed; "
+              f"{result.findings_count - sub} lead(s) need manual review)")
     print(f"[+] iterations: {result.iterations}")
     print(f"[+] stop:       {result.stop_reason}")
     audit.close()
