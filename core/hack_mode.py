@@ -63,6 +63,25 @@ logger = logging.getLogger("viper.hack_mode")
 # ---------------------------------------------------------------------------
 
 
+# Recon / attack-surface artifact classes — discovered endpoints, DNS records,
+# open ports, subdomains, tech fingerprints. These are MAP DATA, not
+# vulnerabilities, and must not inflate the vulnerability findings count or reach
+# the validation gate. (github_secret / shodan_cve / js_secret ARE real findings
+# and are deliberately NOT here.)
+_SURFACE_PREFIXES = frozenset({
+    "endpoint", "historical_url", "open_port", "port", "service", "http_service",
+    "subdomain", "subdomain_alive", "technology", "tech", "asset", "wayback",
+    "js_file", "dns_a", "dns_aaaa", "dns_mx", "dns_ns", "dns_txt", "dns_cname",
+    "dns_soa", "dns_ptr", "dns", "shodan_port", "shodan_tag", "shodan_intel",
+})
+
+
+def _is_surface(finding: dict) -> bool:
+    """True if `finding` is recon/attack-surface map data, not a vulnerability."""
+    head = str(finding.get("vuln_type") or finding.get("type") or "").split(":")[0].lower()
+    return head in _SURFACE_PREFIXES
+
+
 @dataclass
 class HackResult:
     target: str
@@ -71,6 +90,7 @@ class HackResult:
     audit_path: Path
     phase_results: dict[str, CoordinatorResult] = field(default_factory=dict)
     findings: list[dict] = field(default_factory=list)
+    surface: list[dict] = field(default_factory=list)
     iterations: int = 0
     elapsed_s: float = 0.0
     stop_reason: str = ""
@@ -85,6 +105,11 @@ class HackResult:
         """Findings an INDEPENDENT validation pass re-confirmed (see the gate)."""
         return sum(1 for f in self.findings if f.get("submittable"))
 
+    @property
+    def surface_count(self) -> int:
+        """Recon / attack-surface artifacts (endpoints, DNS, ports) — not vulns."""
+        return len(self.surface)
+
     def to_dict(self) -> dict:
         return {
             "target": self.target,
@@ -97,6 +122,7 @@ class HackResult:
             "timed_out": self.timed_out,
             "findings_count": self.findings_count,
             "submittable_count": self.submittable_count,
+            "surface_count": self.surface_count,
             # Normalized findings list so consumers (reports, the benchmark
             # scorer) can read individual findings, not just the count.
             "findings": [
@@ -657,9 +683,11 @@ class HackMode:
                 phase_res = await self._run_phase(phase)
                 # Save the most recent run of each phase
                 result.phase_results[phase] = phase_res
-                # Surface findings to top-level + state
+                # Surface findings to top-level + state. Recon/attack-surface
+                # artifacts (endpoints, DNS, ports) go to result.surface, not the
+                # vulnerability findings count / the validation gate.
                 for f in phase_res.findings:
-                    result.findings.append(f)
+                    (result.surface if _is_surface(f) else result.findings).append(f)
                     self._state["findings"].append(f)
                     iter_findings.append(f)
                     # Fold every finding into the live belief state (Section 7.2)
@@ -904,7 +932,7 @@ class HackMode:
                         chain_depth=depth + 1)
                 result.phase_results[f"{phase}@chain{depth + 1}"] = pr
                 for f in pr.findings:
-                    result.findings.append(f)
+                    (result.surface if _is_surface(f) else result.findings).append(f)
                     self._state["findings"].append(f)
                     round_findings.append(f)
                     self.narrator.emit_finding(f)

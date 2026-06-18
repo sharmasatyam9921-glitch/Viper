@@ -334,7 +334,8 @@ def run_hack_cli(argv: list[str]) -> int:
     print(f"\n[+] hunt_id:    {result.hunt_id}")
     print(f"[+] audit:      {result.audit_path}")
     print(f"[+] summary:    {summary_path}")
-    print(f"[+] findings:   {result.findings_count}")
+    print(f"[+] findings:   {result.findings_count} vuln"
+          f"  (+{result.surface_count} recon/surface artifacts)")
     if not args.no_validate:
         sub = result.submittable_count
         print(f"[+] submittable:{sub}  (independently re-confirmed; "
