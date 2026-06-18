@@ -184,6 +184,39 @@ def test_bola_finding_trusted_submittable():
     assert f["submittable"] and f["validation_confidence"] >= 0.8
 
 
+def test_secrets_shape_specific_submittable():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/javascript"},
+                        'var k="AKIAIOSFODNN7EXAMPLE";', url)
+    f = _run1({"vuln_type": "secret:aws", "url": "http://t/main.js"}, resp)
+    assert f["submittable"]
+
+
+def test_secrets_generic_match_is_lead():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        "<html>password reset instructions</html>", url)
+    f = _run1({"vuln_type": "secret:generic", "url": "http://t/page"}, resp)
+    assert not f["submittable"]  # no shape-specific credential -> lead
+
+
+def test_access_control_anon_sensitive_submittable():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '[{"id":1,"email":"alice@corp.example","role":"admin"}]', url)
+    f = _run1({"vuln_type": "access_control:missing_authorization",
+               "url": "http://t/api/Users"}, resp)
+    assert f["submittable"]
+
+
+def test_access_control_forbidden_is_lead():
+    def resp(m, url, h):
+        return HttpResp(403, {}, "Forbidden", url)
+    f = _run1({"vuln_type": "access_control:missing_authorization",
+               "url": "http://t/api/Users"}, resp)
+    assert not f["submittable"]  # 403 anonymously -> access control works
+
+
 def test_cmdi_not_reproduced_is_lead():
     # cmdi re-test re-runs the hardened worker against the finding URL (its own
     # fetch, not this fake). An unreachable / non-injectable target won't

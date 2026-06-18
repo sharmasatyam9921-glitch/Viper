@@ -41,6 +41,18 @@ _SQL_ERR = re.compile(
     r"PostgreSQL.{0,20}ERROR|Unclosed quotation mark", re.I)
 _PASSWD = re.compile(r"root:.*?:0:0:")
 
+# Unambiguous credential SHAPES — a benign page never carries these verbatim.
+_SECRET_SHAPE = re.compile(
+    r"AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|"
+    r"sk_live_[0-9A-Za-z]{20,}|AIza[0-9A-Za-z_\-]{35}|"
+    r"xox[baprs]-[0-9A-Za-z\-]{10,}|"
+    r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----")
+# Sensitive content that should never come back to an ANONYMOUS request.
+_SENSITIVE = re.compile(
+    r'"(email|password|passwordHash|ssn|creditCard|cardNum|apiKey|api_key|'
+    r'secret|sessionToken|access_token)"\s*:|AKIA[0-9A-Z]{16}|'
+    r"-----BEGIN .*PRIVATE KEY", re.I)
+
 
 def _ctype(resp) -> str:
     return ((getattr(resp, "headers", {}) or {}).get("content-type", "") or "").lower()
@@ -118,6 +130,39 @@ async def _recheck_ssti(finding, fetch, timeout):
     if confirmed >= 2:
         return True, 0.8, "two fresh arithmetic expressions evaluated (consumed), absent in controls"
     return False, 0.2, "fresh operands not evaluated — not a template engine"
+
+
+async def _recheck_secrets(finding, fetch, timeout):
+    """Confirm a SHAPE-SPECIFIC credential (AKIA…, ghp_…, sk_live_…, PEM key) is
+    reproduced in the response — a benign page never carries these verbatim. A
+    generic/entropy-only match stays a lead (manual review)."""
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    r = await fetch("GET", url, timeout=timeout)
+    if not _ok2xx(r):
+        return False, 0.1, "url no longer serves 2xx"
+    m = _SECRET_SHAPE.search(_body(r))
+    if m:
+        return True, 0.75, f"shape-specific credential reproduced ({m.group(0)[:4]}…)"
+    return False, 0.2, "no shape-specific credential on re-fetch — manual review"
+
+
+async def _recheck_access_control(finding, fetch, timeout):
+    """Confirm a protected endpoint returns sensitive data to an ANONYMOUS request
+    (no session). Read-only: a 401/403 (or no sensitive content) means access
+    control works and the finding stays a lead."""
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    # use_session_auth=False -> send NO session, even if a hunt installed one.
+    r = await fetch("GET", url, timeout=timeout, use_session_auth=False)
+    if not _ok2xx(r):
+        return False, 0.2, "not accessible anonymously (access control works)"
+    body = _body(r)
+    if _SENSITIVE.search(body):
+        return True, 0.7, "protected endpoint returns sensitive data ANONYMOUSLY (2xx)"
+    return False, 0.2, "anonymous access returns no sensitive content"
 
 
 async def _recheck_cmdi(finding, fetch, timeout):
@@ -232,14 +277,20 @@ async def _reconfirm(finding: dict, fetch, timeout: float) -> Tuple[bool, float,
         return await _recheck_lfi(finding, fetch, timeout)
     if head in ("rce", "cmdi", "command_injection"):
         return await _recheck_cmdi(finding, fetch, timeout)
+    if head in ("secret", "secrets", "js_secret", "github_secret"):
+        return await _recheck_secrets(finding, fetch, timeout)
+    if head == "access_control":
+        return await _recheck_access_control(finding, fetch, timeout)
     # Two-account BOLA: the find_bola engine already proved a cross-user read with
     # owner+attacker+anon probes — that IS the independent confirmation.
     if ":bola:" in vt_full or head == "bola":
         return True, 0.85, "two-account cross-user object read confirmed by the BOLA engine"
 
-    # Classes without an orthogonal re-test yet (single-session idor,
-    # mass_assignment, jwt, secrets, nosql, ...) -> stay a LEAD (fail-closed).
-    return False, 0.0, f"no independent re-test for '{head}' yet — manual review"
+    # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
+    #   single-session idor  -> needs two accounts (use the two-account BOLA flow)
+    #   mass_assignment      -> needs a write + read-back (non-destructive: no writes)
+    #   jwt / nosql          -> need the auth flow / a body mutation to prove impact
+    return False, 0.0, f"no safe read-only re-test for '{head}' — manual review"
 
 # Map the swarm workers' vuln_type strings (the head token before ':') to the
 # FindingValidator dispatch keys. Grounded in the actual emitted vuln_types
