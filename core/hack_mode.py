@@ -527,6 +527,20 @@ class HackMode:
             self.narrator.info(
                 f"validation gate: {len(sub)} submittable, {len(leads)} lead(s) "
                 f"of {len(annotated)} finding(s)")
+            # Draft a platform-ready report for each submittable finding (human
+            # reviews + submits; VIPER never submits on its own).
+            if sub:
+                try:
+                    from core.submission_draft import write_drafts
+                    ddir = Path("reports/submissions") / self.audit.hunt_id
+                    paths = write_drafts(sub, ddir, target=self.target)
+                    if paths:
+                        self.narrator.info(
+                            f"drafted {len(paths)} submission report(s) -> {ddir}")
+                        self.audit.event("submission.drafted", target=self.target,
+                                         payload={"count": len(paths), "dir": str(ddir)})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("submission draft generation failed: %s", exc)
         except Exception as exc:  # noqa: BLE001 — gate must never break the hunt
             logger.warning("validation gate failed: %s", exc)
 
