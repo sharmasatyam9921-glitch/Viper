@@ -7,7 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.confirm_gate import ThreeGateConfirmer, _set_param  # noqa: E402
+from core.confirm_gate import (  # noqa: E402
+    ThreeGateConfirmer,
+    _set_param,
+    confirm_finding,
+)
 from core.swarm_workers.vuln._http import HttpResp  # noqa: E402
 from urllib.parse import parse_qs, urlsplit  # noqa: E402
 
@@ -31,6 +35,39 @@ def _confirm(responder, finding, *, clock=None, retests=1, marker=None):
 def test_set_param_adds_and_replaces():
     assert _set_param("http://t/s?q=1", "q", "X") == "http://t/s?q=X"
     assert _set_param("http://t/s", "q", "X") == "http://t/s?q=X"
+    # replaces the named param, preserves the others in order
+    assert _set_param("http://t/s?a=1&q=2&b=3", "q", "X") == "http://t/s?a=1&q=X&b=3"
+    # empty/None name -> unchanged
+    assert _set_param("http://t/s?q=1", "", "X") == "http://t/s?q=1"
+
+
+def test_length_only_signal_is_a_lead():
+    # Body size shifts materially but nothing stronger fires -> length lead.
+    def resp(url):
+        return HttpResp(200, {}, "x" * 80 if "BIG" in url else "y", url)
+    v = _confirm(resp, {"url": "http://t/s?q=1", "parameter": "q",
+                        "payload": "BIG"})
+    assert v.signal == "length" and v.reproduced
+    assert not v.is_real and v.confidence == 0.45
+
+
+def test_attack_failure_fails_closed():
+    # Baseline is fine, the attack request errors out -> no verdict, fail closed.
+    # (compare the DECODED param value — the quote is %27-encoded in the URL).
+    def resp(url):
+        return None if "'" in _injected(url) else HttpResp(200, {}, "ok", url)
+    v = _confirm(resp, {"url": "http://t/x?id=1", "parameter": "id",
+                        "payload": "1'"})
+    assert not v.is_real and "attack request failed" in v.reason
+
+
+def test_confirm_finding_convenience_wrapper():
+    async def fetch(method, url, *, timeout=10.0):
+        v = _injected(url)
+        return HttpResp(500 if "'" in v else 200, {}, "db error" if "'" in v else "ok", url)
+    v = asyncio.run(confirm_finding(
+        {"url": "http://t/x?id=1", "parameter": "id", "payload": "1'"}, fetch))
+    assert v.is_real and v.signal == "status"
 
 
 def test_reflection_alone_is_a_lead_not_real():

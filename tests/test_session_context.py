@@ -33,6 +33,19 @@ def test_role_diff_reports_per_role_status():
     assert diff == {"A": 200, "B": 403}
 
 
+def test_get_role_and_reachability_matrix():
+    ctx = _two_role_ctx()
+    a = ctx.get_role("A")
+    assert a is not None and a.headers == {"Cookie": "s=alice"}
+    assert ctx.get_role("nope") is None
+    m = ctx.reachability_matrix()
+    assert m[("A", "http://t/api/orders/1")] == 200
+    assert m[("B", "http://t/api/orders/1")] == 403
+    # returned matrix is a copy — mutating it must not affect the context
+    m[("A", "http://t/api/orders/1")] = 999
+    assert ctx.status("A", "http://t/api/orders/1") == 200
+
+
 def test_bola_config_for_has_gate_shape():
     cfg = _two_role_ctx().bola_config_for("A", "B")
     assert cfg["owner_headers"] == {"Cookie": "s=alice"}
@@ -97,7 +110,8 @@ def test_from_dict_tolerates_malformed_state():
                          ["A", "http://t/bad"],          # missing status -> skipped
                          ["A", "http://t/x", "NaN"]],    # bad status -> skipped
         "corpus": [["A", "GET", "http://t/ok", 200],
-                   ["A", "GET"]],                        # short tuple -> skipped
+                   ["A", "GET"],                         # short tuple -> skipped
+                   ["A", "GET", "http://t/u", "NaN"]],   # bad status -> skipped
     }
     ctx = SessionContext.from_dict(d)
     assert ctx.roles == ["A"]
