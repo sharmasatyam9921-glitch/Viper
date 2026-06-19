@@ -107,7 +107,7 @@ verify_ssti.py
 verify_cors.py
 railway_*.py
 natas_runner.py
-test_mcp*.py
+/test_mcp*.py
 viper_attack.py
 fill_hackerone_draft.py
 update_draft_api.py
