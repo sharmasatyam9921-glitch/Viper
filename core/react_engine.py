@@ -439,6 +439,28 @@ class ReACTEngine:
         )
         return thought, action, False
 
+    def _render_active_skills(self, context: Dict[str, Any]) -> str:
+        """Inject ONLY the skills relevant to the current phase/technique.
+
+        Backed by the lazy skill catalog: at most a few skills are rendered, so
+        the prompt stays flat in size no matter how large the catalog grows.
+        Best-effort — any failure returns "" so the reasoning loop is never
+        blocked by the catalog.
+        """
+        try:
+            from core.skill_catalog import default_registry
+            reg = default_registry()
+            phase = str(context.get("phase") or "").lower() or None
+            technique = context.get("attack_path_type")
+            intent_bits = [str(t) for t in (context.get("technologies") or [])]
+            intent_bits += [str(v) for v in (context.get("vulns_found") or [])]
+            skills = reg.select(phase=phase, technique=technique,
+                                intent=" ".join(intent_bits), limit=3)
+            return reg.render(skills, max_chars=1200)
+        except Exception as exc:
+            logger.debug("skill injection skipped: %s", exc)
+            return ""
+
     async def _llm_think(
         self,
         target: str,
@@ -484,6 +506,11 @@ class ReACTEngine:
         roe_section = self.roe_engine.to_prompt_section()
         if roe_section:
             system_prompt = system_prompt + "\n\n" + roe_section
+        # P3: inject only the skills relevant to this phase/technique (lazy
+        # registry; flat token cost regardless of catalog size).
+        skills_section = self._render_active_skills(context)
+        if skills_section:
+            system_prompt = system_prompt + "\n\n" + skills_section
 
         try:
             response = await self.router.complete_for_task(

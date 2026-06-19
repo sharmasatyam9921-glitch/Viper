@@ -43,6 +43,24 @@ class AttackPathClassification:
             "target_cves": self.target_cves,
         }
 
+    def skills(self, limit: int = 5):
+        """Relevant catalog skills for this classification (lazy registry).
+
+        Maps attack_path_type + phase + reasoning to the most relevant skills so
+        a caller can inject focused guidance instead of the whole catalog.
+        Best-effort: returns [] if the catalog is unavailable.
+        """
+        try:
+            from core.skill_catalog import default_registry
+            return default_registry().select(
+                technique=self.attack_path_type,
+                phase=self.required_phase,
+                intent=self.reasoning or self.attack_path_type,
+                limit=limit,
+            )
+        except Exception:
+            return []
+
     @classmethod
     def from_dict(cls, d: dict) -> "AttackPathClassification":
         return cls(
