@@ -555,6 +555,22 @@ class HackMode:
                 result.findings, default_target=self.target,
                 bola_config=self._bola_config,
                 oob_store=(self._oob.store if self._oob is not None else None))
+            # Attack-chain correlation: recognize low->critical escalations across
+            # the confirmed findings and emit synthetic chain:* findings (each
+            # submittable iff all its components are).
+            try:
+                from core.chain_recipes import correlate_chains
+                chains = correlate_chains(annotated)
+                if chains:
+                    annotated = annotated + chains
+                    self.audit.event(
+                        "chains.correlated", target=self.target,
+                        payload={"count": len(chains),
+                                 "chains": [c["vuln_type"] for c in chains]})
+                    self.narrator.info(
+                        f"attack-chain correlation: {len(chains)} escalation chain(s)")
+            except Exception as exc:  # noqa: BLE001 — chaining is best-effort
+                logger.warning("chain correlation failed: %s", exc)
             result.findings[:] = annotated
             sub, leads = partition(annotated)
             self.audit.event(
