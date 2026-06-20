@@ -82,6 +82,11 @@ def main():
         from core.mcp_cli import run_mcp_cli
         sys.exit(run_mcp_cli(sys.argv[2:]))
 
+    # `viper.py oob [start|demo]` — out-of-band interaction listener for blind vulns.
+    if len(sys.argv) > 1 and sys.argv[1] == "oob":
+        from core.oob_cli import run_oob_cli
+        sys.exit(run_oob_cli(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="VIPER 4.0 — AI Bug Bounty Scanner")
     parser.add_argument("target", nargs="?", help="Target URL to scan")
     parser.add_argument("--full", action="store_true", help="Full hunt (recon+surface+nuclei+manual)")

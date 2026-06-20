@@ -347,7 +347,7 @@ async def _recheck_idor(finding, fetch, timeout, bola_config):
 
 
 async def _reconfirm(finding: dict, fetch, timeout: float,
-                     bola_config=None) -> Tuple[bool, float, str]:
+                     bola_config=None, oob_store=None) -> Tuple[bool, float, str]:
     """Independently re-test a swarm finding by its OWN shape (fresh request).
 
     Confirms the config/exposure classes an unauthenticated hunt actually finds,
@@ -355,6 +355,28 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
     ssti/cmdi/lfi/idor) are left as leads here — the hardened worker already did
     a baseline differential, but the gate does not yet have an orthogonal
     behavioral re-test for them, so it stays conservative (fail-closed)."""
+    # OUT-OF-BAND confirmation comes first: if the finding fired a canary probe
+    # and our listener recorded an interaction for that token, the target's
+    # backend reached out to us — irrefutable proof of a blind vulnerability,
+    # stronger than any in-band signal. (A token with no interaction is a blind
+    # probe that did not fire -> lead, never submittable.)
+    oob_token = finding.get("oob_token")
+    if oob_token and oob_store is not None:
+        from core.oob.canary import is_canary_token
+        if not is_canary_token(oob_token):
+            return False, 0.0, "oob token has invalid format — not confirmed"
+        try:
+            hit = oob_store.has_interaction(oob_token)
+        except Exception as e:   # noqa: BLE001 — fail closed, but surface the cause
+            logger.warning("oob_store.has_interaction failed: %s", e)
+            hit = False
+        if hit:
+            n = len(oob_store.interactions_for(oob_token))
+            return True, 0.95, (f"confirmed via out-of-band interaction: canary "
+                                f"{oob_token} received {n} callback(s)")
+        return False, 0.3, ("out-of-band payload fired but no interaction observed "
+                            "— unconfirmed (lead)")
+
     url = finding.get("url") or finding.get("target") or ""
     if not url:
         return False, 0.0, "no url to re-test"
@@ -525,6 +547,7 @@ async def validate_findings(
     validator=None,
     fetch=None,
     bola_config=None,
+    oob_store=None,
 ) -> List[dict]:
     """Annotate each finding with an INDEPENDENT re-confirmation verdict.
 
@@ -556,7 +579,8 @@ async def validate_findings(
                 probe["attack"] = norm
                 ok, conf, reason = await validator.validate(probe, target)
             else:
-                ok, conf, reason = await _reconfirm(g, fetch, timeout, bola_config)
+                ok, conf, reason = await _reconfirm(g, fetch, timeout, bola_config,
+                                                    oob_store=oob_store)
         except Exception as e:  # noqa: BLE001 — fail closed on any error
             ok, conf, reason = False, 0.0, f"validation error: {e}"
         g["validated"] = bool(ok)
