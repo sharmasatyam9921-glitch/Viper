@@ -58,6 +58,27 @@ def bola_plan(ctx: SessionContext, owner: str, attacker: str
     return candidates, config
 
 
+def bfla_plan(ctx: SessionContext, privileged: str, low: str
+              ) -> Tuple[List[str], dict]:
+    """Return (candidate_urls, bfla_config) for find_bfla / bfla_multi.
+
+    Candidates are the PRIVILEGED role's admin-shaped reachable endpoints — the
+    functions a low-priv role must not reach. Reuses the role reachability matrix.
+    """
+    from core.specialist.bfla_engine import is_privileged_path
+    p = ctx.get_role(privileged)
+    lo = ctx.get_role(low)
+    if p is None or lo is None:
+        raise KeyError("both roles must be present for a BFLA plan")
+    candidates = [u for u in ctx.reachable_urls(privileged) if is_privileged_path(u)]
+    config = {
+        "privileged_name": privileged, "privileged_headers": dict(p.headers),
+        "low_name": low, "low_headers": dict(lo.headers),
+        "candidate_urls": candidates,
+    }
+    return candidates, config
+
+
 def _iter_har_entries(har: dict) -> Iterable[Tuple[str, str, int]]:
     for entry in (har.get("log", {}) or {}).get("entries", []):
         req = entry.get("request", {}) or {}

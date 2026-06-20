@@ -456,6 +456,12 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_cmdi(finding, fetch, timeout)
     if head in ("secret", "secrets", "js_secret", "github_secret"):
         return await _recheck_secrets(finding, fetch, timeout)
+    # Two-account BFLA: the find_bfla engine already proved a low-priv identity
+    # invoking a privileged function (admin+low+anon probes) — confirmed. Checked
+    # before the access_control re-test because its vuln_type head IS
+    # "access_control" but the two-account proof is the right confirmation.
+    if ":bfla:" in vt_full or head == "bfla":
+        return True, 0.85, "low-privilege access to a privileged function confirmed by the BFLA engine"
     if head == "access_control":
         return await _recheck_access_control(finding, fetch, timeout)
     # Two-account BOLA: the find_bola engine already proved a cross-user read with
