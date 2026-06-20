@@ -84,6 +84,26 @@ def test_chain_submittable_iff_all_components_submittable():
     assert not c2["submittable"] and c2["needs_manual_verification"]
 
 
+def test_is_type_does_not_over_match_substrings():
+    from core.chain_recipes import is_type
+    # "cors" must not match an unrelated head that merely contains the letters,
+    # and "admin" must not match "badminton"-style substrings.
+    assert not is_type("cors")({"vuln_type": "corsair_widget:x"})
+    assert not is_type("secret")({"vuln_type": "secretary_note"})
+    assert not is_type("ssrf")({"vuln_type": "xssrf_thing"})
+    # but legitimate family matches still work
+    assert is_type("xss")({"vuln_type": "xss_text:q"})
+    assert is_type("redirect")({"vuln_type": "open_redirect:next"})
+    assert is_type("cmdi")({"vuln_type": "rce:cmdi:blind:id"})
+
+
+def test_chain_components_must_be_distinct_findings_not_substrings():
+    # a lone git_exposed finding whose evidence mentions "secret" must NOT
+    # self-satisfy the exposure+secret chain (needs a distinct secret finding).
+    one = [_f("git_exposed:/.git", evidence="this dir may contain a secret")]
+    assert correlate_chains(one) == []
+
+
 def test_recipe_library_is_well_formed():
     for r in RECIPES:
         assert r.id and r.severity in ("critical", "high", "medium", "low")

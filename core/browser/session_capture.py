@@ -70,7 +70,8 @@ def bfla_plan(ctx: SessionContext, privileged: str, low: str
     lo = ctx.get_role(low)
     if p is None or lo is None:
         raise KeyError("both roles must be present for a BFLA plan")
-    candidates = [u for u in ctx.reachable_urls(privileged) if is_privileged_path(u)]
+    candidates = [u for u in ctx.reachable_urls(privileged, ok_only=True)
+                  if is_privileged_path(u)]
     config = {
         "privileged_name": privileged, "privileged_headers": dict(p.headers),
         "low_name": low, "low_headers": dict(lo.headers),

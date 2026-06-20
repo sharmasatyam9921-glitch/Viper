@@ -84,6 +84,15 @@ _CLASS = {
     "git_exposed": ("CWE-538", 7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                     "An exposed .git directory leaks source code and history.",
                     "Block access to .git; deploy build artifacts only."),
+    "bfla": ("CWE-863", 8.1, "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+             "A low-privilege user can invoke a privileged/administrative function "
+             "(broken function-level authorization, OWASP API #5).",
+             "Enforce role/permission checks server-side on every privileged "
+             "endpoint; deny by default; never rely on UI-hidden routes."),
+    "chain": ("CWE-Other", 9.0, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+              "Multiple findings compose into a higher-severity attack chain.",
+              "Remediate each contributing finding; the chain is broken if any "
+              "link is fixed, but all should be addressed."),
 }
 _DEFAULT = ("CWE-Other", 5.0, "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N",
             "Security weakness confirmed on the target.",
@@ -103,8 +112,12 @@ _HEAD_ALIAS = {
 
 def _norm_head(vuln_type: str) -> str:
     vt = (vuln_type or "").lower()
+    if vt.startswith("chain:"):
+        return "chain"
     if ":bola:" in vt:
         return "bola"
+    if ":bfla:" in vt:
+        return "bfla"
     head = vt.split(":")[0]
     return _HEAD_ALIAS.get(head, head)
 
@@ -132,8 +145,12 @@ def _title(finding: dict, vuln_type: str) -> str:
         "env_exposed": "Exposed Environment File",
         "information_disclosure": "Sensitive Information Disclosure",
         "git_exposed": "Exposed .git Directory",
+        "bfla": "Broken Function-Level Authorization (BFLA)",
+        "chain": "Attack Chain",
     }
     head = _norm_head(vuln_type)
+    if head == "chain":
+        return finding.get("title") or "Attack Chain"
     name = nice.get(head, (vuln_type or "Security Finding").replace("_", " ").title())
     param = finding.get("parameter")
     where = f" in parameter '{param}'" if param else ""
@@ -197,6 +214,12 @@ def build_submission(finding: dict, target: Optional[str] = None) -> str:
     """Render a HackerOne-ready Markdown draft for one (submittable) finding."""
     vt = finding.get("vuln_type") or finding.get("type") or "finding"
     cwe, cvss, vector, impact, remediation = _meta(vt)
+    # A chain carries its OWN per-recipe CWE/severity/narrative — prefer them.
+    if _norm_head(vt) == "chain":
+        cwe = finding.get("cwe") or cwe
+        impact = finding.get("evidence") or impact
+        cvss = {"critical": 9.3, "high": 8.1, "medium": 5.5, "low": 3.5}.get(
+            str(finding.get("severity") or "").lower(), cvss)
     sev = _cvss_severity(cvss)
     title = _title(finding, vt)
     url = finding.get("url") or target or ""

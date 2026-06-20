@@ -27,12 +27,19 @@ def _text(f: dict) -> str:
     return " ".join(str(f.get(k, "")) for k in ("title", "evidence", "vuln_type")).lower()
 
 
+def _word_in(name: str, head0: str) -> bool:
+    # match `name` as a whole underscore-delimited word of head0 (so "xss" matches
+    # "xss_text" and "redirect" matches "open_redirect", but "admin" never matches
+    # "badminton" and "cors" never matches "cors_xyz" via a bare substring).
+    return (name == head0 or head0.startswith(name + "_")
+            or head0.endswith("_" + name) or ("_" + name + "_") in ("_" + head0 + "_"))
+
+
 def is_type(*names: str) -> Predicate:
     def p(f: dict) -> bool:
-        h = _head(f)
-        head0 = h.split(":")[0]
-        return any(n == head0 or (":" + n + ":") in (":" + h + ":") or n in h
-                   for n in names)
+        segs = _head(f).split(":")        # e.g. ["idor","bola","/x"] / ["xss_text","q"]
+        head0 = segs[0]
+        return any(_word_in(n, head0) or n in segs for n in names)
     return p
 
 

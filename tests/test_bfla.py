@@ -94,11 +94,53 @@ def test_bfla_worker_is_opt_in():
     assert asyncio.run(run(_A())) == []              # no config -> nothing
 
 
-def test_gate_trusts_a_bfla_finding():
-    f = {"vuln_type": "access_control:bfla:/api/admin/users", "url": "http://t/api/admin/users"}
+def test_gate_trusts_an_engine_produced_bfla_finding():
+    # carries the engine's provenance (owner+attacker) -> trusted
+    f = {"vuln_type": "access_control:bfla:/api/admin/users",
+         "url": "http://t/api/admin/users", "owner": "admin", "attacker": "user"}
     out = asyncio.run(validate_findings([f], fetch=_fetch(lambda u, h: None)))
     assert out[0]["submittable"] and out[0]["validation_confidence"] == 0.85
     assert "BFLA engine" in out[0]["validation_reason"]
+
+
+def test_gate_rejects_bfla_finding_without_provenance():
+    # a stray ":bfla:" string without owner+attacker must NOT be trusted
+    f = {"vuln_type": "access_control:bfla:/x", "url": "http://t/x"}
+    out = asyncio.run(validate_findings([f], fetch=_fetch(lambda u, h: None)))
+    assert not out[0]["submittable"] and "provenance" in out[0]["validation_reason"]
+
+
+def test_privileged_path_matches_admin_variants():
+    for p in ("/administrators/info", "/administration", "/administer/x",
+              "/api/management/users", "/configuration", "/backoffice/x"):
+        assert is_privileged_path("http://t" + p), p
+
+
+def test_soft_deny_matches_common_denials():
+    def resp(url, h):
+        ck = h.get("Cookie", "")
+        if "s=admin" in ck:
+            return HttpResp(200, {}, '{"ok":1}', url)
+        if "s=user" in ck:
+            return HttpResp(200, {}, "<h1>Unauthorized</h1> you must be logged in", url)
+        return HttpResp(401, {}, "", url)
+    assert _run(resp, ["http://t/admin/panel"]) == []      # soft-deny -> not BFLA
+
+
+def test_identical_identities_are_rejected():
+    out = asyncio.run(find_bfla(
+        Identity("a", _ADMIN), Identity("b", _ADMIN),   # same headers
+        ["http://t/admin/x"], fetch=_fetch(lambda u, h: HttpResp(200, {}, "{}", u))))
+    assert out == []
+
+
+def test_anon_control_failure_fails_closed():
+    # admin+low 2xx, but the anon probe errors (None) -> cannot rule out public -> skip
+    def resp(url, h):
+        if not h.get("Cookie"):
+            return None                                  # anon probe fails
+        return HttpResp(200, {}, '{"data":1}', url)
+    assert _run(resp, ["http://t/admin/x"]) == []
 
 
 def test_bfla_plan_from_session_context():

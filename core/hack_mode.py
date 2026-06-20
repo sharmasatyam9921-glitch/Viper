@@ -571,6 +571,8 @@ class HackMode:
                         f"attack-chain correlation: {len(chains)} escalation chain(s)")
             except Exception as exc:  # noqa: BLE001 — chaining is best-effort
                 logger.warning("chain correlation failed: %s", exc)
+                self.audit.event("chains.correlated", target=self.target,
+                                 outcome="error", payload={"error": str(exc)})
             result.findings[:] = annotated
             sub, leads = partition(annotated)
             self.audit.event(

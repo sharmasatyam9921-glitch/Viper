@@ -37,18 +37,27 @@ logger = logging.getLogger("viper.specialist.bfla")
 
 Fetcher = Callable[..., Awaitable[object]]
 
-# Path tokens that denote a privileged / administrative function.
-_PRIVILEGED = re.compile(
-    r"(?:^|/)(admin|administrator|manage|management|console|dashboard|internal|"
-    r"actuator|superuser|sudo|staff|moderator|operator|config|configuration|"
-    r"settings/all|users/all|accounts/all|system|debug|metrics|env)\b",
-    re.IGNORECASE,
+# Path SEGMENT prefixes that denote a privileged / administrative function. A
+# prefix match (segment startswith) catches /admin, /administrators,
+# /administration, /administer, /management, /configuration, ... A slightly broad
+# candidate filter is safe here: the actual finding still requires the
+# admin-2xx + low-2xx + anon-denied proof, so extra candidates only get tested,
+# never falsely flagged.
+_PRIV_PREFIXES = (
+    "admin", "manage", "console", "dashboard", "internal", "actuator",
+    "superuser", "sudo", "staff", "moderator", "operator", "config", "system",
+    "debug", "metrics", "env", "settings", "owner", "root", "backoffice",
 )
 
-# A low-priv 2xx that is actually a soft-deny / login page — NOT the function.
+# A low-priv 2xx that is actually a soft-deny / login / "denied" page — NOT the
+# function. Broad on purpose: this only REJECTS a candidate, so over-matching is
+# the FP-averse direction. No \b anchors (they broke "unauthorized").
 _SOFT_DENY = re.compile(
-    r"\b(please log ?in|sign ?in|login required|unauthor|forbidden|access denied|"
-    r"not permitted|insufficient (?:privilege|permission))\b",
+    r"(please\s*log\s*in|sign\s*in|log\s*in to|logged\s*in|login\s*required|"
+    r"unauthori|not\s*authori|forbidden|access\s*denied|permission\s*denied|"
+    r"not\s*permitted|insufficient\s*(?:privilege|permission)|"
+    r"auth(?:entication|orization)?\s*required|"
+    r"you\s*(?:do not|don't|must)\s*(?:have|be))",
     re.IGNORECASE,
 )
 
@@ -62,7 +71,8 @@ class Identity:
 
 
 def is_privileged_path(url: str) -> bool:
-    return bool(_PRIVILEGED.search(urlsplit(url).path))
+    segs = [s.lower() for s in urlsplit(url).path.split("/") if s]
+    return any(seg.startswith(pre) for seg in segs for pre in _PRIV_PREFIXES)
 
 
 def _ok(resp) -> bool:
@@ -93,6 +103,13 @@ async def find_bfla(
 
     Returns confirmed-BFLA finding dicts (read-only, low-FP).
     """
+    # Identities must actually differ, or every endpoint the admin reaches the
+    # "low-priv" trivially reaches too (it IS the admin) -> false BFLA.
+    if privileged.headers == low_priv.headers:
+        logger.warning("BFLA: privileged and low-priv identities are identical — "
+                       "cannot prove role bypass; skipping.")
+        return []
+
     findings: list[dict] = []
     seen: set[str] = set()
     tested = 0
@@ -122,6 +139,12 @@ async def find_bfla(
         # 3. FP guard: if NO auth also reaches it, the endpoint is public.
         if unauth_control:
             r_anon = await fetch("GET", url, headers={}, timeout=timeout)
+            if r_anon is None:
+                # anon probe failed (timeout/network) — we cannot rule out that
+                # the endpoint is public, so fail closed and skip (FP-averse).
+                logger.debug("BFLA: %s anon control failed — skipping (cannot "
+                             "confirm not-public)", url)
+                continue
             if _ok(r_anon) and not _SOFT_DENY.search(_body(r_anon)):
                 logger.debug("BFLA: %s is public (anon 2xx) — not a finding", url)
                 continue
