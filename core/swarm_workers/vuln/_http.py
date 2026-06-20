@@ -111,6 +111,26 @@ def get_proxy() -> Optional[str]:
     return _proxy_var.get()
 
 
+# Active out-of-band interaction server (OOBServer) for blind-vuln confirmation.
+# Workers mint a canary, fire its payload, and tag the finding with oob_token;
+# the validation gate confirms iff the target's backend calls the listener back.
+# ContextVar (concurrent-hunt safe); default None -> no OOB probing.
+_oob_var: contextvars.ContextVar[object] = contextvars.ContextVar(
+    "viper_oob_server", default=None)
+
+
+def set_oob(server: object) -> None:
+    _oob_var.set(server)
+
+
+def clear_oob() -> None:
+    _oob_var.set(None)
+
+
+def get_oob():
+    return _oob_var.get()
+
+
 @dataclass
 class HttpResp:
     status: int

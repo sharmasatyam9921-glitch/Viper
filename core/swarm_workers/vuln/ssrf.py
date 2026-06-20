@@ -12,11 +12,13 @@ remote page looks like; the metadata payloads must produce markers that
 the baseline does not, which keeps false positives low (a page that
 happens to mention "instance-id" everywhere won't trip the probe).
 
-NOTE: This is purely RESPONSE-BASED SSRF — the target must reflect the
-fetched content back to us. Blind SSRF (where the server makes the
-request but returns nothing distinguishing) needs an out-of-band
-interaction (OAST/collaborator) capability, which is a SEPARATE build and
-intentionally out of scope here.
+This worker does BOTH:
+  * RESPONSE-BASED SSRF — the target reflects fetched internal/metadata content
+    back to us (the markers below), confirmed in-band.
+  * BLIND SSRF — when an out-of-band (OOB) interaction server is active, it also
+    fires a canary URL; if the target's backend dereferences it and calls our
+    listener back, the validation gate confirms it (the only way to prove blind
+    SSRF, which returns nothing distinguishing in-band).
 
 GET-only, read-only payloads — no writes or data-mutation.
 """
@@ -32,6 +34,7 @@ from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
 from ._http import HttpResp, add_query, fetch, normalize_target_url
+from ._oob import fire_oob
 
 logger = logging.getLogger("viper.swarm_workers.vuln.ssrf")
 
@@ -126,6 +129,13 @@ def _markers(resp: HttpResp | None, echo: str = "") -> set[str]:
 
 async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
     findings: list[dict] = []
+
+    # Blind SSRF: fire an OOB canary at this param (no-op if no OOB server). The
+    # gate confirms it only if the target's backend calls our listener back.
+    findings.extend(await fire_oob(
+        url, param, vuln_type=f"ssrf:blind:{param}",
+        title=f"Blind SSRF candidate via ?{param}= (out-of-band canary)",
+        cwe="CWE-918", payload_key="ssrf", timeout=timeout))
 
     # Baseline: what does a benign remote fetch look like? Markers found here
     # are noise (e.g. the page itself documents metadata) and are subtracted.

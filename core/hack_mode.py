@@ -187,6 +187,7 @@ class HackMode:
         bola_config: Optional[dict] = None,
         proxy: Optional[str] = None,
         validate: bool = True,
+        oob=None,
     ) -> None:
         """
         coordinator_factory: optional override for tests. Takes
@@ -213,6 +214,10 @@ class HackMode:
         self._bola_config = copy.deepcopy(bola_config) if bola_config else None
         self._proxy = proxy or None
         self._validate = validate
+        # Optional out-of-band interaction server. When set, blind-capable workers
+        # fire canary payloads and the validation gate confirms a finding iff the
+        # target's backend calls the listener back.
+        self._oob = oob
         # Per-hunt shared session context: holds the authenticated identities
         # under test and the (role, url) -> status reachability matrix that
         # captured traffic populates. Seeded from the supplied identities so the
@@ -548,7 +553,8 @@ class HackMode:
             from core.swarm_validation import partition, validate_findings
             annotated = await validate_findings(
                 result.findings, default_target=self.target,
-                bola_config=self._bola_config)
+                bola_config=self._bola_config,
+                oob_store=(self._oob.store if self._oob is not None else None))
             result.findings[:] = annotated
             sub, leads = partition(annotated)
             self.audit.event(
@@ -643,6 +649,14 @@ class HackMode:
                 self.narrator.info("session auth installed — testing as a logged-in user")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("could not install session auth: %s", exc)
+        # Out-of-band interaction server — lets blind-capable workers fire canaries.
+        if self._oob is not None:
+            try:
+                from .swarm_workers.vuln._http import set_oob
+                set_oob(self._oob)
+                self.narrator.info("out-of-band interaction listener active (blind-vuln confirmation)")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not install OOB server: %s", exc)
         if self.scope_reasoner is None:
             return  # owned box (lab/CTF) — no gate
         try:
@@ -666,11 +680,12 @@ class HackMode:
     def _clear_scope_guard(self) -> None:
         try:
             from .swarm_workers.vuln._http import (
-                clear_auth, clear_proxy, clear_scope_guard,
+                clear_auth, clear_oob, clear_proxy, clear_scope_guard,
             )
             clear_scope_guard()
             clear_auth()
             clear_proxy()
+            clear_oob()
         except Exception:
             pass
         try:

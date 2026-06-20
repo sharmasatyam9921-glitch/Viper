@@ -175,6 +175,17 @@ async def run(agent: SwarmAgent) -> List[dict]:
     marker = _marker()
     params = _target_params(url)
 
+    # Blind OS command injection: fire an OOB canary at each candidate param
+    # (no-op without an OOB server). A timing differential is unreliable (the
+    # cmdi tarpit lesson); a DNS/HTTP callback from the shell is irrefutable.
+    from ._oob import fire_oob
+    for param in params:
+        findings.extend(await fire_oob(
+            url, param, vuln_type=f"rce:cmdi:blind:{param}",
+            title=f"Blind command injection candidate via ?{param}= (out-of-band)",
+            cwe="CWE-78", payload_key="cmdi_curl", severity="critical",
+            timeout=timeout))
+
     for param in params:
         # Control: a benign value must NOT surface the unique marker. If the
         # control already contains it (impossible by construction, but guards
