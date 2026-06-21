@@ -621,7 +621,29 @@ class HackMode:
             self.narrator.info(
                 f"validation gate: {len(sub)} submittable, {len(leads)} lead(s) "
                 f"of {len(annotated)} finding(s)")
-            # Draft a platform-ready report for each submittable finding (human
+            # Cross-hunt duplicate suppression: don't re-draft a class already
+            # drafted on the same endpoint in a prior hunt (a dup earns nothing).
+            dups: list[dict] = []
+            if sub:
+                try:
+                    from core.submission_ledger import SubmissionLedger
+                    ledger = SubmissionLedger()
+                    fresh, dups = ledger.partition_new(sub)
+                    for f in dups:
+                        f["duplicate"] = True
+                    if dups:
+                        self.narrator.info(
+                            f"duplicate suppression: {len(dups)} finding(s) already "
+                            f"drafted in a prior hunt — skipping")
+                        self.audit.event("submission.duplicates", target=self.target,
+                                         payload={"count": len(dups)})
+                    sub = fresh
+                    for f in fresh:
+                        ledger.record(f)
+                    ledger.save()
+                except Exception as exc:  # noqa: BLE001 — dedup never blocks drafting
+                    logger.warning("duplicate suppression failed: %s", exc)
+            # Draft a platform-ready report for each NEW submittable finding (human
             # reviews + submits; VIPER never submits on its own).
             if sub:
                 try:
