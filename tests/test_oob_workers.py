@@ -33,8 +33,8 @@ class _VulnBackend(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def do_GET(self):
-        m = _URL.search(urllib.parse.unquote(self.path))
+    def _callback(self, text):
+        m = _URL.search(text or "")
         if m:
             host, port, tokpath = m.groups()
             token = host.split(".")[0] if "." in host else (tokpath or host)
@@ -42,11 +42,23 @@ class _VulnBackend(BaseHTTPRequestHandler):
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/{token}", timeout=3).read()
             except Exception:
                 pass
+
+    def _ok(self):
         body = b"ok"
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        self._callback(urllib.parse.unquote(self.path))
+        self._ok()
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        self._callback(body)                      # XXE: resolve external entity URL
+        self._ok()
 
 
 class _Agent:
@@ -101,6 +113,18 @@ def test_cmdi_worker_blind_oob_is_confirmed_end_to_end():
     assert blind, "cmdi worker emitted no OOB-tagged finding"
     assert all("cmdi:blind" in f["vuln_type"] for f in blind)
     assert any(f["submittable"] for f in out), "blind cmdi callback not confirmed"
+
+
+def test_xxe_worker_blind_oob_is_confirmed_end_to_end():
+    from core.swarm_workers.vuln.xxe import run as xxe_run
+    srv, base = _backend()
+    try:
+        blind, out = _run_worker_with_oob(xxe_run, base)   # XML-body canary
+    finally:
+        srv.shutdown()
+    assert blind, "xxe worker emitted no OOB-tagged finding"
+    assert all("xxe:blind" in f["vuln_type"] for f in blind)
+    assert any(f["submittable"] for f in out), "blind XXE callback not confirmed"
 
 
 def test_workers_emit_no_oob_finding_without_a_server():

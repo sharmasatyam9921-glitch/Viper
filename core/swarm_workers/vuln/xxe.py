@@ -17,9 +17,10 @@ A finding is raised only when, relative to a benign control XML:
 
 The control XML (no DOCTYPE, no entity) is sent first; if it already produces
 the same entity/DOCTYPE error text, that text is just the server's generic XML
-handling and is not counted as a signal. Blind XXE (no reflected file, no
-parser error) is NOT flagged here — it needs an OAST/out-of-band callback that
-this in-process probe can't observe.
+handling and is not counted as a signal. Blind XXE (no reflected file, no parser
+error) is confirmed out-of-band: when an OOB interaction server is active, the
+probe also sends an XXE whose external entity points at a canary URL; if the
+parser resolves it and calls our listener back, the gate confirms it.
 
 READ-ONLY: the only external entity used is a local-file read of a
 non-sensitive, world-readable system file. No writes, no SSRF callbacks.
@@ -35,7 +36,7 @@ from urllib.parse import urlsplit
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
-from ._http import HttpResp, fetch, normalize_target_url
+from ._http import HttpResp, fetch, get_oob, normalize_target_url
 
 logger = logging.getLogger("viper.swarm_workers.vuln.xxe")
 
@@ -154,6 +155,8 @@ async def run(agent: SwarmAgent) -> List[dict]:
     origin = _origin(url)
     timeout = min(agent.timeout_s, 10.0)
     findings: list[dict] = []
+    oob = get_oob()
+    oob_fired = 0
 
     for path in _XML_PATHS:
         target = origin + path
@@ -164,6 +167,34 @@ async def run(agent: SwarmAgent) -> List[dict]:
             if not _accepts_xml(control):
                 continue
             control_entity_noise = _entity_signal(control)
+
+            # 1b) Blind XXE: on an XML-accepting endpoint, send an external-entity
+            #     pointing at an OOB canary (no-op without an OOB server; capped to
+            #     a few endpoints). The gate confirms iff the parser calls back.
+            if oob is not None and oob_fired < 3:
+                try:
+                    from core.oob.canary import payloads_for
+                    canary = oob.new_canary("xxe")
+                    await _post_xml(target, payloads_for(canary)["xxe"], ct, timeout)
+                    findings.append({
+                        "type": "xxe",
+                        "vuln_type": f"xxe:blind:{path or '/'}",
+                        "title": f"Blind XXE candidate at {path or '/'} (out-of-band canary)",
+                        "severity": "high",
+                        "url": target,
+                        "parameter": "xml-body",
+                        "payload": payloads_for(canary)["xxe"],
+                        "cwe": "CWE-611",
+                        "oob_token": canary.token,
+                        "confidence": 0.5,
+                        "needs_oob_confirmation": True,
+                        "evidence": (f"POST {ct} XXE with an external entity to OOB "
+                                     f"canary {canary.token}; submittable only if the "
+                                     "XML parser calls our listener back."),
+                    })
+                    oob_fired += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("xxe oob probe failed: %s", exc)
 
             # 2) Send the local-file XXE payload.
             resp = await _post_xml(target, _XXE_PAYLOAD, ct, timeout)
