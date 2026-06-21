@@ -239,8 +239,20 @@ def test_lfi_single_quoted_line_is_lead():
 def test_bola_finding_trusted_submittable():
     def resp(m, url, h):
         return HttpResp(200, {}, "x", url)
-    f = _run1({"vuln_type": "idor:bola:/api/orders/1", "url": "http://t/api/orders/1"}, resp)
+    # find_bola always stamps owner+attacker provenance; the gate trusts that.
+    f = _run1({"vuln_type": "idor:bola:/api/orders/1", "url": "http://t/api/orders/1",
+               "owner": "A", "attacker": "B"}, resp)
     assert f["submittable"] and f["validation_confidence"] >= 0.8
+
+
+def test_external_mcp_bola_finding_is_not_trusted():
+    # an external tool's :bola: claim (source=mcp:*) must NOT be auto-trusted —
+    # it falls through to a real re-test and stays a lead.
+    def resp(m, url, h):
+        return HttpResp(200, {}, "x", url)
+    f = _run1({"vuln_type": "idor:bola:/x", "url": "http://t/x",
+               "owner": "A", "attacker": "B", "source": "mcp:arsenal:scan"}, resp)
+    assert not f["submittable"]
 
 
 def test_secrets_live_credential_submittable():

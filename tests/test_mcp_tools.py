@@ -48,6 +48,22 @@ def test_normalize_findings_array_caps_confidence():
     assert f["source"] == "mcp:arsenal:scan" and f["needs_manual_verification"]
 
 
+def test_normalize_clips_oversized_fields():
+    import json as _json
+    res = {"is_error": False, "text": _json.dumps({"findings": [
+        {"vuln_type": "info", "url": "http://t/" + "a" * 5000,
+         "evidence": "x" * 9000}]})}
+    f = normalize_tool_result("a", "t", res)[0]
+    assert len(f["url"]) <= 2048 + 20 and len(f["evidence"]) <= 4000 + 20
+
+
+def test_collect_caps_plan_size():
+    from core.mcp_tool_bridge import collect_mcp_findings, _MAX_PLAN_CALLS
+    # huge plan of malformed entries -> capped + all skipped, never raises
+    plan = [{"bad": i} for i in range(_MAX_PLAN_CALLS + 25)]
+    assert asyncio.run(collect_mcp_findings(None, plan)) == []
+
+
 def test_normalize_ignores_errors_and_unstructured():
     assert normalize_tool_result("a", "t", {"is_error": True, "text": "x"}) == []
     assert normalize_tool_result("a", "t", {"is_error": False, "text": "just prose"}) == []
@@ -100,6 +116,26 @@ def test_external_scanner_output_is_filtered_by_the_gate():
     assert len(sub) == 1 and sub[0]["vuln_type"] == "sqli:id"
     leads = [f for f in validated if not f["submittable"]]
     assert any(f["vuln_type"] == "xss_text:q" for f in leads)   # bogus XSS filtered out
+
+
+def test_collect_mcp_findings_runs_a_plan():
+    from core.mcp_tool_bridge import collect_mcp_findings
+    reg = MCPRegistry(servers={"scanner": _scan_server_cmd()}, cwd=_ROOT, timeout=30)
+    plan = [{"server": "scanner", "tool": "scan"},
+            {"server": "scanner", "tool": "does_not_exist"},   # tool-error -> 0
+            {"no": "server"},                                  # malformed -> skipped
+            {"server": "nope", "tool": "x"}]                   # bad server -> skipped
+    try:
+        out = asyncio.run(collect_mcp_findings(reg, plan, default_url="http://t/"))
+    finally:
+        reg.close_all()
+    assert len(out) == 2 and all(f["confidence"] <= 0.5 for f in out)
+    assert {f["vuln_type"] for f in out} == {"sqli:id", "xss_text:q"}
+
+
+def test_collect_mcp_findings_empty_plan():
+    from core.mcp_tool_bridge import collect_mcp_findings
+    assert asyncio.run(collect_mcp_findings(None, None)) == []
 
 
 def test_registry_from_config_merges_external(tmp_path):

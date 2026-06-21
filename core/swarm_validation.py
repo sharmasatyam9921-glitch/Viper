@@ -462,15 +462,21 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
     # "access_control" but the two-account proof is the right confirmation.
     # Trust ONLY findings that carry the engine's provenance (owner+attacker), so
     # a stray ":bfla:" string can't masquerade as confirmed.
-    if ":bfla:" in vt_full or head == "bfla":
+    # A finding imported from an EXTERNAL tool (source=mcp:*) is never trusted on
+    # its vuln_type alone — it must pass an actual VIPER re-test like anything
+    # untrusted. So external findings skip the engine-trust short-circuits below.
+    _external = str(finding.get("source") or "").startswith("mcp:")
+    if (":bfla:" in vt_full or head == "bfla") and not _external:
         if finding.get("owner") and finding.get("attacker"):
             return True, 0.85, "low-privilege access to a privileged function confirmed by the BFLA engine"
         return False, 0.0, "bfla finding missing two-identity provenance — not confirmed"
     if head == "access_control":
         return await _recheck_access_control(finding, fetch, timeout)
     # Two-account BOLA: the find_bola engine already proved a cross-user read with
-    # owner+attacker+anon probes — that IS the independent confirmation.
-    if ":bola:" in vt_full or head == "bola":
+    # owner+attacker+anon probes — that IS the independent confirmation. (Only the
+    # engine's own findings get this trust; external ones fall through to re-test.)
+    if (":bola:" in vt_full or head == "bola") and not _external \
+            and finding.get("owner") and finding.get("attacker"):
         return True, 0.85, "two-account cross-user object read confirmed by the BOLA engine"
     # Single-session IDOR candidate: auto-escalate to the two-account BOLA test
     # when two sessions are configured; otherwise stay a lead.

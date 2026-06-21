@@ -188,6 +188,7 @@ class HackMode:
         proxy: Optional[str] = None,
         validate: bool = True,
         oob=None,
+        mcp_plan: Optional[list] = None,
     ) -> None:
         """
         coordinator_factory: optional override for tests. Takes
@@ -218,6 +219,10 @@ class HackMode:
         # fire canary payloads and the validation gate confirms a finding iff the
         # target's backend calls the listener back.
         self._oob = oob
+        # Optional plan of external MCP tool calls to run in-pipeline. Their output
+        # is appended (confidence-capped) before the gate, so the gate filters the
+        # external arsenal's findings like any other.
+        self._mcp_plan = list(mcp_plan) if mcp_plan else None
         # Per-hunt shared session context: holds the authenticated identities
         # under test and the (role, url) -> status reachability matrix that
         # captured traffic populates. Seeded from the supplied identities so the
@@ -540,6 +545,37 @@ class HackMode:
                 payload={"error": f"{type(exc).__name__}: {exc}"},
             )
 
+    async def _run_mcp_tools(self, result: "HackResult") -> None:
+        """Run the configured external MCP tool plan and append its candidate
+        findings (confidence-capped) so the gate filters them. Opt-in + best-effort."""
+        if not self._mcp_plan:
+            return
+        reg = None
+        try:
+            from core.mcp.registry import MCPRegistry
+            from core.mcp_tool_bridge import collect_mcp_findings
+            reg = MCPRegistry.from_config()
+            fs = await collect_mcp_findings(reg, self._mcp_plan,
+                                            default_url=self.target)
+            for f in fs:
+                (result.surface if _is_surface(f) else result.findings).append(f)
+            if fs:
+                self.audit.event("mcp.tools", target=self.target,
+                                 payload={"candidates": len(fs)})
+                self.narrator.info(
+                    f"external MCP tools contributed {len(fs)} candidate "
+                    f"finding(s) (gate will re-confirm)")
+        except Exception as exc:  # noqa: BLE001 — external tools never break the hunt
+            logger.warning("mcp tools step failed: %s", exc)
+            self.audit.event("mcp.tools", target=self.target, outcome="error",
+                             payload={"error": str(exc)})
+        finally:
+            if reg is not None:
+                try:
+                    reg.close_all()
+                except Exception:
+                    pass
+
     async def _run_validation_gate(self, result: "HackResult") -> None:
         """Re-confirm every finding via an INDEPENDENT code path and tag each
         validated/submittable. A worker that finds a bug is not allowed to be the
@@ -547,6 +583,9 @@ class HackMode:
         submitting false positives. Fail-open on gate error (findings still
         reported, just untagged); fail-CLOSED per-finding (un-reconfirmed =
         not submittable)."""
+        # Pull in external MCP tool findings (if any) BEFORE the gate, so the gate
+        # re-confirms them like everything else.
+        await self._run_mcp_tools(result)
         if not self._validate or not result.findings:
             return
         try:
