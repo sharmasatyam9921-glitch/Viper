@@ -40,9 +40,42 @@ def run_skills_cli(argv: List[str]) -> int:
     se.add_argument("--limit", type=int, default=5)
     se.add_argument("--render", action="store_true",
                     help="also print the rendered prompt block")
+    pi = sub.add_parser("import", help="absorb an external Agent-Skills (SKILL.md) dir")
+    pi.add_argument("directory")
+    pt = sub.add_parser("tools", help="tools the catalog knows / who uses one")
+    pt.add_argument("tool", nargs="?")
 
     args = p.parse_args(argv)
+
+    if args.cmd == "import":
+        from core.skill_import import import_skill_directory
+        n, ntools = import_skill_directory(args.directory)
+        if not n:
+            print(f"no SKILL.md files found under {args.directory!r}")
+            return 1
+        print(f"absorbed {n} skill(s); learned {ntools} distinct tool(s).")
+        print("rebuild the catalog (next run) picks them up automatically; "
+              "try: viper.py skills tools")
+        return 0
+
     reg = default_registry()
+
+    if args.cmd == "tools":
+        from core.skill_catalog import tool_index
+        idx = tool_index(reg)
+        if args.tool:
+            users = idx.get(args.tool, [])
+            print(f"{len(users)} skill(s) use {args.tool!r}:")
+            for sid in users[:30]:
+                print(f"  {sid}")
+            if users:
+                print("\n(each skill body shows the exact commands; "
+                      f"viper.py skills show {users[0]})")
+            return 0 if users else 1
+        print(f"{len(idx)} tool(s) the catalog knows how to use:")
+        for t, users in sorted(idx.items(), key=lambda kv: -len(kv[1]))[:40]:
+            print(f"  {t:<22} ({len(users)} skill(s))")
+        return 0
 
     if args.cmd in (None, "stats"):
         st = reg.stats()

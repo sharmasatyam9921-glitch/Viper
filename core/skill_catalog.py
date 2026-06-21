@@ -80,6 +80,17 @@ _PROMPT_SKILLS = [
 ]
 
 
+# Tools each curated playbook leans on (so tool_index works pre-import).
+_PROMPT_TOOLS = {
+    "sql_injection": ("sqlmap", "ghauri"), "xss": ("xsstrike", "dalfox"),
+    "ssrf": ("interactsh", "ffuf"), "api_security": ("ffuf", "jwt_tool", "graphql-cop"),
+    "cve_exploit": ("nuclei", "metasploit"), "brute_force": ("hydra", "ffuf"),
+    "dos": ("slowloris",), "active_directory": ("bloodhound", "impacket", "crackmapexec"),
+    "linux_privesc": ("linpeas", "pspy"), "windows_privesc": ("winpeas", "powerup"),
+    "ai_security": ("garak", "promptfoo"),
+}
+
+
 def _add_prompt_skills(reg: SkillRegistry) -> None:
     from core.skill_prompts import get_skill_prompt
 
@@ -93,7 +104,8 @@ def _add_prompt_skills(reg: SkillRegistry) -> None:
             id=f"prompt:{sid}", name=name, source="prompt",
             summary=f"Curated {name} attack playbook.",
             phases=(phase,), techniques=tuple(aliases), tags=full_tags,
-            severity=sev, cwe=tuple(cwe), _loader=_loader,
+            severity=sev, cwe=tuple(cwe), tools=_PROMPT_TOOLS.get(sid, ()),
+            _loader=_loader,
         ))
 
 
@@ -232,6 +244,7 @@ def import_external(reg: SkillRegistry, entries: List[dict]) -> int:
             cwe=tuple(str(c) for c in (e.get("cwe", ()) or ())),
             capec=tuple(str(c) for c in (e.get("capec", ()) or ())),
             attack=tuple(e.get("attack", ()) or ()),
+            tools=tuple(e.get("tools", ()) or ()),
             _loader=loader,
         ))
         n += 1
@@ -240,14 +253,36 @@ def import_external(reg: SkillRegistry, entries: List[dict]) -> int:
 
 # --- assembly --------------------------------------------------------------
 
+def _add_imported_skills(reg: SkillRegistry) -> int:
+    """Load any absorbed external Agent-Skills (viper.py skills import <dir>)."""
+    from core.skill_import import load_imported_entries
+    entries = load_imported_entries()
+    return import_external(reg, entries) if entries else 0
+
+
 def build_registry(include_mitre: bool = True) -> SkillRegistry:
-    """Build a fresh registry from prompts (+ vendored MITRE if available)."""
+    """Build a fresh registry from prompts (+ vendored MITRE + absorbed skills)."""
     reg = SkillRegistry()
     _add_prompt_skills(reg)
     if include_mitre and mitre_available():
         _add_cwe_skills(reg)
         _add_capec_skills(reg)
+    _add_imported_skills(reg)
     return reg
+
+
+def tool_index(reg: Optional[SkillRegistry] = None) -> dict:
+    """Map every tool the catalog knows -> the skills that use it.
+
+    This is VIPER's "how to use tools" knowledge: pick a tool, get the skills
+    whose workflows invoke it (each skill body shows the exact commands).
+    """
+    reg = reg or default_registry()
+    idx: dict = {}
+    for s in reg.all():
+        for t in s.tools:
+            idx.setdefault(t, []).append(s.id)
+    return idx
 
 
 _DEFAULT: Optional[SkillRegistry] = None

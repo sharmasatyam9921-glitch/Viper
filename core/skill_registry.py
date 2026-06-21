@@ -54,6 +54,7 @@ class Skill:
     cwe: Tuple[str, ...] = ()          # related CWE numbers (as strings)
     capec: Tuple[str, ...] = ()        # related CAPEC numbers
     attack: Tuple[str, ...] = ()       # ATT&CK technique ids (e.g. T1059)
+    tools: Tuple[str, ...] = ()        # tools the skill's workflow uses (nmap, ...)
     _loader: Optional[Callable[[], str]] = field(default=None, repr=False)
     _body_cache: Optional[str] = field(default=None, repr=False)
 
@@ -73,6 +74,7 @@ class Skill:
             "techniques": list(self.techniques), "tags": list(self.tags),
             "severity": self.severity, "cwe": list(self.cwe),
             "capec": list(self.capec), "attack": list(self.attack),
+            "tools": list(self.tools),
         }
 
 
