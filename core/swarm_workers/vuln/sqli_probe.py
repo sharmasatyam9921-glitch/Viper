@@ -20,6 +20,7 @@ from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
 from ._http import add_query, fetch, normalize_target_url
+from ._oob import fire_oob
 
 logger = logging.getLogger("viper.swarm_workers.vuln.sqli_probe")
 
@@ -237,6 +238,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
             findings.extend(await _probe_param(url, p, timeout))
         except Exception as e:  # noqa: BLE001
             logger.debug("sqli probe %s?%s failed: %s", url, p, e)
+        # Blind/OAST SQLi: fire DNS-exfil canaries (MSSQL xp_dirtree + Oracle
+        # UTL_INADDR) at this param (no-op without an OOB server). A DNS/HTTP
+        # callback from the database is irrefutable where boolean/timing is not.
+        for key in ("sqli_mssql", "sqli_oracle"):
+            findings.extend(await fire_oob(
+                url, p, vuln_type=f"sqli:blind:{key.split('_')[1]}:{p}",
+                title=f"Blind/OAST SQL injection candidate via ?{p}= ({key.split('_')[1]})",
+                cwe="CWE-89", payload_key=key, severity="critical", timeout=timeout))
     return findings
 
 

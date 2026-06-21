@@ -88,6 +88,32 @@ def build_parser() -> argparse.ArgumentParser:
                         "finding is re-confirmed via a separate code path and only "
                         "those that pass are marked 'submittable'.")
 
+    # --- Out-of-band (OOB) interaction confirmation -----------------------
+    oob = p.add_argument_group(
+        "out-of-band (blind-vuln confirmation)",
+        "Run a canary listener so blind SSRF/RCE/XXE/SQLi can be confirmed by a "
+        "callback. For real targets to reach it, expose the host publicly and pass "
+        "--oob-domain/--oob-public-host accordingly.")
+    oob.add_argument("--oob", action="store_true",
+                     help="Enable the out-of-band interaction engine for this hunt.")
+    oob.add_argument("--oob-domain", default="oob.local",
+                     help="Canary base domain (default: oob.local).")
+    oob.add_argument("--oob-public-host",
+                     help="Public host/IP the target can reach (defaults to "
+                          "--oob-domain).")
+    oob.add_argument("--oob-http-port", type=int, default=0,
+                     help="HTTP listener port (0 = ephemeral; use 80/8080 publicly).")
+    oob.add_argument("--oob-dns-port", type=int, default=0,
+                     help="DNS listener port (0 = ephemeral; use 53 publicly).")
+    oob.add_argument("--oob-no-dns", action="store_true",
+                     help="Disable the DNS listener (HTTP callbacks only).")
+
+    # --- External MCP tools -----------------------------------------------
+    p.add_argument("--mcp-plan", metavar="JSON|FILE",
+                   help="Run configured external MCP tools during the hunt. Pass a "
+                        "JSON array of {server,tool,arguments?} or a path to such a "
+                        "file. Their output is gate-filtered like any finding.")
+
     # --- Two-account BOLA / IDOR (specialist) -----------------------------
     # Identity A is the primary session above (--cookie / --auth-bearer /
     # --auth-header). Supply a SECOND identity B + identity-A's private markers
@@ -240,6 +266,18 @@ def run_hack_cli(argv: list[str]) -> int:
         print(f"[i] routing all worker traffic through {proxy} "
               "(watch it in Burp/ZAP)", file=sys.stderr)
 
+    # Out-of-band interaction engine (blind-vuln confirmation) + external MCP plan.
+    oob_server = _build_oob(args)
+    if oob_server is not None and not args.quiet:
+        print(f"[i] OOB listener up — http :{oob_server.http_port}"
+              + (f" dns :{oob_server.dns_port}" if oob_server.dns_port else "")
+              + f"; canary domain {args.oob_domain}. Blind vulns confirm on callback.",
+              file=sys.stderr)
+    mcp_plan = _load_mcp_plan(args)
+    if mcp_plan and not args.quiet:
+        print(f"[i] {len(mcp_plan)} external MCP tool call(s) will run in-hunt "
+              "(gate-filtered).", file=sys.stderr)
+
     scope_reasoner: Optional[ScopeReasoner] = None
     # Resume path doesn't yet know `profile`, so always build the reasoner
     # if a scope file was provided
@@ -304,7 +342,13 @@ def run_hack_cli(argv: list[str]) -> int:
             bola_config=bola_config,
             proxy=proxy,
             validate=not args.no_validate,
+            oob=oob_server,
+            mcp_plan=mcp_plan,
         )
+    # Resume path also benefits from OOB/MCP if requested.
+    if args.resume:
+        hm._oob = oob_server
+        hm._mcp_plan = mcp_plan
     try:
         with bind_hunt_id(audit.hunt_id):
             result = asyncio.run(hm.run())
@@ -319,6 +363,12 @@ def run_hack_cli(argv: list[str]) -> int:
         audit.event("error", outcome="failure", payload={"error": repr(e)})
         audit.close()
         return 4
+    finally:
+        if oob_server is not None:
+            try:
+                oob_server.stop()
+            except Exception:
+                pass
 
     # 5. Write summary
     summary_path = (
@@ -419,6 +469,51 @@ def _build_bola_config(args, owner_headers: dict) -> Optional[dict]:
                              if m and m.strip()],
         "unauth_control": not getattr(args, "bola_no_unauth_control", False),
     }
+
+
+def _build_oob(args):
+    """Start the out-of-band interaction engine if --oob was passed, else None."""
+    if not getattr(args, "oob", False):
+        return None
+    try:
+        from core.oob import OOBServer
+        srv = OOBServer(
+            base_domain=getattr(args, "oob_domain", "oob.local"),
+            public_host=getattr(args, "oob_public_host", None),
+            http_port=getattr(args, "oob_http_port", 0) or 0,
+            dns_port=getattr(args, "oob_dns_port", 0) or 0,
+            enable_dns=not getattr(args, "oob_no_dns", False),
+        ).start()
+        return srv
+    except Exception as e:  # noqa: BLE001 — OOB is best-effort, never blocks a hunt
+        print(f"[WARN] could not start OOB engine: {e}", file=sys.stderr)
+        return None
+
+
+def _load_mcp_plan(args) -> Optional[list]:
+    """Parse --mcp-plan (inline JSON array or a path to one), or None."""
+    raw = getattr(args, "mcp_plan", None)
+    if not raw:
+        return None
+    text = raw
+    try:
+        p = Path(raw)
+        if p.exists():
+            text = p.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        plan = json.loads(text)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] --mcp-plan is not valid JSON ({e}); ignoring.", file=sys.stderr)
+        return None
+    if isinstance(plan, dict):
+        plan = [plan]
+    if not isinstance(plan, list):
+        print("[WARN] --mcp-plan must be a JSON array of {server,tool}; ignoring.",
+              file=sys.stderr)
+        return None
+    return plan
 
 
 def _build_scope_reasoner(scope_file: Optional[str], db_path: str) -> Optional[ScopeReasoner]:

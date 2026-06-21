@@ -127,6 +127,35 @@ def test_xxe_worker_blind_oob_is_confirmed_end_to_end():
     assert any(f["submittable"] for f in out), "blind XXE callback not confirmed"
 
 
+def test_sqli_worker_fires_oast_canaries_confirmed_on_callback():
+    # Blind/OAST SQLi payloads exfil via the DB resolving the canary DOMAIN, so
+    # they carry no reachable port. The worker fires them; we simulate the DB's
+    # out-of-band callback for one canary and the gate confirms exactly that one.
+    from core.swarm_workers.vuln.sqli_probe import run as sqli_run
+    srv, base = _backend()
+    try:
+        with OOBServer(base_domain="oob.local", enable_dns=False) as oob:
+            set_oob(oob)
+            try:
+                findings = asyncio.run(sqli_run(_Agent(base + "?id=1")))
+            finally:
+                clear_oob()
+            blind = [f for f in findings if f.get("oob_token")]
+            assert blind, "sqli worker fired no OAST canary"
+            assert all("sqli:blind" in f["vuln_type"] for f in blind)
+            tok = blind[0]["oob_token"]
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{oob.http_port}/{tok}", timeout=3).read()
+            out = asyncio.run(validate_findings(blind, oob_store=oob.store,
+                                                fetch=_dead_fetch))
+            confirmed = [f for f in out if f["submittable"]]
+            assert len(confirmed) == 1 and confirmed[0]["oob_token"] == tok
+            assert all(not f["submittable"] for f in out
+                       if f["oob_token"] != tok)              # others stay leads
+    finally:
+        srv.shutdown()
+
+
 def test_workers_emit_no_oob_finding_without_a_server():
     # With no OOB server set, the workers must not emit any oob-tagged finding.
     srv, base = _backend()
