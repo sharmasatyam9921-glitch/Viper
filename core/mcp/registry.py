@@ -30,15 +30,40 @@ def default_servers() -> Dict[str, List[str]]:
 class MCPRegistry:
     def __init__(self, servers: Optional[Dict[str, List[str]]] = None,
                  *, cwd: Optional[str] = None, timeout: float = 20.0):
-        self._servers: Dict[str, List[str]] = dict(
-            servers if servers is not None else default_servers())
+        self._servers: Dict[str, List[str]] = {}
+        self._specs: Dict[str, dict] = {}   # per-server cwd/env overrides
+        for name, spec in dict(
+                servers if servers is not None else default_servers()).items():
+            if isinstance(spec, dict):
+                self._servers[name] = list(spec.get("command") or [])
+                self._specs[name] = {k: spec[k] for k in ("cwd", "env") if spec.get(k)}
+            else:
+                self._servers[name] = list(spec)
         self._cwd = cwd or _ROOT
         self._timeout = timeout
         self._clients: Dict[str, MCPClient] = {}
         self._failed: set = set()        # servers that already failed to start
 
-    def add_server(self, name: str, command: List[str]) -> None:
+    @classmethod
+    def from_config(cls, *, include_defaults: bool = True,
+                    config_path=None, **kw) -> "MCPRegistry":
+        """Registry pre-loaded with VIPER's own servers + operator-configured
+        external ones (e.g. an offensive-tool MCP server)."""
+        from core.mcp.config import load_servers
+        servers: Dict[str, object] = dict(default_servers()) if include_defaults else {}
+        servers.update(load_servers(config_path))
+        return cls(servers=servers, **kw)
+
+    def add_server(self, name: str, command: List[str], *,
+                   cwd: Optional[str] = None, env: Optional[dict] = None) -> None:
         self._servers[name] = list(command)
+        spec = {}
+        if cwd:
+            spec["cwd"] = cwd
+        if env:
+            spec["env"] = env
+        self._specs[name] = spec
+        self._failed.discard(name)
 
     @property
     def server_names(self) -> List[str]:
@@ -53,8 +78,11 @@ class MCPRegistry:
                 # don't re-spawn a server we already know won't start
                 raise MCPError(f"MCP server {name!r} previously failed to start")
             try:
-                c = MCPClient(self._servers[name], cwd=self._cwd,
-                              timeout=self._timeout).start()
+                spec = self._specs.get(name, {})
+                env = ({**os.environ, **spec["env"]} if spec.get("env") else None)
+                c = MCPClient(self._servers[name],
+                              cwd=spec.get("cwd") or self._cwd,
+                              env=env, timeout=self._timeout).start()
             except Exception:
                 self._failed.add(name)
                 raise

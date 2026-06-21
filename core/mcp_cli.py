@@ -41,9 +41,33 @@ def run_mcp_cli(argv: List[str]) -> int:
     pc.add_argument("tool")
     pc.add_argument("-a", "--arg", action="append", default=[],
                     metavar="k=v", help="tool argument (repeatable)")
+    pa = sub.add_parser("add", help="register an external MCP server")
+    pa.add_argument("name")
+    pa.add_argument("command", nargs="+", help="server command (e.g. python -m x)")
+    pa.add_argument("--cwd")
+    pr = sub.add_parser("remove", help="remove an external MCP server")
+    pr.add_argument("name")
+    ps = sub.add_parser("scan", help="call a tool and show gate-bound findings")
+    ps.add_argument("server")
+    ps.add_argument("tool")
+    ps.add_argument("-a", "--arg", action="append", default=[], metavar="k=v")
+    ps.add_argument("--url", default="", help="default url for findings")
 
     args = p.parse_args(argv)
-    reg = MCPRegistry()
+
+    # config edits don't need a live connection
+    if args.cmd == "add":
+        from core.mcp.config import add_server
+        add_server(args.name, args.command, cwd=args.cwd)
+        print(f"registered MCP server {args.name!r}: {' '.join(args.command)}")
+        return 0
+    if args.cmd == "remove":
+        from core.mcp.config import remove_server
+        print("removed" if remove_server(args.name) else "no such server",
+              args.name)
+        return 0
+
+    reg = MCPRegistry.from_config()
     try:
         if args.cmd in (None, "servers"):
             print("configured MCP servers:")
@@ -70,6 +94,23 @@ def run_mcp_cli(argv: List[str]) -> int:
                 print(f"[tool error] {res['text']}")
                 return 1
             print(res["text"])
+            return 0
+
+        if args.cmd == "scan":
+            from core.mcp_tool_bridge import call_to_findings
+            try:
+                arguments = dict(_parse_arg(kv) for kv in args.arg)
+            except ValueError as exc:
+                print(f"[arg error] {exc}")
+                return 1
+            findings = call_to_findings(reg, args.server, args.tool, arguments,
+                                        default_url=args.url)
+            print(f"{len(findings)} candidate finding(s) from "
+                  f"{args.server}:{args.tool} (capped to leads until VIPER's gate "
+                  f"re-confirms them):")
+            for f in findings:
+                print(f"  [{f['severity']:<8}] {f['vuln_type']:<28} "
+                      f"conf<={f['confidence']} {f.get('url','')}")
             return 0
 
         p.print_help()
