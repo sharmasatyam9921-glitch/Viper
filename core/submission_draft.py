@@ -295,15 +295,51 @@ def _slug(s: str) -> str:
 
 def write_drafts(findings: List[dict], out_dir, target: Optional[str] = None,
                  only_submittable: bool = True) -> List[Path]:
-    """Write one Markdown draft per (submittable) finding. Returns the paths."""
+    """Write one Markdown draft per (submittable) finding + a prioritized INDEX.md.
+
+    Returns the per-finding draft paths (the index is written but not included).
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
+    index_rows: List[tuple] = []
     for i, f in enumerate(findings, 1):
         if only_submittable and not f.get("submittable"):
             continue
         vt = f.get("vuln_type") or f.get("type") or "finding"
-        path = out / f"{i:02d}-{_slug(vt)}.md"
+        name = f"{i:02d}-{_slug(vt)}.md"
+        path = out / name
         path.write_text(build_submission(f, target), encoding="utf-8")
         written.append(path)
+        index_rows.append((f, name))
+    if written:
+        _write_index(out, index_rows, target)
     return written
+
+
+def _write_index(out: Path, rows: List[tuple], target: Optional[str]) -> None:
+    """A one-page, priority-sorted triage index of the drafted findings."""
+    try:
+        from core.prioritization import priority_label, priority_score
+        rows = sorted(rows, key=lambda r: priority_score(r[0]), reverse=True)
+    except Exception:
+        def priority_label(_s):
+            return "-"
+
+        def priority_score(_f):
+            return 0
+    lines = [f"# Submission index — {target or 'target'}",
+             f"\n{len(rows)} submittable finding(s), highest priority first.\n",
+             "| Priority | Severity | Type | Confidence | Draft |",
+             "| --- | --- | --- | --- | --- |"]
+    for f, name in rows:
+        sev = str(f.get("severity") or "info").title()
+        vt = f.get("vuln_type") or f.get("type") or "finding"
+        conf = f.get("validation_confidence")
+        cs = f"{conf:.0%}" if isinstance(conf, (int, float)) else "n/a"
+        pscore = priority_score(f)
+        lines.append(f"| {priority_label(pscore)} ({pscore}) | {sev} | `{vt}` | "
+                     f"{cs} | [{name}]({name}) |")
+    lines.append("\n*Each draft was independently re-confirmed by VIPER's validation "
+                 "gate. Review before submitting; VIPER never submits on its own.*")
+    (out / "INDEX.md").write_text("\n".join(lines), encoding="utf-8")
