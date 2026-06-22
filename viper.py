@@ -97,6 +97,27 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py ad <ldap.json>` — analyze a collected AD directory dump for the
+    # classic escalation surface (Kerberoast/AS-REP/delegation/ADCS-ESC1).
+    if len(sys.argv) > 1 and sys.argv[1] == "ad":
+        if len(sys.argv) < 3:
+            print("usage: viper.py ad <ldap.json>  ({entries:[...], templates:[...]} or [entries])")
+            sys.exit(1)
+        import json as _json
+        from core.ad import analyze_directory
+        try:
+            _data = _json.loads(open(sys.argv[2], encoding="utf-8").read())
+        except Exception as _e:
+            print(f"could not read {sys.argv[2]!r}: {_e}")
+            sys.exit(1)
+        _entries = _data.get("entries", _data) if isinstance(_data, dict) else _data
+        _templates = _data.get("templates", []) if isinstance(_data, dict) else []
+        _fs = analyze_directory(_entries or [], _templates)
+        print(f"{len(_fs)} AD attack-surface finding(s):")
+        for _f in _fs:
+            print(f"  [{_f['severity']:<8}] {_f['vuln_type']:<40} {_f['evidence'][:60]}")
+        sys.exit(0)
+
     # `viper.py apk <file.apk>` — static secret/endpoint audit of a mobile app.
     if len(sys.argv) > 1 and sys.argv[1] == "apk":
         if len(sys.argv) < 3:
