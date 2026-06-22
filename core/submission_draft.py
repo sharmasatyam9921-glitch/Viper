@@ -84,6 +84,12 @@ _CLASS = {
     "git_exposed": ("CWE-538", 7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                     "An exposed .git directory leaks source code and history.",
                     "Block access to .git; deploy build artifacts only."),
+    "clickjacking": ("CWE-1021", 4.3, "AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+                     "The page can be framed by any origin (no X-Frame-Options / CSP "
+                     "frame-ancestors), enabling UI-redress / clickjacking of "
+                     "state-changing actions.",
+                     "Set X-Frame-Options: DENY (or SAMEORIGIN) and a "
+                     "Content-Security-Policy frame-ancestors directive."),
     "web_cache_deception": ("CWE-525", 7.5, "AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
                             "A cache stores authenticated pages under static-looking "
                             "URLs; an unauthenticated attacker retrieves another "
@@ -136,6 +142,8 @@ def _norm_head(vuln_type: str) -> str:
     vt = (vuln_type or "").lower()
     if vt.startswith("chain:"):
         return "chain"
+    if vt.startswith("clickjacking"):
+        return "clickjacking"
     if ":bola:" in vt:
         return "bola"
     if ":bfla:" in vt:

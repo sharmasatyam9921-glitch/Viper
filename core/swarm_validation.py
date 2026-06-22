@@ -250,6 +250,27 @@ async def _recheck_access_control(finding, fetch, timeout):
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 
+async def _recheck_clickjacking(finding, fetch, timeout):
+    """Re-fetch and confirm the page is genuinely framable: an HTML 2xx with NO
+    X-Frame-Options and NO CSP frame-ancestors. A static asset, a non-HTML body,
+    or either anti-framing control present means it is not a clickjacking target."""
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    r = await fetch("GET", url, timeout=timeout)
+    if not _ok2xx(r):
+        return False, 0.2, "not a 2xx page (no framing surface)"
+    h = r.headers or {}
+    if "html" not in (h.get("content-type", "")).lower():
+        return False, 0.2, "not an HTML page (no clickjacking surface)"
+    if (h.get("x-frame-options", "") or "").strip():
+        return False, 0.2, "X-Frame-Options present — not framable"
+    if "frame-ancestors" in (h.get("content-security-policy", "")).lower():
+        return False, 0.2, "CSP frame-ancestors present — not framable"
+    return True, 0.6, ("HTML page served with no X-Frame-Options and no CSP "
+                       "frame-ancestors — framable (clickjacking)")
+
+
 async def _recheck_xxe(finding, fetch, timeout):
     """Independently re-run the in-band XXE probe. A reproduced local-file read
     (/etc/passwd content) is strong confirmation; a reproduced external-entity
@@ -592,6 +613,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_crlf(finding, fetch, timeout)
     if head == "xxe":
         return await _recheck_xxe(finding, fetch, timeout)
+    if head.startswith("clickjacking"):
+        return await _recheck_clickjacking(finding, fetch, timeout)
     if head == "subdomain_takeover":
         return await _recheck_subdomain_takeover(finding, fetch, timeout)
     if head == "host_header":
