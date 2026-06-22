@@ -84,6 +84,14 @@ _CLASS = {
     "git_exposed": ("CWE-538", 7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                     "An exposed .git directory leaks source code and history.",
                     "Block access to .git; deploy build artifacts only."),
+    "host_header": ("CWE-644", 6.1, "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+                    "The app builds absolute URLs (redirects, password-reset links, "
+                    "cached references) from an attacker-controlled host header — "
+                    "enabling web cache poisoning, open redirect, password-reset "
+                    "poisoning, and host-based SSRF.",
+                    "Use a server-configured canonical host; never derive absolute "
+                    "URLs from the incoming Host/X-Forwarded-Host; allow-list trusted "
+                    "hosts at the edge."),
     "bfla": ("CWE-863", 8.1, "AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
              "A low-privilege user can invoke a privileged/administrative function "
              "(broken function-level authorization, OWASP API #5).",
@@ -146,6 +154,7 @@ def _title(finding: dict, vuln_type: str) -> str:
         "information_disclosure": "Sensitive Information Disclosure",
         "git_exposed": "Exposed .git Directory",
         "bfla": "Broken Function-Level Authorization (BFLA)",
+        "host_header": "Host Header Injection",
         "chain": "Attack Chain",
     }
     head = _norm_head(vuln_type)

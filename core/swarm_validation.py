@@ -250,6 +250,36 @@ async def _recheck_access_control(finding, fetch, timeout):
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 
+async def _recheck_host_header(finding, fetch, timeout):
+    """Independently re-test host-header injection with a FRESH marker host.
+
+    A spoofed header reflected into the Location redirect (or an absolute URL in
+    the body) — that a benign control request (real Host) does NOT contain — is
+    the confirmation. A reflection of our path or nothing is a lead."""
+    import secrets as _secrets
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    header = finding.get("parameter") or "X-Forwarded-Host"
+    marker = f"viperhhre{_secrets.token_hex(4)}.example.net"
+    value = f"host={marker}" if header.lower() == "forwarded" else marker
+    control = await fetch("GET", url, timeout=timeout, follow_redirects=False)
+    probe = await fetch("GET", url, headers={header: value}, timeout=timeout,
+                        follow_redirects=False)
+    if probe is None:
+        return False, 0.0, "re-fetch failed"
+    ploc = (probe.headers or {}).get("location", "")
+    cloc = (control.headers or {}).get("location", "") if control else ""
+    cbody = (control.body or "") if control else ""
+    if marker in ploc and marker not in cloc:
+        return True, 0.8, (f"spoofed {header} reflected into the Location redirect "
+                           "(cache poisoning / open redirect / reset-link poisoning)")
+    if (f"//{marker}" in (probe.body or "")) and (f"//{marker}" not in cbody):
+        return True, 0.6, (f"spoofed {header} reflected into an absolute URL in the "
+                           "response body")
+    return False, 0.3, "spoofed host not reflected on re-test (lead)"
+
+
 async def _recheck_cmdi(finding, fetch, timeout):
     """Re-run the hardened command-injection time-test from a fresh context. Its
     paired-control median scaling already rejects load/latency noise; a SECOND
@@ -470,6 +500,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         if finding.get("owner") and finding.get("attacker"):
             return True, 0.85, "low-privilege access to a privileged function confirmed by the BFLA engine"
         return False, 0.0, "bfla finding missing two-identity provenance — not confirmed"
+    if head == "host_header":
+        return await _recheck_host_header(finding, fetch, timeout)
     if head == "access_control":
         return await _recheck_access_control(finding, fetch, timeout)
     # Two-account BOLA: the find_bola engine already proved a cross-user read with

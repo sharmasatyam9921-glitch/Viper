@@ -228,6 +228,17 @@ def _ok(m, url, h):
     return HttpResp(200, {}, "x", url)
 
 
+def _hh_reflect(m, url, h):
+    xfh = h.get("X-Forwarded-Host")
+    if xfh:                                    # builds a redirect from the spoofed host
+        return HttpResp(302, {"location": f"https://{xfh}/login"}, "", url)
+    return HttpResp(200, {}, "home", url)
+
+
+def _hh_safe(m, url, h):
+    return HttpResp(200, {}, "home", url)      # never reflects the host header
+
+
 # --- the labeled benchmark -------------------------------------------------
 
 @dataclass(frozen=True)
@@ -334,6 +345,14 @@ BENCHMARK = [
     Scenario("cmdi", "safe", "non-reproducible / unreachable target",
              {"vuln_type": "rce:cmdi:id", "url": "http://127.0.0.1:9/x?id=1", "parameter": "id"},
              _ok),
+
+    # host header injection
+    Scenario("host_header", "vuln", "spoofed X-Forwarded-Host reflected into Location",
+             {"vuln_type": "host_header:x-forwarded-host", "url": "http://t/",
+              "parameter": "X-Forwarded-Host"}, _hh_reflect),
+    Scenario("host_header", "safe", "host header not reflected",
+             {"vuln_type": "host_header:x-forwarded-host", "url": "http://t/",
+              "parameter": "X-Forwarded-Host"}, _hh_safe),
 ]
 
 
