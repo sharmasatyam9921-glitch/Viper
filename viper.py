@@ -92,6 +92,11 @@ def main():
         from core.ops_cli import run_ledger_cli
         sys.exit(run_ledger_cli(sys.argv[2:]))
 
+    # `viper.py verify <findings.json>` — re-confirm saved findings via the gate.
+    if len(sys.argv) > 1 and sys.argv[1] == "verify":
+        from core.verify_cli import run_verify_cli
+        sys.exit(run_verify_cli(sys.argv[2:]))
+
     # `viper.py oob [start|demo]` — out-of-band interaction listener for blind vulns.
     if len(sys.argv) > 1 and sys.argv[1] == "oob":
         from core.oob_cli import run_oob_cli
