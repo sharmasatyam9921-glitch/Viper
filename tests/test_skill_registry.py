@@ -59,6 +59,15 @@ def test_token_cost_is_flat_as_catalog_grows():
     assert any(s.id == "prompt:sql_injection" for s in sel_big)
 
 
+def test_render_with_tools_surfaces_tool_names():
+    reg = default_registry()
+    sel = reg.select(technique="sqli", limit=2)
+    out = reg.render(sel, with_tools=True, max_chars=2500)
+    assert "Tools:" in out and "sqlmap" in out          # learned tool surfaced
+    # still hard-capped
+    assert len(reg.render(sel, with_tools=True, max_chars=300)) <= 300
+
+
 def test_render_hard_caps_length():
     reg = default_registry()
     sel = reg.select(intent="injection", limit=8)

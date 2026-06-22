@@ -456,7 +456,7 @@ class ReACTEngine:
             intent_bits += [str(v) for v in (context.get("vulns_found") or [])]
             skills = reg.select(phase=phase, technique=technique,
                                 intent=" ".join(intent_bits), limit=3)
-            return reg.render(skills, max_chars=1200)
+            return reg.render(skills, max_chars=1200, with_tools=True)
         except Exception as exc:
             logger.debug("skill injection skipped: %s", exc)
             return ""

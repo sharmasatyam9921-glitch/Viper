@@ -196,30 +196,40 @@ class SkillRegistry:
         return [s for _, s in scored[:max(0, limit)]]
 
     def render(self, skills: List[Skill], *, max_chars: int = 1800,
-               header: bool = True) -> str:
+               header: bool = True, with_tools: bool = False) -> str:
         """Render selected skills into a bounded prompt block (lazy body load).
 
         Bodies are loaded here, for the passed skills only. The result is hard
         capped at `max_chars` so the injected block never blows the token budget.
+        With ``with_tools``, a compact "Tools:" line lists the tools those skills'
+        workflows use — so the reasoner knows what to invoke.
         """
         if not skills:
             return ""
+        # Build the (small, high-value) tools line first and RESERVE room for it,
+        # so it survives the body truncation instead of being cut off the end.
+        tools_line = ""
+        if with_tools:
+            tools = sorted({t for s in skills for t in s.tools})
+            if tools:
+                tools_line = "\n\nTools: " + ", ".join(tools[:15])
+        cap = max(0, max_chars - len(tools_line))
         parts = ["# Relevant attack skills (load-on-demand)"] if header else []
         for s in skills:
             body = s.body().strip()
             block = f"\n## {s.name}\n{body}" if body else f"\n## {s.name}\n{s.summary}"
             # account for the join newlines by measuring the would-be output.
-            if len("\n".join(parts + [block])) > max_chars:
+            if len("\n".join(parts + [block])) > cap:
                 marker = " ...[truncated]"
-                # reserve room for the marker so the final (capped) output keeps it
-                remaining = max_chars - len("\n".join(parts)) - 1 - len(marker)
+                remaining = cap - len("\n".join(parts)) - 1 - len(marker)
                 if remaining > 60:
                     parts.append(block[:remaining] + marker)
                 break
             parts.append(block)
+        result = ("\n".join(parts).strip() + tools_line)
         # absolute hard cap — guarantees the contract even if the header alone is
         # larger than max_chars.
-        return "\n".join(parts).strip()[:max_chars]
+        return result[:max_chars]
 
     def select_and_render(self, *, max_chars: int = 1800, **select_kw) -> str:
         return self.render(self.select(**select_kw), max_chars=max_chars)
