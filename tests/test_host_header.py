@@ -91,3 +91,32 @@ def test_gate_recheck_rejects_non_reflecting():
          "parameter": "X-Forwarded-Host"}
     out = asyncio.run(validate_findings([f], fetch=_fetch_reflecting(False)))
     assert not out[0]["submittable"] and out[0]["validation_confidence"] == 0.3
+
+
+def test_gate_rejects_marker_in_location_query_not_host():
+    # The spoofed host appears in the Location QUERY (not the redirect host) — the
+    # redirect still goes to the same origin, so it is NOT attacker-controlled.
+    async def fake(method, url, *, headers=None, timeout=10.0, follow_redirects=True,
+                   use_session_auth=True):
+        xfh = (headers or {}).get("X-Forwarded-Host")
+        if xfh:
+            return HttpResp(302, {"location": f"/error?original_host={xfh}"}, "", url)
+        return HttpResp(200, {}, "home", url)
+    f = {"vuln_type": "host_header:x-forwarded-host", "url": "http://t/",
+         "parameter": "X-Forwarded-Host"}
+    out = asyncio.run(validate_findings([f], fetch=fake))
+    assert not out[0]["submittable"]                 # marker in query, not the host
+
+
+def test_gate_confirms_protocol_relative_redirect_to_marker():
+    # Location: //marker/login IS attacker-controlled (browser goes to marker).
+    async def fake(method, url, *, headers=None, timeout=10.0, follow_redirects=True,
+                   use_session_auth=True):
+        xfh = (headers or {}).get("X-Forwarded-Host")
+        if xfh:
+            return HttpResp(302, {"location": f"//{xfh}/login"}, "", url)
+        return HttpResp(200, {}, "home", url)
+    f = {"vuln_type": "host_header:x-forwarded-host", "url": "http://t/",
+         "parameter": "X-Forwarded-Host"}
+    out = asyncio.run(validate_findings([f], fetch=fake))
+    assert out[0]["submittable"]                     # protocol-relative -> real redirect

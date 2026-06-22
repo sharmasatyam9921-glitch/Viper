@@ -54,11 +54,24 @@ def test_worker_no_finding_on_normal_page(monkeypatch):
 
 def test_gate_confirms_takeover_fingerprint():
     f = {"vuln_type": "subdomain_takeover:aws_s3", "url": "http://sub.t/"}
-    out = asyncio.run(validate_findings([f], fetch=_fetch("NoSuchBucket\nThe specified bucket does not exist")))
+    out = asyncio.run(validate_findings(
+        [f], fetch=_fetch("NoSuchBucket\nThe specified bucket does not exist", 404)))
     assert out[0]["submittable"] and out[0]["validation_confidence"] == 0.85
 
 
 def test_gate_rejects_when_fingerprint_gone():
     f = {"vuln_type": "subdomain_takeover:aws_s3", "url": "http://sub.t/"}
-    out = asyncio.run(validate_findings([f], fetch=_fetch("the bucket is now claimed, hello")))
+    out = asyncio.run(validate_findings([f], fetch=_fetch("the bucket is now claimed, hello", 200)))
+    assert not out[0]["submittable"]
+
+
+def test_200_page_with_fingerprint_is_not_takeover(monkeypatch):
+    # a doc/blog/parked page (2xx) that merely quotes the phrase is NOT a takeover
+    from core.swarm_workers.vuln import subdomain_takeover as mod
+    monkeypatch.setattr(mod, "fetch",
+                        _fetch("Our guide explains the 'NoSuchBucket' S3 error", 200))
+    assert asyncio.run(st_run(_Agent("http://sub.t/"))) == []
+    # and the gate rejects a 200 even with the fingerprint
+    f = {"vuln_type": "subdomain_takeover:aws_s3", "url": "http://sub.t/"}
+    out = asyncio.run(validate_findings([f], fetch=_fetch("NoSuchBucket", 200)))
     assert not out[0]["submittable"]

@@ -20,8 +20,10 @@ callback. GET-only, read-only.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from typing import List, Optional
+from urllib.parse import urlsplit
 
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
@@ -49,25 +51,49 @@ def _loc(resp: Optional[HttpResp]) -> str:
     return ((resp.headers or {}).get("location", "") if resp else "")
 
 
+def _redirect_host(loc: str) -> str:
+    """Host the Location actually redirects TO (authority), or '' for a relative
+    redirect. ``//marker/x`` and ``https://marker/x`` -> ``marker``; ``/x?h=marker``
+    (marker in the path/query, NOT the target host) -> ''."""
+    loc = (loc or "").strip()
+    if loc.startswith("//"):
+        return loc[2:].split("/")[0].split("?")[0].split("#")[0].lower()
+    if "://" in loc:
+        return urlsplit(loc).netloc.lower()
+    return ""
+
+
+def _marker_url_re(marker: str):
+    # marker must be a URL AUTHORITY (//marker followed by a delimiter), not a
+    # substring buried in prose / JSON.
+    return re.compile(r"//" + re.escape(marker) + r"(?=[/:?#\"'\s]|$)", re.I)
+
+
 async def _probe(url: str, header: str, timeout: float) -> Optional[dict]:
     marker = _marker()
-    control = await fetch("GET", url, timeout=timeout, follow_redirects=False)
+    # use_session_auth=False: host-header injection is an UNAUTHENTICATED attack;
+    # keep both control and probe identical (no installed session) so the only
+    # difference is the spoofed header.
+    control = await fetch("GET", url, timeout=timeout, follow_redirects=False,
+                          use_session_auth=False)
     probe = await fetch("GET", url, headers={header: _header_value(header, marker)},
-                        timeout=timeout, follow_redirects=False)
+                        timeout=timeout, follow_redirects=False, use_session_auth=False)
     if probe is None:
         return None
     cbody = (control.body or "") if control else ""
 
-    # Strongest: the spoofed host lands in the Location redirect (cache poisoning /
-    # open redirect / reset-link poisoning), and the control redirect did not.
-    if marker in _loc(probe) and marker not in _loc(control):
+    # Strongest: the spoofed host becomes the redirect TARGET HOST (open redirect /
+    # cache poisoning / reset-link poisoning) — not merely reflected somewhere in
+    # the Location string (a marker in the path/query is not attacker-controlled).
+    if _redirect_host(_loc(probe)) == marker and _redirect_host(_loc(control)) != marker:
         return _finding(url, header, marker, "high", 0.8,
-                        "reflected into the Location redirect header")
-    # Medium: spoofed host appears as an absolute URL in the body (links, canonical,
-    # script src) that the benign control did not contain.
-    if (f"//{marker}" in (probe.body or "")) and (f"//{marker}" not in cbody):
+                        "set as the Location redirect target host")
+    # Medium: spoofed host appears as an absolute-URL AUTHORITY in the body (a
+    # generated link/canonical/script src), not as prose.
+    rx = _marker_url_re(marker)
+    if rx.search(probe.body or "") and not rx.search(cbody):
         return _finding(url, header, marker, "medium", 0.6,
-                        "reflected into an absolute URL in the response body")
+                        "reflected as an absolute-URL host in the response body")
     return None
 
 

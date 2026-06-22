@@ -261,6 +261,9 @@ async def _recheck_subdomain_takeover(finding, fetch, timeout):
     r = await fetch("GET", url, timeout=timeout)
     if not r or not (r.body or ""):
         return False, 0.0, "re-fetch failed"
+    if getattr(r, "status", 0) < 400:
+        return False, 0.2, ("service-error fingerprint on a 2xx page (content / parked "
+                            "domain, not an unclaimed resource) — lead")
     service = match_fingerprint(r.body)
     if service:
         return True, 0.85, (f"unclaimed {service} resource fingerprint reproduced "
@@ -274,26 +277,39 @@ async def _recheck_host_header(finding, fetch, timeout):
     A spoofed header reflected into the Location redirect (or an absolute URL in
     the body) — that a benign control request (real Host) does NOT contain — is
     the confirmation. A reflection of our path or nothing is a lead."""
+    import re as _re
     import secrets as _secrets
+    from urllib.parse import urlsplit as _urlsplit
     url = finding.get("url") or finding.get("target") or ""
     if not url:
         return False, 0.0, "no url to re-test"
     header = finding.get("parameter") or "X-Forwarded-Host"
     marker = f"viperhhre{_secrets.token_hex(4)}.example.net"
     value = f"host={marker}" if header.lower() == "forwarded" else marker
-    control = await fetch("GET", url, timeout=timeout, follow_redirects=False)
+    control = await fetch("GET", url, timeout=timeout, follow_redirects=False,
+                          use_session_auth=False)
     probe = await fetch("GET", url, headers={header: value}, timeout=timeout,
-                        follow_redirects=False)
+                        follow_redirects=False, use_session_auth=False)
     if probe is None:
         return False, 0.0, "re-fetch failed"
+
+    def _rhost(loc):
+        loc = (loc or "").strip()
+        if loc.startswith("//"):
+            return loc[2:].split("/")[0].split("?")[0].split("#")[0].lower()
+        if "://" in loc:
+            return _urlsplit(loc).netloc.lower()
+        return ""
     ploc = (probe.headers or {}).get("location", "")
     cloc = (control.headers or {}).get("location", "") if control else ""
     cbody = (control.body or "") if control else ""
-    if marker in ploc and marker not in cloc:
-        return True, 0.8, (f"spoofed {header} reflected into the Location redirect "
+    # marker must be the redirect TARGET HOST, not merely present in the Location.
+    if _rhost(ploc) == marker and _rhost(cloc) != marker:
+        return True, 0.8, (f"spoofed {header} set as the Location redirect target host "
                            "(cache poisoning / open redirect / reset-link poisoning)")
-    if (f"//{marker}" in (probe.body or "")) and (f"//{marker}" not in cbody):
-        return True, 0.6, (f"spoofed {header} reflected into an absolute URL in the "
+    rx = _re.compile(r"//" + _re.escape(marker) + r"(?=[/:?#\"'\s]|$)", _re.I)
+    if rx.search(probe.body or "") and not rx.search(cbody):
+        return True, 0.6, (f"spoofed {header} reflected as an absolute-URL host in the "
                            "response body")
     return False, 0.3, "spoofed host not reflected on re-test (lead)"
 

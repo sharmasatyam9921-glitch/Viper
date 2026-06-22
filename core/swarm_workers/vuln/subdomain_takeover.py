@@ -36,20 +36,19 @@ FINGERPRINTS = [
                           r"No such app", re.I)),
     ("Shopify", re.compile(r"Sorry, this shop is currently unavailable", re.I)),
     ("Fastly", re.compile(r"Fastly error: unknown domain", re.I)),
-    ("Bitbucket", re.compile(r"Repository not found", re.I)),
     ("Pantheon", re.compile(r"The gods are wise, but do not know of the site which "
                             r"you seek", re.I)),
     ("Tumblr", re.compile(r"Whatever you were looking for doesn't currently exist "
                           r"at this address", re.I)),
-    ("Surge.sh", re.compile(r"project not found", re.I)),
     ("Ghost", re.compile(r"The thing you were looking for is no longer here, or "
                          r"never was", re.I)),
     ("JetBrains", re.compile(r"is not a registered InCloud YouTrack", re.I)),
     ("Read the Docs", re.compile(r"unknown to Read the Docs", re.I)),
     ("Help Scout", re.compile(r"No settings were found for this company", re.I)),
     ("Wordpress", re.compile(r"Do you want to register .*\.wordpress\.com", re.I)),
-    ("Acquia", re.compile(r"The site you are looking for could not be found", re.I)),
 ]
+# Generic phrases like "Repository not found" / "project not found" were dropped:
+# they appear in normal prose/docs and aren't service-specific enough to flag.
 
 
 def match_fingerprint(body: str):
@@ -69,6 +68,10 @@ async def run(agent: SwarmAgent) -> List[dict]:
     timeout = min(agent.timeout_s, 10.0)
     resp = await fetch("GET", url, timeout=timeout)
     if not resp or not resp.body:
+        return []
+    # A genuine unclaimed-resource page returns a 4xx/5xx error. A 2xx page that
+    # merely contains the phrase (a doc, a blog, a parked domain) is not a takeover.
+    if resp.status < 400:
         return []
     service = match_fingerprint(resp.body)
     if not service:
