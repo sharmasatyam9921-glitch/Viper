@@ -97,6 +97,26 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py coverage <findings.json> [techs]` — 'what did I miss?' reflection.
+    if len(sys.argv) > 1 and sys.argv[1] == "coverage":
+        if len(sys.argv) < 3:
+            print("usage: viper.py coverage <findings.json> [tech1,tech2,...]")
+            sys.exit(1)
+        import json as _json
+        from core.coverage_critic import critique
+        try:
+            _d = _json.loads(open(sys.argv[2], encoding="utf-8").read())
+        except Exception as _e:
+            print(f"could not read {sys.argv[2]!r}: {_e}")
+            sys.exit(1)
+        _findings = _d.get("findings", _d) if isinstance(_d, dict) else _d
+        _ran = sys.argv[3].split(",") if len(sys.argv) > 3 else ()
+        _gaps = critique(_findings or [], ran_techniques=_ran)
+        print(f"{len(_gaps)} coverage gap(s):")
+        for _g in _gaps:
+            print(f"  [{_g.kind:<16}] {_g.detail[:48]:<48} {_g.suggestion[:48]}")
+        sys.exit(0)
+
     # `viper.py ad <ldap.json>` — analyze a collected AD directory dump for the
     # classic escalation surface (Kerberoast/AS-REP/delegation/ADCS-ESC1).
     if len(sys.argv) > 1 and sys.argv[1] == "ad":
