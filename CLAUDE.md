@@ -7,12 +7,28 @@ Autonomous bug bounty hunting bot with multi-agent architecture. Pure Python, $0
 ```bash
 python viper.py http://target.com --full              # Full hunt (recon → exploit → report)
 python viper.py http://target.com --full --stealth 2   # Stealth mode
-python viper.py hack <target> --profile bugbounty       # Continuous hunting via daemon
+python viper.py hack <target> --profile bugbounty       # Swarm HackMode hunt (see core/hack_mode.py)
 python viper_daemon.py                                  # 24/7 daemon
 python dashboard/launch.py                              # Dashboard: UI :3000 + API :8080 (one command)
 python dashboard/launch.py --prod                       # Same, production UI build
 python dashboard/server.py                              # Headless API only (:8080)
 ```
+
+### Operator / triage CLIs
+
+```bash
+python viper.py classes                  # vuln classes VIPER tests; flags gate-confirmed + OOB-capable
+python viper.py scorecard [--strict]     # per-class validation-gate precision/recall benchmark
+python viper.py verify <findings.json>   # re-confirm saved findings via the gate (no full hunt)
+python viper.py submissions [hunt_id]    # review gate-confirmed submission drafts
+python viper.py ledger [list|clear]      # cross-hunt duplicate-suppression ledger
+python viper.py bola <target> ...        # focused two-account BOLA/IDOR check
+python viper.py skills [stats|search|show|select]   # lazy skill catalog (~1,600 skills)
+python viper.py mcp [servers|list|call]  # consume external MCP tool servers (gate-filtered)
+python viper.py oob [start|demo]         # out-of-band interaction listener (blind-vuln confirmation)
+```
+
+Hunt flags worth knowing: `HackMode(..., oob=OOBServer, mcp_plan=[...], bola_config=..., proxy=..., validate=True)`.
 
 ## Directory Structure
 
@@ -21,7 +37,6 @@ hackagent/
 ├── viper.py                  # Main CLI entry point
 ├── viper_core.py             # Hunt orchestrator (ViperCore class)
 ├── viper_daemon.py           # 24/7 daemon (continuous hunting)
-├── viper_daemon.py           # 24/7 daemon
 ├── mcp_server.py             # MCP tool server for Clawdbot integration
 │
 ├── core/                     # 85+ modules — brain, engine, graph, agents, tools
@@ -211,6 +226,66 @@ ReACTEngine.reason_and_act(target)
 ### LLM Routing ($0 cost)
 ```
 Claude CLI OAuth (free) → LiteLLM API (paid fallback) → Ollama local (free fallback)
+```
+
+## Confirmation & Trust (the core differentiator)
+
+VIPER is FP-averse and human-submits-only: a worker finding is a *candidate*; it
+becomes `submittable` ONLY when an INDEPENDENT path re-confirms it. This is what
+makes autonomous runs safe to act on.
+
+```
+swarm worker (candidate) → swarm_validation.py gate (_reconfirm, fail-closed)
+   → validated / submittable / validation_confidence / validation_reason
+   → chain_recipes.correlate_chains → prioritization → submission_draft (+INDEX.md)
+   → submission_ledger (cross-hunt dedup) → human reviews & submits
+```
+
+- `core/swarm_validation.py` — the gate. Per-class independent re-tests
+  (`_recheck_xss/_sqli/_ssti/_lfi/_cmdi/_secrets/_access_control/_host_header/
+  _subdomain_takeover/_crlf/_xxe/_clickjacking/_idor`), two-identity trust for
+  BOLA/BFLA/web-cache-deception (provenance-checked, external `source=mcp:*`
+  findings can NEVER use a trust short-circuit), and OOB-token confirmation. A
+  malformed/un-reproducible finding fails closed to a lead.
+- `core/gate_benchmark.py` — `viper.py scorecard`: labeled per-class precision/
+  recall. Currently 13 classes at precision 1.00 (0 false positives).
+- `core/confirm_gate.py` — reusable ThreeGateConfirmer (baseline→attack→
+  differential + reproducibility re-test).
+
+### Out-of-band (blind-vuln) confirmation — `core/oob/`
+
+The only way to confirm blind SSRF / RCE / XXE / OAST-SQLi / Host-header SSRF.
+`OOBServer` mints unique canary tokens, runs HTTP+DNS listeners, and records only
+interactions for tokens IT issued (no false confirms from background traffic).
+Blind-capable workers (`ssrf`, `command_injection`, `xxe`, `host_header`) fire a
+canary; a callback flips the finding to submittable at the gate.
+
+### Confirmed vulnerability classes (gate-verified)
+
+Beyond the injection family (sqli/xss/ssti/lfi/cmdi) and exposures
+(secrets/env/git/dir-listing/cors), VIPER confirms: **BOLA + BFLA + IDOR**
+(two-account, `core/specialist/{bola,bfla}_engine.py`), **Host Header Injection**
+(`host_header.py`), **Subdomain Takeover** (`subdomain_takeover.py`, fingerprint
++ CNAME corroboration), **Web Cache Deception** (`web_cache_deception.py`,
+two-identity), **CRLF**, and **clickjacking**. `viper.py classes` lists coverage.
+
+### New core modules (since v5.0)
+
+```
+core/session_context.py    Per-hunt roles + (role,url)->status reachability matrix
+core/browser/              proxy_pipeline (dedup) + session_capture (role-diff) +
+                           viper_browser (optional Playwright, graceful degradation)
+core/skill_registry.py     Lazy skill catalog (flat token cost) + skill_catalog.py
+core/skill_import.py        (build from vendored MITRE + absorb external SKILL.md)
+core/mcp/ + mcp_client.py  Dependency-free MCP: own servers + CLIENT to consume
+core/mcp_tool_bridge.py     external tool arsenals (output gate-filtered)
+core/oob/                  Out-of-band interaction engine (canary/store/listeners)
+core/chain_recipes.py      Low→critical escalation correlation (submittable iff
+                           every component is submittable)
+core/prioritization.py     P1-P4 scoring (submittable + severity + gate confidence)
+core/submission_ledger.py  Cross-hunt duplicate suppression
+core/hack_mode.py          Swarm HackMode orchestrator (threads OOB + MCP + gate)
+core/{ops,verify}_cli.py    classes / ledger / verify operator CLIs
 ```
 
 ## External Tools
