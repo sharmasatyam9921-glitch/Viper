@@ -239,6 +239,14 @@ def _hh_safe(m, url, h):
     return HttpResp(200, {}, "home", url)      # never reflects the host header
 
 
+def _takeover(m, url, h):
+    return HttpResp(404, {}, "<html>There isn't a GitHub Pages site here.</html>", url)
+
+
+def _takeover_safe(m, url, h):
+    return HttpResp(404, {}, "<html>404 Not Found - page missing</html>", url)
+
+
 # --- the labeled benchmark -------------------------------------------------
 
 @dataclass(frozen=True)
@@ -353,6 +361,14 @@ BENCHMARK = [
     Scenario("host_header", "safe", "host header not reflected",
              {"vuln_type": "host_header:x-forwarded-host", "url": "http://t/",
               "parameter": "X-Forwarded-Host"}, _hh_safe),
+
+    # subdomain takeover
+    Scenario("subdomain_takeover", "vuln", "GitHub Pages unclaimed fingerprint",
+             {"vuln_type": "subdomain_takeover:github_pages", "url": "http://t/"},
+             _takeover),
+    Scenario("subdomain_takeover", "safe", "generic 404 (not a takeover)",
+             {"vuln_type": "subdomain_takeover:github_pages", "url": "http://t/"},
+             _takeover_safe),
 ]
 
 

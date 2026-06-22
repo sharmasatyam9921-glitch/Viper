@@ -250,6 +250,24 @@ async def _recheck_access_control(finding, fetch, timeout):
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 
+async def _recheck_subdomain_takeover(finding, fetch, timeout):
+    """Independently re-fetch and re-confirm the service's unclaimed-resource
+    fingerprint. These strings only appear on a de-provisioned third-party
+    resource, so a fresh match is strong confirmation of a claimable subdomain."""
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    from core.swarm_workers.vuln.subdomain_takeover import match_fingerprint
+    r = await fetch("GET", url, timeout=timeout)
+    if not r or not (r.body or ""):
+        return False, 0.0, "re-fetch failed"
+    service = match_fingerprint(r.body)
+    if service:
+        return True, 0.85, (f"unclaimed {service} resource fingerprint reproduced "
+                            "— dangling DNS record, subdomain takeover")
+    return False, 0.2, "takeover fingerprint not present on re-test (lead)"
+
+
 async def _recheck_host_header(finding, fetch, timeout):
     """Independently re-test host-header injection with a FRESH marker host.
 
@@ -500,6 +518,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         if finding.get("owner") and finding.get("attacker"):
             return True, 0.85, "low-privilege access to a privileged function confirmed by the BFLA engine"
         return False, 0.0, "bfla finding missing two-identity provenance — not confirmed"
+    if head == "subdomain_takeover":
+        return await _recheck_subdomain_takeover(finding, fetch, timeout)
     if head == "host_header":
         return await _recheck_host_header(finding, fetch, timeout)
     if head == "access_control":

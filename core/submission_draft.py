@@ -84,6 +84,13 @@ _CLASS = {
     "git_exposed": ("CWE-538", 7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                     "An exposed .git directory leaks source code and history.",
                     "Block access to .git; deploy build artifacts only."),
+    "subdomain_takeover": ("CWE-350", 8.1, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+                           "A dangling DNS record points at a de-provisioned "
+                           "third-party resource; an attacker can register it and "
+                           "serve arbitrary content on this subdomain — phishing, "
+                           "cookie theft, and CSP/SSO trust abuse.",
+                           "Remove the dangling DNS record, or re-claim the backing "
+                           "resource; audit CNAMEs to retired services on a schedule."),
     "host_header": ("CWE-644", 6.1, "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
                     "The app builds absolute URLs (redirects, password-reset links, "
                     "cached references) from an attacker-controlled host header — "
@@ -155,6 +162,7 @@ def _title(finding: dict, vuln_type: str) -> str:
         "git_exposed": "Exposed .git Directory",
         "bfla": "Broken Function-Level Authorization (BFLA)",
         "host_header": "Host Header Injection",
+        "subdomain_takeover": "Subdomain Takeover",
         "chain": "Attack Chain",
     }
     head = _norm_head(vuln_type)
