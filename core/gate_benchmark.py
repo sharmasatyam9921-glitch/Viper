@@ -369,6 +369,14 @@ BENCHMARK = [
     Scenario("subdomain_takeover", "safe", "generic 404 (not a takeover)",
              {"vuln_type": "subdomain_takeover:github_pages", "url": "http://t/"},
              _takeover_safe),
+
+    # web cache deception (gate trusts the worker's two-identity cache proof)
+    Scenario("web_cache_deception", "vuln", "anon retrieved victim data from cache",
+             {"vuln_type": "web_cache_deception:/account",
+              "url": "http://t/account/x.css", "cache_confirmed": True}, _ok),
+    Scenario("web_cache_deception", "safe", "unconfirmed cache candidate",
+             {"vuln_type": "web_cache_deception:/account",
+              "url": "http://t/account/x.css"}, _ok),
 ]
 
 

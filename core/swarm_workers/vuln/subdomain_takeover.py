@@ -84,6 +84,10 @@ def match_fingerprint(body: str):
 
 def resolve_cname(host: str, timeout: float = 3.0) -> List[str]:
     """Best-effort CNAME/canonical chain for `host` (empty on any failure/timeout)."""
+    # A takeover target is always a multi-label FQDN; skip single-label / bare-IP
+    # hosts (also avoids slow lookups on test/loopback hosts).
+    if not host or "." not in host or all(p.isdigit() for p in host.split(".")):
+        return []
     out: dict = {}
 
     def _r():
