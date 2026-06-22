@@ -97,6 +97,13 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py benchmark` — run VIPER (+ nuclei if installed) against a local
+    # ground-truth app and score precision/recall on labeled vulns vs decoys.
+    if len(sys.argv) > 1 and sys.argv[1] == "benchmark":
+        from benchmarks.harness import run_all, format_report
+        print(format_report(run_all()))
+        sys.exit(0)
+
     # `viper.py paths <findings.json>` — grounded escalation paths to crown jewels.
     if len(sys.argv) > 1 and sys.argv[1] == "paths":
         if len(sys.argv) < 3:
