@@ -26,8 +26,19 @@ def test_viper_zero_false_positives_and_full_recall_on_ground_truth():
 
 
 def test_ground_truth_manifest_shape():
-    # 6 seeded vulns + 5 same-class decoys, all distinct paths
-    assert len(GROUND_TRUTH) == 6
-    assert len(DECOYS) == 5
+    # 9 seeded vulns + 8 same-class decoys, all distinct paths
+    assert len(GROUND_TRUTH) == 9
+    assert len(DECOYS) == 8
     vuln_paths = {p for p, _ in GROUND_TRUTH}
     assert vuln_paths.isdisjoint(set(DECOYS))
+
+
+def test_competitor_runner_registry_is_pluggable():
+    # nuclei + ZAP registered; each is graceful (skips if binary absent)
+    from benchmarks.harness import _COMPETITORS, run_zap
+    names = {n for n, _ in _COMPETITORS}
+    assert {"nuclei", "ZAP"} <= names
+    # run_zap returns None when ZAP isn't installed (no crash)
+    import os
+    if not (os.environ.get("ZAP_PATH") or __import__("shutil").which("zap.sh")):
+        assert run_zap("http://127.0.0.1:1") is None

@@ -26,9 +26,17 @@ GROUND_TRUTH = {
     ("/render", "ssti"): True,
     ("/.env", "secrets"): True,
     ("/api/data", "cors"): True,
+    ("/login", "host_header"): True,
+    ("/setlang", "crlf"): True,
+    ("/assets", "cloud_exposure"): True,
 }
 # Tempting-but-safe endpoints (any confirmed finding here is a false positive).
-DECOYS = ["/echo", "/help", "/safe_dl", "/config", "/strictcors"]
+DECOYS = ["/echo", "/help", "/safe_dl", "/config", "/strictcors",
+          "/safelogin", "/lang2", "/assets2"]
+
+_LISTING = ('<?xml version="1.0"?><ListBucketResult xmlns='
+            '"http://s3.amazonaws.com/doc/2006-03-01/"><Name>acme-assets</Name>'
+            '<Contents><Key>db-backup.sql</Key></Contents></ListBucketResult>')
 
 _PASSWD = ("root:x:0:0:root:/root:/bin/bash\n"
            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
@@ -106,6 +114,23 @@ class _Handler(BaseHTTPRequestHandler):
             extra = {"Access-Control-Allow-Origin": origin or "*",
                      "Access-Control-Allow-Credentials": "true"}
             return self._send(200, '{"data":"ok"}', "application/json", extra)
+        if p == "/login":                         # Host-header injection (redirect)
+            host = (self.headers.get("X-Forwarded-Host")
+                    or self.headers.get("Host") or "localhost")
+            return self._send(302, "redirecting",
+                              extra={"Location": f"https://{host}/dashboard"})
+        if p == "/setlang":                       # CRLF / response-header injection
+            extra = {}
+            for vals in _q(self.path).values():
+                for v in vals:
+                    for line in re.split(r"\r\n|\n", v)[1:]:
+                        if ":" in line:
+                            k, _, val = line.partition(":")
+                            if k.strip():
+                                extra[k.strip()] = val.strip()
+            return self._send(200, "lang set", extra=extra)
+        if p == "/assets":                        # public, listable cloud bucket
+            return self._send(200, _LISTING, "application/xml")
 
         # ---- DECOYS (must NOT be flagged) ------------------------------
         if p == "/echo":                          # reflection but HTML-escaped
@@ -120,6 +145,15 @@ class _Handler(BaseHTTPRequestHandler):
         if p == "/strictcors":                    # CORS locked to one trusted origin
             extra = {"Access-Control-Allow-Origin": "https://trusted.example"}
             return self._send(200, '{"ok":true}', "application/json", extra)
+        if p == "/safelogin":                     # redirect ignores Host (no injection)
+            return self._send(302, "redirecting",
+                              extra={"Location": "https://app.internal/dashboard"})
+        if p == "/lang2":                         # strips CRLF before use (no injection)
+            v = _val(self.path, "lang").replace("\r", "").replace("\n", "")
+            return self._send(200, f"lang={v}")
+        if p == "/assets2":                        # private bucket (AccessDenied)
+            return self._send(403, '<?xml version="1.0"?><Error><Code>AccessDenied'
+                              '</Code></Error>', "application/xml")
 
         # index links everything so a crawler can discover the surface
         if p in ("/", "/index.html"):
@@ -149,4 +183,7 @@ PROBE_MAP = {
     "/render": ("name", "ssti"),
     "/.env": (None, "secrets"), "/config": (None, "secrets"),
     "/api/data": (None, "cors"), "/strictcors": (None, "cors"),
+    "/login": (None, "host_header"), "/safelogin": (None, "host_header"),
+    "/setlang": ("lang", "crlf"), "/lang2": ("lang", "crlf"),
+    "/assets": (None, "cloud_exposure"), "/assets2": (None, "cloud_exposure"),
 }

@@ -22,7 +22,9 @@ from urllib.parse import urlsplit
 from .ground_truth import GROUND_TRUTH, PROBE_MAP, start_app
 
 _CLASS_WORKER = {"xss": "xss_probe", "sqli": "sqli_probe", "lfi": "lfi",
-                 "ssti": "ssti_probe", "secrets": "secrets", "cors": "cors"}
+                 "ssti": "ssti_probe", "secrets": "secrets", "cors": "cors",
+                 "host_header": "host_header", "crlf": "crlf",
+                 "cloud_exposure": "cloud_exposure"}
 def _bench_class(head: str) -> str:
     """Map a finding's vuln_type head to the benchmark's class label."""
     h = head.split(":")[0].lower()
@@ -36,6 +38,12 @@ def _bench_class(head: str) -> str:
         return "lfi"
     if h.startswith("ssti"):
         return "ssti"
+    if h.startswith("crlf"):
+        return "crlf"
+    if h.startswith("host_header"):
+        return "host_header"
+    if h.startswith("cloud_exposure"):
+        return "cloud_exposure"
     if h in ("secret", "secrets", "env_exposed", "js_secret", "git_exposed"):
         return "secrets"
     return h
@@ -162,12 +170,68 @@ def run_nuclei(base: str) -> Optional[Score]:
     return score("nuclei", confirmed, time.monotonic() - t0)
 
 
+_ZAP_ALERT_CLASS = [
+    ("cross site scripting", "xss"), ("sql injection", "sqli"),
+    ("path traversal", "lfi"), ("directory traversal", "lfi"),
+    ("remote file inclusion", "lfi"), ("template injection", "ssti"),
+    ("cross-domain misconfiguration", "cors"), ("cors", "cors"),
+    ("host header", "host_header"), ("crlf", "crlf"),
+    ("http response splitting", "crlf"), (".env information leak", "secrets"),
+    ("information disclosure", "secrets"),
+]
+
+
+def _zap_bin() -> Optional[str]:
+    for cand in (os.environ.get("ZAP_PATH"), shutil.which("zap-baseline.py"),
+                 shutil.which("zap.sh"),
+                 r"C:\Program Files\ZAP\Zed Attack Proxy\zap.bat"):
+        if cand and os.path.exists(cand):
+            return cand
+    return None
+
+
+def run_zap(base: str) -> Optional[Score]:
+    """Run a ZAP baseline scan if installed; map alerts -> class; score identically.
+
+    NOTE: the present-path needs a ZAP install + Java and is not exercised in CI;
+    the absent-path (graceful skip) is. Mapping is best-effort over ZAP's JSON.
+    """
+    binary = _zap_bin()
+    if not binary:
+        return None
+    import tempfile
+    out = os.path.join(tempfile.gettempdir(), "viper_zap_bench.json")
+    t0 = time.monotonic()
+    try:
+        subprocess.run([binary, "-t", base, "-J", out, "-I"],
+                       capture_output=True, text=True, timeout=900)
+        data = json.loads(open(out, encoding="utf-8").read())
+    except Exception:
+        return None
+    confirmed = []
+    for site in data.get("site", []):
+        for alert in site.get("alerts", []):
+            name = (alert.get("alert", "") + " " + alert.get("name", "")).lower()
+            cls = next((c for key, c in _ZAP_ALERT_CLASS if key in name), None)
+            if not cls:
+                continue
+            for inst in alert.get("instances", [{}]) or [{}]:
+                confirmed.append({"vuln_type": cls,
+                                  "url": inst.get("uri") or site.get("@name", base)})
+    return score("ZAP", confirmed, time.monotonic() - t0)
+
+
+# Pluggable competitor runners — each runs only if its binary is present.
+_COMPETITORS = [("nuclei", run_nuclei), ("ZAP", run_zap)]
+
+
 def run_all() -> List[Score]:
     srv, base = start_app()
     try:
         scores = [run_viper(base)]
-        nuc = run_nuclei(base)
-        scores.append(nuc if nuc else Score(tool="nuclei (not installed)"))
+        for name, runner in _COMPETITORS:
+            s = runner(base)
+            scores.append(s if s else Score(tool=f"{name} (not installed)"))
         return scores
     finally:
         srv.shutdown()
