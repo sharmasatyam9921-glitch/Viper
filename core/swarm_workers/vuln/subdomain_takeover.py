@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
+import threading
 from typing import List
+from urllib.parse import urlsplit
 
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
@@ -51,6 +54,24 @@ FINGERPRINTS = [
 # they appear in normal prose/docs and aren't service-specific enough to flag.
 
 
+# Where each service's DNS records point — a dangling CNAME to one of these,
+# next to the unclaimed-resource fingerprint, is definitive corroboration.
+SERVICE_CNAMES = {
+    "AWS S3": ["s3.amazonaws.com", "s3-website", "amazonaws.com"],
+    "GitHub Pages": ["github.io"],
+    "Heroku": ["herokudns.com", "herokuapp.com", "herokussl.com"],
+    "Shopify": ["myshopify.com"],
+    "Fastly": ["fastly.net"],
+    "Pantheon": ["pantheonsite.io"],
+    "Tumblr": ["domains.tumblr.com"],
+    "Ghost": ["ghost.io"],
+    "JetBrains": ["myjetbrains.com"],
+    "Read the Docs": ["readthedocs.io"],
+    "Help Scout": ["helpscoutdocs.com"],
+    "Wordpress": ["wordpress.com"],
+}
+
+
 def match_fingerprint(body: str):
     """Return the service whose unclaimed-fingerprint is in `body`, else None."""
     if not body:
@@ -59,6 +80,34 @@ def match_fingerprint(body: str):
         if rx.search(body):
             return service
     return None
+
+
+def resolve_cname(host: str, timeout: float = 3.0) -> List[str]:
+    """Best-effort CNAME/canonical chain for `host` (empty on any failure/timeout)."""
+    out: dict = {}
+
+    def _r():
+        try:
+            name, aliases, _ = socket.gethostbyname_ex(host)
+            out["names"] = [name] + list(aliases)
+        except Exception:
+            out["names"] = []
+    t = threading.Thread(target=_r, daemon=True)
+    t.start()
+    t.join(timeout)
+    return out.get("names", [])
+
+
+def cname_matches_service(host: str, service: str) -> bool:
+    """True iff `host` resolves through a CNAME owned by `service` (dangling)."""
+    suffixes = SERVICE_CNAMES.get(service, [])
+    if not host or not suffixes:
+        return False
+    for name in resolve_cname(host):
+        nl = name.lower()
+        if any(suf in nl for suf in suffixes):
+            return True
+    return False
 
 
 async def run(agent: SwarmAgent) -> List[dict]:
@@ -76,6 +125,11 @@ async def run(agent: SwarmAgent) -> List[dict]:
     service = match_fingerprint(resp.body)
     if not service:
         return []
+    host = urlsplit(url).hostname or ""
+    cname_ok = cname_matches_service(host, service)
+    conf = 0.92 if cname_ok else 0.85
+    cname_note = (f" The DNS record for {host} still resolves through a {service} "
+                  f"CNAME (dangling)." if cname_ok else "")
     return [{
         "type": "subdomain_takeover",
         "vuln_type": f"subdomain_takeover:{service.lower().replace(' ', '_')}",
@@ -83,12 +137,12 @@ async def run(agent: SwarmAgent) -> List[dict]:
         "severity": "high",
         "url": url,
         "cwe": "CWE-350",
-        "confidence": 0.85,
+        "confidence": conf,
         "needs_manual_verification": True,
         "evidence": (f"The response carries {service}'s 'unclaimed resource' "
                      f"fingerprint — the DNS record points at a de-provisioned "
                      f"{service} resource an attacker can register to serve content "
-                     f"on this host."),
+                     f"on this host.{cname_note}"),
         "poc_request": f"GET {url}  (observe the {service} unclaimed-resource page)",
     }]
 

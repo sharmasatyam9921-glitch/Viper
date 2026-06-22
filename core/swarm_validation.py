@@ -257,7 +257,9 @@ async def _recheck_subdomain_takeover(finding, fetch, timeout):
     url = finding.get("url") or finding.get("target") or ""
     if not url:
         return False, 0.0, "no url to re-test"
-    from core.swarm_workers.vuln.subdomain_takeover import match_fingerprint
+    from urllib.parse import urlsplit as _urlsplit2
+    from core.swarm_workers.vuln.subdomain_takeover import (
+        cname_matches_service, match_fingerprint)
     r = await fetch("GET", url, timeout=timeout)
     if not r or not (r.body or ""):
         return False, 0.0, "re-fetch failed"
@@ -266,6 +268,10 @@ async def _recheck_subdomain_takeover(finding, fetch, timeout):
                             "domain, not an unclaimed resource) — lead")
     service = match_fingerprint(r.body)
     if service:
+        host = _urlsplit2(url).hostname or ""
+        if cname_matches_service(host, service):
+            return True, 0.9, (f"unclaimed {service} fingerprint + dangling CNAME to "
+                               f"{service} — subdomain takeover confirmed")
         return True, 0.85, (f"unclaimed {service} resource fingerprint reproduced "
                             "— dangling DNS record, subdomain takeover")
     return False, 0.2, "takeover fingerprint not present on re-test (lead)"

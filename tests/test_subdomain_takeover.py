@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.swarm_validation import validate_findings  # noqa: E402
 from core.swarm_workers.vuln._http import HttpResp  # noqa: E402
 from core.swarm_workers.vuln.subdomain_takeover import (  # noqa: E402
+    cname_matches_service,
     match_fingerprint,
+    resolve_cname,
     run as st_run,
 )
 
@@ -63,6 +65,22 @@ def test_gate_rejects_when_fingerprint_gone():
     f = {"vuln_type": "subdomain_takeover:aws_s3", "url": "http://sub.t/"}
     out = asyncio.run(validate_findings([f], fetch=_fetch("the bucket is now claimed, hello", 200)))
     assert not out[0]["submittable"]
+
+
+def test_resolve_cname_is_best_effort():
+    # an unresolvable host returns [] (no crash / no hang) within the timeout
+    assert resolve_cname("nonexistent.invalid.viper-test", timeout=2.0) == []
+    assert cname_matches_service("nonexistent.invalid.viper-test", "GitHub Pages") is False
+
+
+def test_cname_corroboration_bumps_confidence(monkeypatch):
+    import core.swarm_workers.vuln.subdomain_takeover as mod
+    monkeypatch.setattr(mod, "resolve_cname", lambda h, timeout=3.0: ["victim.github.io"])
+    f = {"vuln_type": "subdomain_takeover:github_pages", "url": "http://victim.example/"}
+    out = asyncio.run(validate_findings(
+        [f], fetch=_fetch("There isn't a GitHub Pages site here", 404)))
+    assert out[0]["submittable"] and out[0]["validation_confidence"] == 0.9
+    assert "dangling CNAME" in out[0]["validation_reason"]
 
 
 def test_200_page_with_fingerprint_is_not_takeover(monkeypatch):
