@@ -82,6 +82,16 @@ def main():
         from core.mcp_cli import run_mcp_cli
         sys.exit(run_mcp_cli(sys.argv[2:]))
 
+    # `viper.py classes` — list the vulnerability classes VIPER tests/confirms.
+    if len(sys.argv) > 1 and sys.argv[1] == "classes":
+        from core.ops_cli import run_classes_cli
+        sys.exit(run_classes_cli(sys.argv[2:]))
+
+    # `viper.py ledger [list|clear]` — cross-hunt duplicate-suppression ledger.
+    if len(sys.argv) > 1 and sys.argv[1] == "ledger":
+        from core.ops_cli import run_ledger_cli
+        sys.exit(run_ledger_cli(sys.argv[2:]))
+
     # `viper.py oob [start|demo]` — out-of-band interaction listener for blind vulns.
     if len(sys.argv) > 1 and sys.argv[1] == "oob":
         from core.oob_cli import run_oob_cli
