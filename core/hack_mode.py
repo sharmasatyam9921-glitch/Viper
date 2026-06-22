@@ -918,12 +918,15 @@ class HackMode:
         assets: Optional[list[str]] = None,
         findings: Optional[list[dict]] = None,
         chain_depth: int = 0,
+        techniques: Optional[list[str]] = None,
     ) -> CoordinatorResult:
         """Dispatch one phase's coordinator. Returns its CoordinatorResult.
 
         `assets`/`findings` override the default context (used by the chain
         loop to scope a phase to just the newly-revealed surface); `chain_depth`
-        is passed through for audit/telemetry.
+        is passed through for audit/telemetry. `techniques`, when given, scopes
+        the phase to just those workers (targeted expansion) instead of the full
+        profile set.
         """
         # Per-phase budget (Phase 5): split the total time across phases
         # so slow workers in one phase can't starve downstream phases.
@@ -942,13 +945,14 @@ class HackMode:
         }
         coord = self._coord_factory(phase, common)
 
-        # Build payload
-        techniques = self.profile.workers.get(phase, [])
+        # Build payload. A targeted-expansion override scopes to just the probes
+        # that escalate the seed finding; otherwise use the profile's phase set.
+        phase_techniques = techniques or self.profile.workers.get(phase, [])
         payload = {
             "target": self.target,
             "scope_reasoner": self.scope_reasoner,
             # Empty techniques list → use all registered for the phase
-            "techniques": techniques or None,
+            "techniques": phase_techniques or None,
             # Shared per-hunt session/reachability state (additive; workers that
             # don't read it are unaffected).
             "session_context": self._session_context,
@@ -1046,6 +1050,17 @@ class HackMode:
                 break  # nothing in-scope left to chain → converge
 
             assets = [t.asset_url for t in tasks]
+            # Targeted-expansion scope: the union of the probes each task asked
+            # for. A new-host sweep (or any task with no specific techniques)
+            # falls back to the full phase so we never under-probe new surface.
+            chain_techs: set[str] = set()
+            full_sweep = False
+            for t in tasks:
+                if t.new_host or not t.techniques:
+                    full_sweep = True
+                else:
+                    chain_techs.update(t.techniques)
+            vuln_scope = None if full_sweep else (sorted(chain_techs) or None)
             self.audit.event(
                 "chain.expanded",
                 target=self.target,
@@ -1054,6 +1069,7 @@ class HackMode:
                     "tasks": len(tasks),
                     "assets": assets[:20],
                     "origins": sorted({t.origin_type for t in tasks}),
+                    "scope": vuln_scope or "full",
                 },
             )
             self.narrator.info(
@@ -1066,7 +1082,8 @@ class HackMode:
             for phase in chain_phases:
                 if phase == "vuln":
                     pr = await self._run_phase(
-                        phase, assets=assets, chain_depth=depth + 1)
+                        phase, assets=assets, chain_depth=depth + 1,
+                        techniques=vuln_scope)
                     vuln_findings = list(pr.findings)
                 elif phase == "exploit":
                     pr = await self._run_phase(

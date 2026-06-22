@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from core.expansion import expand as _expand
+
 # Verdicts
 KILL = "KILL"
 DOWNGRADE = "DOWNGRADE"
@@ -48,12 +50,20 @@ _HIGH_SEVERITIES = {"high", "critical"}
 
 @dataclass
 class ChainTask:
-    """One follow-up the loop should dispatch against newly-revealed surface."""
+    """One follow-up the loop should dispatch against newly-revealed surface.
+
+    ``techniques`` (when non-empty) scopes the follow-up to the specific probes
+    that escalate the seed finding — so the loop runs the RIGHT next test, not the
+    whole vuln phase. ``new_host`` marks a freshly-discovered host that warrants a
+    full sweep. Both come from ``core.expansion``.
+    """
     asset_url: str
     origin_type: str
     reason: str
     depth: int
     seed: dict = field(default_factory=dict)
+    techniques: list = field(default_factory=list)
+    new_host: bool = False
 
 
 @dataclass
@@ -126,16 +136,23 @@ class ChainPlanner:
             if not url:
                 continue
             origin = str(f.get("type", "")).lower() or "finding"
-            key = (url, origin)
+            # Targeted expansion picks the right next probe(s) and may retarget to
+            # an origin (new host). Falls back to a generic re-probe if it declines.
+            et = _expand(f)
+            target = et.target if et else url
+            key = (target, origin)
             if key in self._seen:
                 continue
             self._seen.add(key)
             decision.new_tasks.append(ChainTask(
-                asset_url=url,
+                asset_url=target,
                 origin_type=origin,
-                reason=f"chain from {origin} ({f.get('severity', 'info')})",
+                reason=(et.reason if et else
+                        f"chain from {origin} ({f.get('severity', 'info')})"),
                 depth=depth + 1,
                 seed=f,
+                techniques=list(et.techniques) if et else [],
+                new_host=bool(et.new_host) if et else False,
             ))
             if len(decision.new_tasks) >= self.max_tasks:
                 break

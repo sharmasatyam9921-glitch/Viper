@@ -246,6 +246,18 @@ async def _exploit_runner(agent: SwarmAgent) -> List[dict]:
     }]
 
 
+async def _ssrf_runner(agent: SwarmAgent) -> List[dict]:
+    """Emit a confirmed SSRF foothold → targeted expansion should scope to ssrf."""
+    return [{
+        "type": "ssrf",
+        "vuln_type": "ssrf:confirmed",
+        "title": "SSRF confirmed",
+        "severity": "high",
+        "url": "http://example.com/fetch?u=1",
+        "foothold": True,
+    }]
+
+
 class TestChaining:
     def test_confirmed_exploit_expands_chain(self, tmp_path):
         # LabProfile(--go) enables exploit/post + max_chain_depth>0.
@@ -263,6 +275,21 @@ class TestChaining:
         assert "chain.completed" in actions
         # Findings carry a verdict annotation for the report.
         assert any(f.get("chain_verdict") for f in result.findings)
+
+    def test_targeted_expansion_scopes_chain_to_technique(self, tmp_path):
+        # A confirmed SSRF should drive a chain round scoped to the ssrf probe
+        # (targeted expansion), not a full re-run of the vuln phase.
+        hm = _make_hackmode(
+            tmp_path,
+            profile=LabProfile(allow_destructive=True),
+            technique_runner=_ssrf_runner,
+        )
+        result = asyncio.run(hm.run())
+        assert any(k.startswith("vuln@chain") for k in result.phase_results)
+        expansions = [e for e in hm.audit.read_jsonl() if e.action == "chain.expanded"]
+        assert expansions
+        scopes = [e.payload.get("scope") for e in expansions]
+        assert any(s == ["ssrf"] for s in scopes)   # targeted, not "full"
 
     def test_chain_scope_gate_fails_closed(self, tmp_path):
         # A scope reasoner that denies everything must block chain expansion
