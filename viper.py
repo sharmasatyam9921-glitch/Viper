@@ -97,6 +97,28 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py paths <findings.json>` — grounded escalation paths to crown jewels.
+    if len(sys.argv) > 1 and sys.argv[1] == "paths":
+        if len(sys.argv) < 3:
+            print("usage: viper.py paths <findings.json>")
+            sys.exit(1)
+        import json as _json
+        from core.attack_path import find_paths
+        try:
+            _d = _json.loads(open(sys.argv[2], encoding="utf-8").read())
+        except Exception as _e:
+            print(f"could not read {sys.argv[2]!r}: {_e}")
+            sys.exit(1)
+        _findings = _d.get("findings", _d) if isinstance(_d, dict) else _d
+        _paths = find_paths(_findings or [])
+        print(f"{len(_paths)} grounded escalation path(s):")
+        for _p in _paths:
+            _tag = "CONFIRMED" if _p.fully_confirmed else "potential"
+            print(f"  [{_p.severity:<8}] {_p.goal:<18} ({_tag}, "
+                  f"{_p.confirmed_hops} confirmed + {_p.potential_hops} potential)")
+            print(f"      {_p.narrative}")
+        sys.exit(0)
+
     # `viper.py coverage <findings.json> [techs]` — 'what did I miss?' reflection.
     if len(sys.argv) > 1 and sys.argv[1] == "coverage":
         if len(sys.argv) < 3:
