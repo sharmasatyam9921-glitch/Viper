@@ -17,7 +17,7 @@ _GATE_CONFIRMED = {
     "cors", "env_exposed", "git_exposed", "information_disclosure", "idor",
     "bola", "bola_multi", "bfla", "bfla_multi", "host_header",
     "subdomain_takeover", "access_control", "ssrf", "crlf",
-    "web_cache_deception",
+    "web_cache_deception", "xxe",
 }
 _OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header"}
 

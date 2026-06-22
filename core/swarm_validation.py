@@ -250,6 +250,31 @@ async def _recheck_access_control(finding, fetch, timeout):
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 
+async def _recheck_xxe(finding, fetch, timeout):
+    """Independently re-run the in-band XXE probe. A reproduced local-file read
+    (/etc/passwd content) is strong confirmation; a reproduced external-entity
+    parser error is medium. (Blind XXE is confirmed earlier via the OOB token.)"""
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    from core.swarm_workers.vuln.xxe import run as _xxe_run
+
+    class _A:
+        target = url
+        timeout_s = timeout
+        payload = {}
+    try:
+        res = await _xxe_run(_A())
+    except Exception:
+        res = []
+    if any("file_read" in (f.get("vuln_type") or "") for f in res):
+        return True, 0.9, "XXE local-file read reproduced (/etc/passwd content returned)"
+    if any("entity_processing" in (f.get("vuln_type") or "") for f in res):
+        return True, 0.6, ("XXE external-entity processing reproduced (parser error) "
+                           "— blind exfiltration would need OAST")
+    return False, 0.3, "XXE not reproduced on re-test (lead)"
+
+
 async def _recheck_crlf(finding, fetch, timeout):
     """Independently re-run the CRLF probe (fresh random token). It confirms only
     when an attacker-controlled header carrying THAT token appears in the response
@@ -565,6 +590,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return False, 0.0, "bfla finding missing two-identity provenance — not confirmed"
     if head.startswith("crlf"):
         return await _recheck_crlf(finding, fetch, timeout)
+    if head == "xxe":
+        return await _recheck_xxe(finding, fetch, timeout)
     if head == "subdomain_takeover":
         return await _recheck_subdomain_takeover(finding, fetch, timeout)
     if head == "host_header":
