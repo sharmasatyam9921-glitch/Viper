@@ -250,6 +250,29 @@ async def _recheck_access_control(finding, fetch, timeout):
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 
+async def _recheck_crlf(finding, fetch, timeout):
+    """Independently re-run the CRLF probe (fresh random token). It confirms only
+    when an attacker-controlled header carrying THAT token appears in the response
+    — header injection, not mere reflection. Reproduction = confirmation."""
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    from core.swarm_workers.vuln.crlf import run as _crlf_run
+
+    class _A:
+        target = url
+        timeout_s = timeout
+        payload = {"parameter": finding.get("parameter")}
+    try:
+        res = await _crlf_run(_A())
+    except Exception:
+        res = []
+    if res:
+        return True, 0.85, ("fresh CRLF re-injection emitted an attacker-controlled "
+                            "response header carrying our unique token (header injection)")
+    return False, 0.3, "CRLF injection not reproduced on re-test (lead)"
+
+
 async def _recheck_subdomain_takeover(finding, fetch, timeout):
     """Independently re-fetch and re-confirm the service's unclaimed-resource
     fingerprint. These strings only appear on a de-provisioned third-party
@@ -540,6 +563,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         if finding.get("owner") and finding.get("attacker"):
             return True, 0.85, "low-privilege access to a privileged function confirmed by the BFLA engine"
         return False, 0.0, "bfla finding missing two-identity provenance — not confirmed"
+    if head.startswith("crlf"):
+        return await _recheck_crlf(finding, fetch, timeout)
     if head == "subdomain_takeover":
         return await _recheck_subdomain_takeover(finding, fetch, timeout)
     if head == "host_header":

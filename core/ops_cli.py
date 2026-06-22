@@ -16,7 +16,8 @@ _GATE_CONFIRMED = {
     "xss", "sqli", "ssti", "lfi", "cmdi", "command_injection", "secrets",
     "cors", "env_exposed", "git_exposed", "information_disclosure", "idor",
     "bola", "bola_multi", "bfla", "bfla_multi", "host_header",
-    "subdomain_takeover", "access_control", "ssrf",
+    "subdomain_takeover", "access_control", "ssrf", "crlf",
+    "web_cache_deception",
 }
 _OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header"}
 
