@@ -552,6 +552,14 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
     if (":bola:" in vt_full or head == "bola") and not _external \
             and finding.get("owner") and finding.get("attacker"):
         return True, 0.85, "two-account cross-user object read confirmed by the BOLA engine"
+    # Web cache deception: the worker proved an anonymous request retrieved the
+    # victim's private data from cache (the cache_confirmed flag). Trust that
+    # two-identity proof (own findings only, not external).
+    if head == "web_cache_deception" and not _external:
+        if finding.get("cache_confirmed"):
+            return True, 0.85, ("anonymous request retrieved the victim's private "
+                                "data from cache — web cache deception confirmed")
+        return False, 0.3, "web cache deception candidate — not confirmed (lead)"
     # Single-session IDOR candidate: auto-escalate to the two-account BOLA test
     # when two sessions are configured; otherwise stay a lead.
     if head == "idor":

@@ -84,6 +84,13 @@ _CLASS = {
     "git_exposed": ("CWE-538", 7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                     "An exposed .git directory leaks source code and history.",
                     "Block access to .git; deploy build artifacts only."),
+    "web_cache_deception": ("CWE-525", 7.5, "AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",
+                            "A cache stores authenticated pages under static-looking "
+                            "URLs; an unauthenticated attacker retrieves another "
+                            "user's private data from the cache.",
+                            "Cache by content type from origin headers, not URL "
+                            "suffix; set Cache-Control: no-store on authenticated "
+                            "responses; normalize/validate paths at the edge."),
     "subdomain_takeover": ("CWE-350", 8.1, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
                            "A dangling DNS record points at a de-provisioned "
                            "third-party resource; an attacker can register it and "
@@ -163,6 +170,7 @@ def _title(finding: dict, vuln_type: str) -> str:
         "bfla": "Broken Function-Level Authorization (BFLA)",
         "host_header": "Host Header Injection",
         "subdomain_takeover": "Subdomain Takeover",
+        "web_cache_deception": "Web Cache Deception",
         "chain": "Attack Chain",
     }
     head = _norm_head(vuln_type)
