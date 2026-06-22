@@ -97,6 +97,29 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py xbow <benchmarks_dir>` — run VIPER against XBOW validation
+    # benchmarks (needs Docker). Scores detection + flag-capture per challenge.
+    if len(sys.argv) > 1 and sys.argv[1] == "xbow":
+        if len(sys.argv) < 3:
+            print("usage: viper.py xbow <xbow-benchmarks-dir> [flag]")
+            sys.exit(1)
+        import os as _os
+        from benchmarks.xbow_runner import (docker_available, run_benchmark,
+                                            summarize, viper_hunt)
+        root = sys.argv[2]
+        flag = sys.argv[3] if len(sys.argv) > 3 else "VIPER_BENCH_FLAG"
+        if not docker_available():
+            print("Docker daemon is not running — start Docker Desktop first.")
+            sys.exit(2)
+        dirs = [d for d in (_os.path.join(root, x) for x in sorted(_os.listdir(root)))
+                if _os.path.isfile(_os.path.join(d, "docker-compose.yml"))]
+        results = []
+        for d in dirs:
+            print(f"[xbow] {_os.path.basename(d)} ...", flush=True)
+            results.append(run_benchmark(d, viper_hunt, flag=flag))
+        print(summarize(results))
+        sys.exit(0)
+
     # `viper.py benchmark` — run VIPER (+ nuclei if installed) against a local
     # ground-truth app and score precision/recall on labeled vulns vs decoys.
     if len(sys.argv) > 1 and sys.argv[1] == "benchmark":
