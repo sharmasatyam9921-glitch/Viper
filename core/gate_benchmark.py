@@ -247,6 +247,17 @@ def _takeover_safe(m, url, h):
     return HttpResp(404, {}, "<html>404 Not Found - page missing</html>", url)
 
 
+def _s3_public(m, url, h):
+    return HttpResp(200, {}, '<?xml version="1.0"?><ListBucketResult xmlns='
+                    '"http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name>'
+                    '<Contents><Key>db-backup.sql</Key></Contents></ListBucketResult>', url)
+
+
+def _s3_private(m, url, h):
+    return HttpResp(403, {}, '<?xml version="1.0"?><Error><Code>AccessDenied'
+                    '</Code></Error>', url)
+
+
 # --- the labeled benchmark -------------------------------------------------
 
 @dataclass(frozen=True)
@@ -369,6 +380,14 @@ BENCHMARK = [
     Scenario("subdomain_takeover", "safe", "generic 404 (not a takeover)",
              {"vuln_type": "subdomain_takeover:github_pages", "url": "http://t/"},
              _takeover_safe),
+
+    # cloud storage exposure
+    Scenario("cloud_exposure", "vuln", "public listable S3 bucket",
+             {"vuln_type": "cloud_exposure:public_bucket_listing", "url": "http://t/"},
+             _s3_public),
+    Scenario("cloud_exposure", "safe", "private bucket (AccessDenied)",
+             {"vuln_type": "cloud_exposure:public_bucket_listing", "url": "http://t/"},
+             _s3_private),
 
     # web cache deception (gate trusts the worker's two-identity cache proof)
     Scenario("web_cache_deception", "vuln", "anon retrieved victim data from cache",

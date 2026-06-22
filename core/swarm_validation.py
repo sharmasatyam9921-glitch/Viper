@@ -319,6 +319,20 @@ async def _recheck_crlf(finding, fetch, timeout):
     return False, 0.3, "CRLF injection not reproduced on re-test (lead)"
 
 
+async def _recheck_cloud_exposure(finding, fetch, timeout):
+    """Independently re-fetch and re-confirm the cloud-bucket exposure signal
+    (a provider listing root + a real object entry, or a NoSuchBucket takeover)."""
+    url = finding.get("url") or finding.get("target") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    from core.swarm_workers.vuln.cloud_exposure import classify
+    r = await fetch("GET", url, timeout=timeout)
+    hit = classify(r)
+    if hit:
+        return True, 0.85, f"cloud storage exposure reproduced ({hit[0]})"
+    return False, 0.2, "cloud-bucket exposure not reproduced on re-test (lead)"
+
+
 async def _recheck_subdomain_takeover(finding, fetch, timeout):
     """Independently re-fetch and re-confirm the service's unclaimed-resource
     fingerprint. These strings only appear on a de-provisioned third-party
@@ -615,6 +629,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_xxe(finding, fetch, timeout)
     if head.startswith("clickjacking"):
         return await _recheck_clickjacking(finding, fetch, timeout)
+    if head == "cloud_exposure":
+        return await _recheck_cloud_exposure(finding, fetch, timeout)
     if head == "subdomain_takeover":
         return await _recheck_subdomain_takeover(finding, fetch, timeout)
     if head == "host_header":

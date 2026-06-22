@@ -97,6 +97,13 @@ _CLASS = {
                             "Cache by content type from origin headers, not URL "
                             "suffix; set Cache-Control: no-store on authenticated "
                             "responses; normalize/validate paths at the edge."),
+    "cloud_exposure": ("CWE-264", 7.5, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                       "A publicly listable cloud storage bucket/container exposes "
+                       "every object name (and often the objects) to anonymous "
+                       "users — data leakage, and a takeover if the bucket is "
+                       "dangling.",
+                       "Make the bucket/container private; enable public-access "
+                       "block; remove dangling storage DNS records."),
     "subdomain_takeover": ("CWE-350", 8.1, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
                            "A dangling DNS record points at a de-provisioned "
                            "third-party resource; an attacker can register it and "
@@ -178,6 +185,7 @@ def _title(finding: dict, vuln_type: str) -> str:
         "bfla": "Broken Function-Level Authorization (BFLA)",
         "host_header": "Host Header Injection",
         "subdomain_takeover": "Subdomain Takeover",
+        "cloud_exposure": "Cloud Storage Exposure",
         "web_cache_deception": "Web Cache Deception",
         "chain": "Attack Chain",
     }
