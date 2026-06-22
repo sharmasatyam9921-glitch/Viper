@@ -97,6 +97,18 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py apk <file.apk>` — static secret/endpoint audit of a mobile app.
+    if len(sys.argv) > 1 and sys.argv[1] == "apk":
+        if len(sys.argv) < 3:
+            print("usage: viper.py apk <file.apk>")
+            sys.exit(1)
+        from core.mobile import audit_apk
+        _fs = audit_apk(sys.argv[2])
+        print(f"{len(_fs)} mobile finding(s) in {sys.argv[2]}:")
+        for _f in _fs:
+            print(f"  [{_f['severity']:<6}] {_f['vuln_type']:<34} {_f['evidence'][:70]}")
+        sys.exit(0)
+
     # `viper.py oob [start|demo]` — out-of-band interaction listener for blind vulns.
     if len(sys.argv) > 1 and sys.argv[1] == "oob":
         from core.oob_cli import run_oob_cli
