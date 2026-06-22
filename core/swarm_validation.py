@@ -150,16 +150,35 @@ async def _recheck_sqli(finding, fetch, timeout):
     url = finding.get("url") or ""
     if not param or not url:
         return False, 0.0, "no parameter to re-test"
+
+    def dberr(r):  # a genuine DB error: an error signature AND a 5xx (query broke)
+        return bool(_SQL_ERR.search(_body(r))) and getattr(r, "status", 0) >= 500
+
     benign = await fetch("GET", add_query(url, param, "1"), timeout=timeout)
     q1 = await fetch("GET", add_query(url, param, "1'"), timeout=timeout)
     bal = await fetch("GET", add_query(url, param, "1''"), timeout=timeout)
     if None in (benign, q1, bal):
         return False, 0.0, "re-fetch failed"
     if _waf_block(q1):
-        return False, 0.1, "quote was blocked by a WAF/edge, not executed by a database"
+        # The raw quote was WAF-blocked. Before failing closed, give the candidate
+        # a FAIR re-test through the WAF: retry encoding mutations and apply the
+        # SAME strong DB-error differential to whatever gets through. No relaxation
+        # — a bypass that doesn't reproduce a clean 5xx differential is still a lead.
+        from core.swarm_workers.vuln._bypass import adaptive_fetch
 
-    def dberr(r):  # a genuine DB error: an error signature AND a 5xx (query broke)
-        return bool(_SQL_ERR.search(_body(r))) and getattr(r, "status", 0) >= 500
+        def _b(v):
+            return add_query(url, param, v)
+        bq1 = (await adaptive_fetch("GET", _b, "1'", timeout=timeout)).response
+        bbal = (await adaptive_fetch("GET", _b, "1''", timeout=timeout)).response
+        if bq1 is None or _waf_block(bq1):
+            return False, 0.1, ("quote blocked by a WAF/edge and no encoding bypass "
+                                "got through")
+        if not _SQL_ERR.search(_body(benign)) and dberr(bq1) and not dberr(bbal):
+            return True, 0.8, ("WAF blocked the raw quote; an encoding bypass reached "
+                               "the database and the unbalanced-quote DB-error "
+                               "differential held — genuine SQL injection")
+        return False, 0.2, ("quote WAF-blocked; a bypass reached the app but produced "
+                            "no clean DB-error differential")
     # Real injection: the UNBALANCED quote breaks the query (DB error + 5xx) while
     # the benign value and a BALANCED '' do not. Rejects: a 200 page merely echoing
     # "SQL syntax" (corpus search — no 5xx); a WAF block (handled above); an app

@@ -100,6 +100,38 @@ def _candidate_params(url: str) -> list[str]:
     return params
 
 
+async def _bypass_error_payload(url: str, param: str, timeout: float) -> List[dict]:
+    """On a WAF block, retry encoding mutations of the quote payload. Emit a
+    finding only if a non-blocked variant returns the SQL error banner (and the
+    page is not itself a block/security page) — same signal, just past the WAF."""
+    from ._bypass import adaptive_fetch
+
+    def build(variant: str) -> str:
+        return add_query(url, param, variant)
+
+    res = await adaptive_fetch("GET", build, _ERR_PAYLOAD, timeout=timeout)
+    if res.blocked or not res.bypassed or res.response is None:
+        return []
+    body = res.response.body or ""
+    if _ERR_BANNERS.search(body) and not _BLOCK_PAGE_MARKERS.search(body):
+        return [{
+            "type": "sqli",
+            "vuln_type": f"sqli:{param}",
+            "title": f"SQL error banner for ?{param}= (WAF-bypassed)",
+            "severity": "high",
+            "url": build(res.payload),
+            "parameter": param,
+            "payload": res.payload,
+            "cwe": "CWE-89",
+            "confidence": 0.85,
+            "evidence": (
+                f"the raw quote payload was WAF-blocked; a '{res.label}' encoding "
+                "bypass reached the app and produced a SQL error banner absent from "
+                "the benign baseline"),
+        }]
+    return []
+
+
 async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
     findings: list[dict] = []
 
@@ -115,6 +147,16 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
     # --- Error-banner path (differential) --------------------------------
     err_url = add_query(url, param, _ERR_PAYLOAD)
     err_resp = await fetch("GET", err_url, timeout=timeout)
+    # If a WAF blocked the raw quote, the app never saw it. Try to slip a mutated
+    # quote past the WAF and re-run the SAME differential — still requires the SQL
+    # error banner on a non-blocked response (no FP relaxation), just past the WAF.
+    err_blocked = bool(err_resp) and (
+        err_resp.status in _WAF_BLOCK_STATUSES
+        or bool(_BLOCK_PAGE_MARKERS.search(err_resp.body)))
+    if err_blocked and not base_has_banner:
+        bypassed = await _bypass_error_payload(url, param, timeout)
+        if bypassed:
+            return bypassed
     if err_resp and _ERR_BANNERS.search(err_resp.body) and not base_has_banner:
         # The banner appeared ONLY under the quote payload, not the benign
         # baseline. Before attributing it to a broken SQL statement, rule out the
