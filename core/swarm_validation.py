@@ -16,6 +16,7 @@ didn't reproduce.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Awaitable, Callable, List, Optional, Tuple
@@ -774,31 +775,38 @@ async def validate_findings(
         from core.swarm_workers.vuln._http import fetch as _swarm_fetch
         fetch = _swarm_fetch
 
-    out: List[dict] = []
-    for f in findings:
+    # Each finding's re-confirmation is INDEPENDENT (a fresh re-test keyed on the
+    # finding's own shape), so they run concurrently (bounded) without affecting
+    # each other's verdict — same fail-closed guarantees, far less wall-clock when
+    # a hunt produces many candidates. Order is preserved by asyncio.gather.
+    sem = asyncio.Semaphore(12)
+
+    async def _validate_one(f: dict) -> dict:
         g = dict(f)
         vt = g.get("vuln_type", g.get("type", ""))
-        try:
-            if validator is not None:
-                target = g.get("url") or g.get("target") or default_target
-                probe = dict(g)
-                norm = validator_key(vt)
-                probe["vuln_type"] = norm
-                probe["attack"] = norm
-                ok, conf, reason = await validator.validate(probe, target)
-            else:
-                ok, conf, reason = await _reconfirm(g, fetch, timeout, bola_config,
-                                                    oob_store=oob_store)
-        except Exception as e:  # noqa: BLE001 — fail closed on any error
-            ok, conf, reason = False, 0.0, f"validation error: {e}"
+        async with sem:
+            try:
+                if validator is not None:
+                    target = g.get("url") or g.get("target") or default_target
+                    probe = dict(g)
+                    norm = validator_key(vt)
+                    probe["vuln_type"] = norm
+                    probe["attack"] = norm
+                    ok, conf, reason = await validator.validate(probe, target)
+                else:
+                    ok, conf, reason = await _reconfirm(g, fetch, timeout, bola_config,
+                                                        oob_store=oob_store)
+            except Exception as e:  # noqa: BLE001 — fail closed on any error
+                ok, conf, reason = False, 0.0, f"validation error: {e}"
         g["validated"] = bool(ok)
         g["validation_confidence"] = round(float(conf), 3)
         g["validation_reason"] = reason
         g["submittable"] = bool(ok) and float(conf) >= min_confidence
-        out.append(g)
         logger.debug("validate %s -> validated=%s conf=%.2f submittable=%s",
                      vt, g["validated"], g["validation_confidence"], g["submittable"])
-    return out
+        return g
+
+    return list(await asyncio.gather(*[_validate_one(f) for f in findings]))
 
 
 def partition(findings: List[dict]) -> Tuple[List[dict], List[dict]]:
