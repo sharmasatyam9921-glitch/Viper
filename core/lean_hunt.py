@@ -17,6 +17,7 @@ Returns gate-confirmed findings; never auto-submits.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import pkgutil
 import re
@@ -78,7 +79,10 @@ async def discover(base: str, *, max_pages: int = 30, timeout: float = 6.0) -> d
         if u in seen:
             continue
         seen.add(u)
-        r = await fetch("GET", u, timeout=timeout)
+        # Do NOT follow redirects: a 3xx endpoint (e.g. /login) is itself attack
+        # surface (host-header/open-redirect); following it would record the target
+        # path instead and the vulnerable endpoint would never be probed.
+        r = await fetch("GET", u, timeout=timeout, follow_redirects=False)
         if not r:
             continue
         sp = urlsplit(u)
@@ -86,6 +90,12 @@ async def discover(base: str, *, max_pages: int = 30, timeout: float = 6.0) -> d
         params = endpoints.setdefault(path, set())
         for k, _ in parse_qsl(sp.query):
             params.add(k)
+        # a redirect Location may reveal a new same-host endpoint to crawl
+        loc = (getattr(r, "headers", {}) or {}).get("location") or ""
+        if loc:
+            link = urljoin(u, loc)
+            if urlsplit(link).netloc in ("", host) and link not in seen:
+                queue.append(link)
         if not (200 <= getattr(r, "status", 0) < 400):
             continue
         body = r.body or ""
@@ -110,40 +120,58 @@ def _scope(names, classes):
 
 
 async def hunt(base: str, *, classes: Optional[set] = None, oob=None,
-               max_pages: int = 30) -> List[dict]:
+               max_pages: int = 30, fast: bool = False) -> List[dict]:
+    """Discovery-strong find+confirm hunt -> gate-confirmed findings.
+
+    `fast=True` disables the politeness rate limiter (~10x faster) and is ONLY for
+    AUTHORIZED localhost / benchmark targets; leave it off for real engagements.
+    """
     from core.payload_library import add_discovered_params, clear_discovered_params
     from core.swarm_validation import validate_findings
     from core.swarm_workers.vuln._http import clear_oob, set_oob
+    from core.swarm_workers.vuln._rate_limit import set_unthrottled
 
     workers = _load_workers()
     clear_discovered_params()
-    surf = await discover(base, max_pages=max_pages)
-    discovered: set = set()
-    for params in surf["endpoints"].values():
-        discovered |= params
-    add_discovered_params(discovered)
-
-    inj = _scope(_INJECT_WORKERS, classes)
-    srf = _scope(_SURFACE_WORKERS, classes)
+    if fast:
+        set_unthrottled(True)
     oob_store = None
-    if oob is not None:
-        set_oob(oob)
-        oob_store = getattr(oob, "store", None)
-    findings: List[dict] = []
     try:
-        for path in list(surf["endpoints"])[:30]:
-            ep = base.rstrip("/") + (path if path.startswith("/") else "/" + path)
-            for wn in inj + srf:
-                run = workers.get(wn)
-                if run is None:
-                    continue
+        surf = await discover(base, max_pages=max_pages)
+        discovered: set = set()
+        for params in surf["endpoints"].values():
+            discovered |= params
+        add_discovered_params(discovered)
+
+        names = list(dict.fromkeys(_scope(_INJECT_WORKERS, classes)
+                                   + _scope(_SURFACE_WORKERS, classes)))
+        if oob is not None:
+            set_oob(oob)
+            oob_store = getattr(oob, "store", None)
+        sem = asyncio.Semaphore(16)
+
+        async def _probe(ep: str, wn: str) -> List[dict]:
+            run = workers.get(wn)
+            if run is None:
+                return []
+            async with sem:
                 try:
-                    findings += await run(_Agent(ep))
+                    return await run(_Agent(ep))
                 except Exception:
-                    pass
+                    return []
+        tasks = [
+            _probe(base.rstrip("/") + (p if p.startswith("/") else "/" + p), wn)
+            for p in list(surf["endpoints"])[:30] for wn in names
+        ]
+        findings: List[dict] = [f for group in await asyncio.gather(*tasks)
+                                for f in group]
+        out = await validate_findings(findings, default_target=base,
+                                      oob_store=oob_store)
+        return [f for f in out if f.get("submittable")]
     finally:
         if oob is not None:
             clear_oob()
         clear_discovered_params()
-    out = await validate_findings(findings, default_target=base, oob_store=oob_store)
-    return [f for f in out if f.get("submittable")]
+        if fast:
+            set_unthrottled(False)      # never leak fast mode into later hunts
+

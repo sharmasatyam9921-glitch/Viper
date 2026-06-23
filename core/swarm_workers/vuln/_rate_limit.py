@@ -96,9 +96,24 @@ class HostRateLimiter:
 # Module-level singleton — every worker reaches into this one.
 _DEFAULT = HostRateLimiter()
 
+# When True, throttling is skipped entirely. ONLY for authorized localhost /
+# benchmark targets where politeness/stealth is irrelevant; real hunts stay polite.
+_unthrottled = False
+
+
+def set_unthrottled(value: bool = True) -> None:
+    global _unthrottled
+    _unthrottled = bool(value)
+
+
+def is_unthrottled() -> bool:
+    return _unthrottled
+
 
 async def wait_for_token(url_or_host: str, *, cost: float = 1.0) -> bool:
     """Convenience wrapper around the default limiter."""
+    if _unthrottled:
+        return True
     return await _DEFAULT.acquire(url_or_host, cost=cost)
 
 

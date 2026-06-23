@@ -99,3 +99,59 @@ def test_hunt_finds_xss_on_discovered_param():
             "param-aware probing should find XSS on the discovered 'tplname' param"
     finally:
         srv.shutdown()
+
+
+# --- fast (unthrottled) mode: off by default, never leaks --------------------
+
+def test_unthrottled_flag_skips_token_wait():
+    import asyncio as _a
+    from core.swarm_workers.vuln._rate_limit import (
+        is_unthrottled, set_unthrottled, wait_for_token)
+    assert is_unthrottled() is False                 # polite by default
+    try:
+        set_unthrottled(True)
+        assert is_unthrottled() is True
+        assert _a.run(wait_for_token("example.com")) is True   # immediate
+    finally:
+        set_unthrottled(False)
+    assert is_unthrottled() is False
+
+
+def test_hunt_fast_mode_resets_throttle_even_on_error():
+    from core.swarm_workers.vuln._rate_limit import is_unthrottled
+    # point at a dead port so discover/gate do nothing; fast mode must still reset
+    asyncio.run(hunt("http://127.0.0.1:1", classes={"xss"}, fast=True, max_pages=2))
+    assert is_unthrottled() is False
+
+
+def test_discover_records_redirect_endpoint_without_following():
+    # a 302 endpoint is attack surface (host-header/open-redirect); discover must
+    # record /go itself, not the redirect target.
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            from urllib.parse import urlsplit
+            if urlsplit(self.path).path == "/":
+                body = b'<a href="/go?next=1">go</a>'
+                self.send_response(200)
+            elif urlsplit(self.path).path == "/go":
+                self.send_response(302)
+                self.send_header("Location", "https://evil.example/dashboard")
+                body = b""
+            else:
+                body = b"ok"
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        surf = asyncio.run(discover(base, max_pages=8))
+        assert "/go" in surf["endpoints"]          # recorded, not followed away
+        assert "/dashboard" not in surf["endpoints"]
+    finally:
+        srv.shutdown()

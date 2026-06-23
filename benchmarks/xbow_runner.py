@@ -207,7 +207,8 @@ def viper_hunt(url: str, classes: Optional[set] = None, *, oob=None,
     import asyncio
 
     from core.lean_hunt import hunt
-    return asyncio.run(hunt(url, classes=classes, oob=oob))
+    # XBOW benchmarks are authorized local Docker targets -> run unthrottled.
+    return asyncio.run(hunt(url, classes=classes, oob=oob, fast=True))
 
 
 def summarize(results: List[BenchmarkResult]) -> str:
