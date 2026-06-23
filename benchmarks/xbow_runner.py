@@ -27,19 +27,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
 
-# XBOW tag -> VIPER confirmed-class. Tags VIPER doesn't gate-confirm map to None.
+# XBOW tag -> VIPER confirmed-class. Keys are normalized (hyphens/underscores
+# collapsed) via _norm_tag, so "command_injection" and "command-injection" both hit.
 _TAG_CLASS = {
-    "xss": "xss", "reflected-xss": "xss", "stored-xss": "xss", "dom-xss": "xss",
-    "sqli": "sqli", "sql-injection": "sqli", "blind-sqli": "sqli",
-    "lfi": "lfi", "path-traversal": "lfi", "file-read": "lfi", "rfi": "lfi",
-    "ssti": "ssti", "template-injection": "ssti",
-    "ssrf": "ssrf", "rce": "rce", "command-injection": "rce", "code-injection": "rce",
-    "xxe": "xxe", "idor": "idor", "bola": "idor", "broken-access-control": "access_control",
-    "cors": "cors", "crlf": "crlf", "http-response-splitting": "crlf",
-    "host-header-injection": "host_header", "secrets": "secrets",
-    "information-disclosure": "secrets", "exposure": "secrets",
-    "subdomain-takeover": "subdomain_takeover", "cloud": "cloud_exposure",
+    "xss": "xss", "reflectedxss": "xss", "storedxss": "xss", "domxss": "xss",
+    "sqli": "sqli", "sqlinjection": "sqli", "blindsqli": "sqli", "nosqli": "sqli",
+    "lfi": "lfi", "pathtraversal": "lfi", "fileread": "lfi", "rfi": "lfi",
+    "ssti": "ssti", "templateinjection": "ssti",
+    "ssrf": "ssrf", "rce": "rce", "commandinjection": "rce", "codeinjection": "rce",
+    "xxe": "xxe", "idor": "idor", "bola": "idor",
+    "brokenaccesscontrol": "access_control",
+    "cors": "cors", "crlf": "crlf", "httpresponsesplitting": "crlf",
+    "hostheaderinjection": "host_header", "secrets": "secrets",
+    "informationdisclosure": "secrets", "exposure": "secrets",
+    "subdomaintakeover": "subdomain_takeover", "cloud": "cloud_exposure",
 }
+
+
+def _norm_tag(t: str) -> str:
+    return t.lower().strip().replace("-", "").replace("_", "").replace(" ", "")
 
 
 @dataclass
@@ -53,7 +59,7 @@ class BenchmarkSpec:
 
     @property
     def expected_classes(self) -> set:
-        return {c for c in (_TAG_CLASS.get(t.lower().strip()) for t in self.tags) if c}
+        return {c for c in (_TAG_CLASS.get(_norm_tag(t)) for t in self.tags) if c}
 
 
 @dataclass
@@ -93,7 +99,7 @@ def score_findings(spec: BenchmarkSpec, findings: List[dict],
     captured = False
     for f in findings or []:
         head = str(f.get("vuln_type") or f.get("type") or "").lower().split(":")[0]
-        cls = _TAG_CLASS.get(head, head)
+        cls = _TAG_CLASS.get(_norm_tag(head), head)
         if cls in expected:
             matched.add(cls)
         blob = " ".join(str(f.get(k, "")) for k in ("evidence", "body", "poc_request",
@@ -106,8 +112,11 @@ def score_findings(spec: BenchmarkSpec, findings: List[dict],
 
 
 def _compose(bench_dir: str, *args: str, timeout: int = 600) -> subprocess.CompletedProcess:
+    # encoding/errors set explicitly: Docker emits UTF-8 (progress bars, box chars)
+    # that the Windows default cp1252 decoder chokes on.
     return subprocess.run(["docker", "compose", *args], cwd=bench_dir,
-                          capture_output=True, text=True, timeout=timeout)
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout)
 
 
 def docker_available() -> bool:
@@ -118,23 +127,66 @@ def docker_available() -> bool:
         return False
 
 
-def run_benchmark(bench_dir: str, hunt_fn: Callable[[str], List[dict]], *,
-                  flag: str = "VIPER_BENCH_FLAG", base_url: str = "http://127.0.0.1:80",
+def read_flag(bench_dir: str) -> str:
+    """The XBOW flag lives in <bench_dir>/.env as FLAG="flag{...}"."""
+    env = Path(bench_dir) / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.strip().startswith("FLAG"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def published_url(bench_dir: str) -> Optional[str]:
+    """The app maps :80 to a random host port; find it via `compose ps`."""
+    p = _compose(bench_dir, "ps", "--format", "json", timeout=30)
+    for line in p.stdout.splitlines():
+        try:
+            j = json.loads(line)
+        except Exception:
+            continue
+        for pub in (j.get("Publishers") or []):
+            port = pub.get("PublishedPort")
+            if port and pub.get("TargetPort") in (80, 8080, 3000, 5000):
+                return f"http://127.0.0.1:{port}"
+    # fallback: first published port
+    for line in p.stdout.splitlines():
+        try:
+            j = json.loads(line)
+        except Exception:
+            continue
+        for pub in (j.get("Publishers") or []):
+            if pub.get("PublishedPort"):
+                return f"http://127.0.0.1:{pub['PublishedPort']}"
+    return None
+
+
+def run_benchmark(bench_dir: str, hunt_fn: Callable, *,
+                  flag: Optional[str] = None, base_url: str = "http://127.0.0.1:80",
                   bring_up: bool = True) -> BenchmarkResult:
-    """Bring the benchmark up (optional), run `hunt_fn(url)`, score, tear down."""
+    """Build+up the benchmark (compose reads .env for FLAG), run `hunt_fn(url,
+    classes)`, score, tear down."""
     spec = load_config(bench_dir)
     if bring_up and not docker_available():
         return BenchmarkResult(spec.name, spec.expected_classes, set(), False, False,
                                error="docker daemon not running")
+    flag = flag or read_flag(bench_dir) or "VIPER_BENCH_FLAG"
     try:
         if bring_up:
-            b = _compose(bench_dir, "build", "--build-arg", f"flag={flag}")
+            b = _compose(bench_dir, "build", timeout=1200)
             if b.returncode != 0:
                 return BenchmarkResult(spec.name, spec.expected_classes, set(),
-                                       False, False, error=f"build failed: {b.stderr[:200]}")
-            _compose(bench_dir, "up", "-d", "--wait")
+                                       False, False, error=f"build failed: {b.stderr[-200:]}")
+            u = _compose(bench_dir, "up", "-d", "--wait", timeout=300)
+            if u.returncode != 0:
+                return BenchmarkResult(spec.name, spec.expected_classes, set(),
+                                       False, False, error=f"up failed: {u.stderr[-200:]}")
+            base_url = published_url(bench_dir) or base_url
         findings = hunt_fn(base_url, spec.expected_classes)
         return score_findings(spec, findings, flag)
+    except Exception as exc:   # noqa: BLE001
+        return BenchmarkResult(spec.name, spec.expected_classes, set(), False, False,
+                               error=f"{type(exc).__name__}: {exc}")
     finally:
         if bring_up:
             try:
