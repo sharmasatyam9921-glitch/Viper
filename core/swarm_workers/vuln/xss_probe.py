@@ -7,6 +7,7 @@ marker is constructed so a real XSS would echo it back verbatim.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import secrets
@@ -176,13 +177,20 @@ async def run(agent: SwarmAgent) -> List[dict]:
     else:
         params = params[:5]
 
-    findings: list[dict] = []
-    for p in params:
-        try:
-            findings.extend(await _probe_param(url, p, timeout))
-        except Exception as e:  # noqa: BLE001
-            logger.debug("xss probe %s?%s failed: %s", url, p, e)
-    return findings
+    # Each param's probe is fully self-contained (its own unique marker, its own
+    # request/differential), so they run concurrently (bounded) for speed without
+    # affecting each other's verdict. Order is preserved by asyncio.gather.
+    _sem = asyncio.Semaphore(6)
+
+    async def _one(p: str) -> List[dict]:
+        async with _sem:
+            try:
+                return await _probe_param(url, p, timeout)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("xss probe %s?%s failed: %s", url, p, e)
+                return []
+    groups = await asyncio.gather(*[_one(p) for p in params])
+    return [f for g in groups for f in g]
 
 
 register_worker("vuln", TECHNIQUE, run)

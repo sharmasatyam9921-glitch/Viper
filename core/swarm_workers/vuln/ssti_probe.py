@@ -48,6 +48,7 @@ environment, or process. Non-destructive (GET only) and idempotent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import List, Optional
@@ -212,158 +213,118 @@ def _marker_at_slot(body: str, anchors: List[str], marker: str) -> bool:
     return False
 
 
+async def _probe_param_ssti(url: str, param: str, timeout: float) -> List[dict]:
+    """Probe ONE parameter for SSTI across all syntaxes. Returns the first
+    confirmation (high-confidence operand-tracking, else medium error), or []."""
+    for open_, close in _SYNTAXES:
+        first_expr, first_marker = _ARITH[0]
+        ctrl_payload = _wrap(open_, close, _control_expr(first_expr))
+        ctrl_resp = await fetch("GET", add_query(url, param, ctrl_payload), timeout=timeout)
+        if ctrl_resp is None:
+            continue
+        ctrl_body = _body(ctrl_resp)
+        if first_marker in ctrl_body:
+            continue
+        sent_resp = await fetch("GET", add_query(url, param, _SENTINEL), timeout=timeout)
+        if sent_resp is None:
+            continue
+        anchors = _reflection_anchors(_body(sent_resp), _SENTINEL)
+        if not anchors:
+            continue
+        live_bodies: dict[str, str] = {}
+        for expr, _ in _ARITH:
+            live_payload = _wrap(open_, close, expr)
+            live_resp = await fetch("GET", add_query(url, param, live_payload), timeout=timeout)
+            if live_resp is None:
+                continue
+            live_bodies[expr] = _body(live_resp)
+        confirmed: list[tuple[str, str]] = []
+        evidence_bits: list[str] = []
+        for expr, marker in _ARITH:
+            body = live_bodies.get(expr)
+            if body is None:
+                continue
+            if not _marker_at_slot(body, anchors, marker):
+                continue
+            others_leaked = any(
+                om != marker and _marker_at_slot(body, anchors, om)
+                for _, om in _ARITH
+            )
+            if others_leaked:
+                continue
+            live_payload = _wrap(open_, close, expr)
+            confirmed.append((live_payload, marker))
+            evidence_bits.append(f"{live_payload!r}->{marker!r}")
+        if len(confirmed) >= MIN_PAIRS:
+            lead_payload = confirmed[0][0]
+            return [{
+                "type": "ssti",
+                "vuln_type": "ssti",
+                "title": f"Server-Side Template Injection in '{param}'",
+                "severity": "critical",
+                "url": url,
+                "parameter": param,
+                "payload": lead_payload,
+                "cwe": "CWE-1336",
+                "confidence": 0.9,
+                "evidence": (
+                    f"{len(confirmed)} independent arithmetic expressions "
+                    f"evaluated AT THE REFLECTION SITE, tracking their "
+                    f"operands ("
+                    + ", ".join(evidence_bits)
+                    + f"); each marker appeared only under its own operands "
+                    f"(not the others'), while the control "
+                    f"{ctrl_payload!r} did not yield {first_marker!r}"
+                ),
+            }]
+        lead_payload = _wrap(open_, close, first_expr)
+        err_resp = await fetch("GET", add_query(url, param, lead_payload), timeout=timeout)
+        if err_resp is None:
+            continue
+        err_body = _body(err_resp)
+        err = _ERROR_RE.search(err_body)
+        if err and not _ERROR_RE.search(ctrl_body):
+            return [{
+                "type": "ssti",
+                "vuln_type": "ssti_error",
+                "title": (
+                    f"Template-engine error triggered by injection in "
+                    f"'{param}'"
+                ),
+                "severity": "medium",
+                "url": url,
+                "parameter": param,
+                "payload": lead_payload,
+                "cwe": "CWE-1336",
+                "confidence": 0.5,
+                "evidence": (
+                    f"payload {lead_payload!r} produced template-engine "
+                    f"error signature {err.group(0)!r} not present for "
+                    f"the control {ctrl_payload!r}"
+                ),
+            }]
+    return []
+
+
 async def run(agent: SwarmAgent) -> List[dict]:
     url = normalize_target_url(agent.target)
     if not url:
         return []
     timeout = min(agent.timeout_s, 10.0)
-    findings: list[dict] = []
-    seen_params: set[str] = set()
+    params = list(dict.fromkeys(_params_for(url)))
+    # Each param probes independently (own control/sentinel/operand-tracking), so
+    # params run concurrently (bounded). Order preserved; verdict-identical.
+    _sem = asyncio.Semaphore(6)
 
-    for param in _params_for(url):
-        if param in seen_params:
-            continue
-        for open_, close in _SYNTAXES:
-            if param in seen_params:
-                break
-
-            # --- per-syntax control on the FIRST pair ----------------------
-            # Establish that the leading evaluated marker is NOT already in the
-            # page when we send a structurally-identical, non-evaluating twin
-            # (operator mutated 7*7 -> 7x7). This kills FPs on pages that just
-            # contain "49" regardless of input.
-            first_expr, first_marker = _ARITH[0]
-            ctrl_payload = _wrap(open_, close, _control_expr(first_expr))
-            ctrl_resp = await fetch(
-                "GET", add_query(url, param, ctrl_payload), timeout=timeout
-            )
-            if ctrl_resp is None:
-                continue
-            ctrl_body = _body(ctrl_resp)
-            if first_marker in ctrl_body:
-                # Page already shows the marker without evaluation — untrustable.
-                continue
-
-            # --- locate the reflection site with a benign sentinel ---------
-            # SSTI surfaces in REFLECTED output. Send an arithmetic-free token
-            # and capture the stable left-context that precedes wherever it
-            # round-trips. We then only believe an evaluated marker that lands at
-            # that same site — defeating catalog prices echoed elsewhere on the
-            # page (both the search-wildcard and the slug+wildcard FPs).
-            sent_resp = await fetch(
-                "GET", add_query(url, param, _SENTINEL), timeout=timeout
-            )
-            if sent_resp is None:
-                continue
-            anchors = _reflection_anchors(_body(sent_resp), _SENTINEL)
-            if not anchors:
-                # Input doesn't reflect through this param → no SSTI surface here.
-                continue
-
-            # --- probe every independent operand pair ----------------------
-            # For a genuine engine the evaluated marker (a) appears AT THE
-            # REFLECTION SITE and (b) TRACKS THE OPERANDS: ${7*7}->49 there,
-            # ${13*13}->169 there, and crucially each pair's marker is ABSENT at
-            # that site under a DIFFERENT pair's operands. A fixed catalog
-            # surfaces the same 49/64/81 for every '*'-payload regardless of
-            # operands, so it can never make 169 appear for 13*13 while keeping
-            # 49 out — operand-tracking fails and it is not flagged.
-            live_bodies: dict[str, str] = {}  # expr -> body
-            for expr, _ in _ARITH:
-                live_payload = _wrap(open_, close, expr)
-                live_resp = await fetch(
-                    "GET", add_query(url, param, live_payload), timeout=timeout
-                )
-                if live_resp is None:
-                    continue
-                live_bodies[expr] = _body(live_resp)
-
-            confirmed: list[tuple[str, str]] = []  # (payload, marker)
-            evidence_bits: list[str] = []
-            for expr, marker in _ARITH:
-                body = live_bodies.get(expr)
-                if body is None:
-                    continue
-                # (a) this pair's marker must sit at the reflection site.
-                if not _marker_at_slot(body, anchors, marker):
-                    continue
-                # (b) operand-tracking: NO OTHER pair's marker may sit at the
-                # reflection site under THIS pair's operands. (A fixed catalog
-                # spills every price at once and fails here.)
-                others_leaked = any(
-                    om != marker and _marker_at_slot(body, anchors, om)
-                    for _, om in _ARITH
-                )
-                if others_leaked:
-                    continue
-                live_payload = _wrap(open_, close, expr)
-                confirmed.append((live_payload, marker))
-                evidence_bits.append(f"{live_payload!r}->{marker!r}")
-
-            if len(confirmed) >= MIN_PAIRS:
-                lead_payload = confirmed[0][0]
-                findings.append({
-                    "type": "ssti",
-                    "vuln_type": "ssti",
-                    "title": f"Server-Side Template Injection in '{param}'",
-                    "severity": "critical",
-                    "url": url,
-                    "parameter": param,
-                    "payload": lead_payload,
-                    "cwe": "CWE-1336",
-                    "confidence": 0.9,
-                    "evidence": (
-                        f"{len(confirmed)} independent arithmetic expressions "
-                        f"evaluated AT THE REFLECTION SITE, tracking their "
-                        f"operands ("
-                        + ", ".join(evidence_bits)
-                        + f"); each marker appeared only under its own operands "
-                        f"(not the others'), while the control "
-                        f"{ctrl_payload!r} did not yield {first_marker!r}"
-                    ),
-                })
-                seen_params.add(param)
-                break
-
-            # --- lower-confidence: template-engine error under live payload --
-            # Re-fetch the leading live payload only if we didn't already get a
-            # consumed evaluation. An engine error string present under the
-            # injection but not the control is medium-confidence corroboration.
-            if param not in seen_params:
-                lead_payload = _wrap(open_, close, first_expr)
-                err_resp = await fetch(
-                    "GET", add_query(url, param, lead_payload), timeout=timeout
-                )
-                if err_resp is None:
-                    continue
-                err_body = _body(err_resp)
-                err = _ERROR_RE.search(err_body)
-                # The error string must be a genuine engine error, not merely
-                # the reflected payload, and must be absent from the control.
-                if err and not _ERROR_RE.search(ctrl_body):
-                    findings.append({
-                        "type": "ssti",
-                        "vuln_type": "ssti_error",
-                        "title": (
-                            f"Template-engine error triggered by injection in "
-                            f"'{param}'"
-                        ),
-                        "severity": "medium",
-                        "url": url,
-                        "parameter": param,
-                        "payload": lead_payload,
-                        "cwe": "CWE-1336",
-                        "confidence": 0.5,
-                        "evidence": (
-                            f"payload {lead_payload!r} produced template-engine "
-                            f"error signature {err.group(0)!r} not present for "
-                            f"the control {ctrl_payload!r}"
-                        ),
-                    })
-                    seen_params.add(param)
-                    break
-
-    return findings
+    async def _bounded(p: str) -> List[dict]:
+        async with _sem:
+            try:
+                return await _probe_param_ssti(url, p, timeout)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("ssti probe %s?%s failed: %s", url, p, e)
+                return []
+    groups = await asyncio.gather(*[_bounded(p) for p in params])
+    return [f for g in groups for f in g]
 
 
 register_worker("vuln", TECHNIQUE, run)

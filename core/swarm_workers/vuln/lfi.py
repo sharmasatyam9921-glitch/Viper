@@ -30,6 +30,7 @@ written, deleted, or otherwise mutated.
 from __future__ import annotations
 
 import base64
+import asyncio
 import binascii
 import logging
 import re
@@ -191,7 +192,6 @@ async def run(agent: SwarmAgent) -> List[dict]:
     if not url:
         return []
     timeout = min(agent.timeout_s, 10.0)
-    findings: list[dict] = []
 
     # Cache keyword-control verdicts per (param, kind) so we fetch each at most
     # once even across multiple payloads of the same kind.
@@ -226,50 +226,55 @@ async def run(agent: SwarmAgent) -> List[dict]:
         keyword_driven[cache_key] = verdict
         return verdict
 
-    for param in _candidate_params(url):
-        # Baseline with a benign control value: if the signature already shows
-        # up here, the page echoes it normally — skip to avoid a false positive.
-        control_url = add_query(url, param, _CONTROL)
-        baseline = await fetch("GET", control_url, timeout=timeout)
-        if baseline is not None and _match_signature(baseline.body):
-            continue
+    # Each param probes independently (own baseline + own (param,kind) cache
+    # entries), so params run concurrently (bounded). Order preserved.
+    _sem = asyncio.Semaphore(6)
 
-        for payload in _PAYLOADS:
-            test_url = add_query(url, param, payload)
-            resp = await fetch("GET", test_url, timeout=timeout)
-            if resp is None or not resp.body:
-                continue
-            hit = _match_signature(resp.body)
-            if not hit:
-                continue
-            kind, evidence = hit
-            # Decisive FP guard: if the bare file keyword (no `../`) also leaks
-            # this signature kind, the param is keyword/search-driven (a docs or
-            # full-text-search endpoint echoing a tutorial), NOT a real file
-            # read. Skip the entire param — it cannot be confirmed as LFI.
-            if await _is_keyword_driven(param, kind):
-                break
-            findings.append({
-                "type": "lfi",
-                "vuln_type": f"lfi:{param}",
-                "title": f"Local File Inclusion / Path Traversal via '{param}'",
-                "severity": "high",
-                "url": test_url,
-                "parameter": param,
-                "payload": payload,
-                "cwe": "CWE-22",
-                "confidence": 0.9,
-                "evidence": (
-                    f"{kind} signature leaked in response: {evidence!r} "
-                    f"(absent in control={_CONTROL!r}; token/keyword-only "
-                    f"control(s) {_KEYWORD_CONTROLS.get(kind, ())!r} did not "
-                    f"leak it, so not a search/echo artifact)"
-                ),
-            })
-            # One confirmed leak per parameter is enough.
-            break
+    async def _probe_one(param: str) -> List[dict]:
+        async with _sem:
+            # Baseline with a benign control value: if the signature already shows
+            # up here, the page echoes it normally — skip to avoid a false positive.
+            control_url = add_query(url, param, _CONTROL)
+            baseline = await fetch("GET", control_url, timeout=timeout)
+            if baseline is not None and _match_signature(baseline.body):
+                return []
+            for payload in _PAYLOADS:
+                test_url = add_query(url, param, payload)
+                resp = await fetch("GET", test_url, timeout=timeout)
+                if resp is None or not resp.body:
+                    continue
+                hit = _match_signature(resp.body)
+                if not hit:
+                    continue
+                kind, evidence = hit
+                # Decisive FP guard: if the bare file keyword (no `../`) also leaks
+                # this signature kind, the param is keyword/search-driven (a docs or
+                # full-text-search endpoint echoing a tutorial), NOT a real file
+                # read. Skip the entire param — it cannot be confirmed as LFI.
+                if await _is_keyword_driven(param, kind):
+                    return []
+                return [{
+                    "type": "lfi",
+                    "vuln_type": f"lfi:{param}",
+                    "title": f"Local File Inclusion / Path Traversal via '{param}'",
+                    "severity": "high",
+                    "url": test_url,
+                    "parameter": param,
+                    "payload": payload,
+                    "cwe": "CWE-22",
+                    "confidence": 0.9,
+                    "evidence": (
+                        f"{kind} signature leaked in response: {evidence!r} "
+                        f"(absent in control={_CONTROL!r}; token/keyword-only "
+                        f"control(s) {_KEYWORD_CONTROLS.get(kind, ())!r} did not "
+                        f"leak it, so not a search/echo artifact)"
+                    ),
+                }]
+            return []
 
-    return findings
+    groups = await asyncio.gather(
+        *[_probe_one(p) for p in _candidate_params(url)])
+    return [f for g in groups for f in g]
 
 
 register_worker("vuln", TECHNIQUE, run)

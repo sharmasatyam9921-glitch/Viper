@@ -11,6 +11,7 @@ If no parameters are visible, falls back to common parameter names
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import List
@@ -274,21 +275,30 @@ async def run(agent: SwarmAgent) -> List[dict]:
     timeout = min(agent.timeout_s, 8.0)
 
     params = _candidate_params(url)[:5]
-    findings: list[dict] = []
-    for p in params:
-        try:
-            findings.extend(await _probe_param(url, p, timeout))
-        except Exception as e:  # noqa: BLE001
-            logger.debug("sqli probe %s?%s failed: %s", url, p, e)
-        # Blind/OAST SQLi: fire DNS-exfil canaries (MSSQL xp_dirtree + Oracle
-        # UTL_INADDR) at this param (no-op without an OOB server). A DNS/HTTP
-        # callback from the database is irrefutable where boolean/timing is not.
-        for key in ("sqli_mssql", "sqli_oracle"):
-            findings.extend(await fire_oob(
-                url, p, vuln_type=f"sqli:blind:{key.split('_')[1]}:{p}",
-                title=f"Blind/OAST SQL injection candidate via ?{p}= ({key.split('_')[1]})",
-                cwe="CWE-89", payload_key=key, severity="critical", timeout=timeout))
-    return findings
+    # Per-param work is independent (own baseline differential; OOB canaries are
+    # unique tokens), so params probe concurrently (bounded). Order preserved.
+    _sem = asyncio.Semaphore(6)
+
+    async def _one(p: str) -> List[dict]:
+        out: list[dict] = []
+        async with _sem:
+            try:
+                out.extend(await _probe_param(url, p, timeout))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("sqli probe %s?%s failed: %s", url, p, e)
+            # Blind/OAST SQLi: fire DNS-exfil canaries (MSSQL xp_dirtree + Oracle
+            # UTL_INADDR) at this param (no-op without an OOB server). A DNS/HTTP
+            # callback from the database is irrefutable where boolean/timing is not.
+            for key in ("sqli_mssql", "sqli_oracle"):
+                out.extend(await fire_oob(
+                    url, p, vuln_type=f"sqli:blind:{key.split('_')[1]}:{p}",
+                    title=f"Blind/OAST SQL injection candidate via ?{p}= "
+                          f"({key.split('_')[1]})",
+                    cwe="CWE-89", payload_key=key, severity="critical",
+                    timeout=timeout))
+        return out
+    groups = await asyncio.gather(*[_one(p) for p in params])
+    return [f for g in groups for f in g]
 
 
 register_worker("vuln", TECHNIQUE, run)
