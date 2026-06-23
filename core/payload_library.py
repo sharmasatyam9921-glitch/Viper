@@ -30,6 +30,32 @@ _priors_cache: Dict | None = None
 _lock = threading.Lock()
 
 
+_discovered_params: set = set()
+_DISCOVERED_CAP = 60
+
+
+def add_discovered_params(params) -> None:
+    """Register parameter names the crawler discovered THIS hunt (URL query keys,
+    form inputs). Injection workers append these to their candidate set so they
+    probe the app's REAL parameter names instead of only a static default list —
+    the recall fix for endpoints whose vuln param isn't a common guess.
+
+    Empty by default, so when no crawler has run the workers behave exactly as
+    before (no behavior change for the precision benchmark)."""
+    for p in params or []:
+        s = str(p).strip()
+        if s and len(s) <= 64 and len(_discovered_params) < _DISCOVERED_CAP:
+            _discovered_params.add(s)
+
+
+def get_discovered_params() -> List[str]:
+    return list(_discovered_params)
+
+
+def clear_discovered_params() -> None:
+    _discovered_params.clear()
+
+
 def get_param_hints() -> List[str]:
     """Real-world parameter names mined from 7,982 disclosed HackerOne reports
     (host, url, redirect, id, state, relaystate, …). Injection workers merge

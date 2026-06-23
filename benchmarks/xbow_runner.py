@@ -195,77 +195,19 @@ def run_benchmark(bench_dir: str, hunt_fn: Callable, *,
                 pass
 
 
-# Workers run against each discovered URL. (The full HackMode recon pipeline is
-# too heavy to run per-benchmark across 104 challenges; this lean crawl->workers->
-# gate path is the same find+confirm core, fast enough to sweep the whole suite.)
-_HUNT_WORKERS = ["xss_probe", "sqli_probe", "lfi", "ssti_probe", "command_injection",
-                 "ssrf", "open_redirect", "secrets", "cors", "crlf", "host_header",
-                 "cloud_exposure", "idor", "xxe"]
+def viper_hunt(url: str, classes: Optional[set] = None, *, oob=None,
+               **_kw) -> List[dict]:
+    """Discovery-strong find+confirm hunt -> gate-confirmed (submittable) findings.
 
-
-async def _crawl(base: str, *, max_pages: int = 25, timeout: float = 6.0) -> List[str]:
-    """Same-host BFS over href/action links to discover the attack surface."""
-    import re
-    from urllib.parse import urljoin, urlsplit
-
-    from core.swarm_workers.vuln._http import fetch
-    host = urlsplit(base).netloc
-    seen: set = set()
-    queue = [base]
-    while queue and len(seen) < max_pages:
-        u = queue.pop(0)
-        if u in seen:
-            continue
-        seen.add(u)
-        r = await fetch("GET", u, timeout=timeout)
-        if not r:
-            continue
-        for m in re.finditer(r'''(?:href|action)\s*=\s*["']([^"'>\s]+)''', r.body or ""):
-            link = urljoin(u, m.group(1))
-            if (urlsplit(link).netloc == host and link not in seen
-                    and len(seen) + len(queue) < max_pages * 3):
-                queue.append(link)
-    return sorted(seen)
-
-
-# class -> worker, so a benchmark can scope the sweep to its declared tags.
-_CLASS_WORKER = {
-    "xss": "xss_probe", "sqli": "sqli_probe", "lfi": "lfi", "ssti": "ssti_probe",
-    "rce": "command_injection", "ssrf": "ssrf", "open_redirect": "open_redirect",
-    "secrets": "secrets", "cors": "cors", "crlf": "crlf", "host_header": "host_header",
-    "cloud_exposure": "cloud_exposure", "idor": "idor", "xxe": "xxe",
-    "access_control": "broken_access_control",
-    "subdomain_takeover": "subdomain_takeover",
-}
-
-
-async def _viper_hunt_async(base: str, classes: Optional[set] = None) -> List[dict]:
-    from benchmarks.harness import _Agent, _load_workers
-    from core.swarm_validation import validate_findings
-    workers = _load_workers()
-    # Scope to the benchmark's declared classes when known (fast); else sweep all.
-    names = ([_CLASS_WORKER[c] for c in classes if c in _CLASS_WORKER]
-             if classes else _HUNT_WORKERS)
-    urls = await _crawl(base)
-    findings: List[dict] = []
-    for url in urls:
-        for wn in names:
-            run = workers.get(wn)
-            if run is None:
-                continue
-            try:
-                findings += await run(_Agent(url))
-            except Exception:
-                pass
-    out = await validate_findings(findings, default_target=base)
-    return [f for f in out if f.get("submittable")]
-
-
-def viper_hunt(url: str, classes: Optional[set] = None, **_kw) -> List[dict]:
-    """Lean find+confirm hunt (crawl -> vuln workers -> gate) -> submittable findings.
-    `classes` (a benchmark's expected classes) scopes the worker sweep for speed."""
+    Delegates to core.lean_hunt (crawl + form/param mining -> param-aware workers
+    -> gate), so the XBOW runner gets the recall fix: it probes the app's REAL
+    parameter names, not just static defaults. `classes` scopes workers to the
+    benchmark's declared tags for speed; `oob` wires an OOBServer for blind
+    classes."""
     import asyncio
-    return asyncio.run(_viper_hunt_async(url, classes))
+
+    from core.lean_hunt import hunt
+    return asyncio.run(hunt(url, classes=classes, oob=oob))
 
 
 def summarize(results: List[BenchmarkResult]) -> str:

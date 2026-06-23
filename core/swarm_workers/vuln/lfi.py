@@ -175,10 +175,15 @@ def _match_signature(body: str) -> Optional[tuple[str, str]]:
 
 
 def _candidate_params(url: str) -> List[str]:
-    """File-ish params already present on the URL, else the full default set."""
+    """File-ish params already present on the URL, else the full default set, plus
+    any crawler-discovered params (empty by default -> unchanged behavior)."""
     existing = {k.lower() for k, _ in parse_qsl(urlsplit(url).query)}
     present = [p for p in _FILE_PARAMS if p in existing]
-    return present or list(_FILE_PARAMS)
+    base = present or list(_FILE_PARAMS)
+    from core.payload_library import get_discovered_params
+    disc = [p for p in get_discovered_params() if p.lower() not in
+            {b.lower() for b in base}]
+    return base + disc if disc else base
 
 
 async def run(agent: SwarmAgent) -> List[dict]:

@@ -132,9 +132,15 @@ _ERROR_RE = re.compile("|".join(re.escape(s) for s in _ERROR_SIGNATURES))
 
 
 def _params_for(url: str) -> List[str]:
-    """Existing query keys if any, else the default fuzz set."""
+    """Existing query keys if any, else the default fuzz set, plus any params the
+    crawler discovered this hunt (empty by default -> unchanged behavior)."""
     existing = [k for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)]
-    return existing or _DEFAULT_PARAMS
+    base = existing or list(_DEFAULT_PARAMS)
+    from core.payload_library import get_discovered_params
+    disc = get_discovered_params()
+    if disc:
+        return list(dict.fromkeys(base + list(_DEFAULT_PARAMS) + disc))
+    return base
 
 
 def _body(resp: Optional[HttpResp]) -> str:

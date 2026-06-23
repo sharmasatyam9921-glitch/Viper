@@ -167,7 +167,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
     timeout = min(agent.timeout_s, 8.0)
     qs = parse_qs(urlsplit(url).query)
     params = list(qs.keys()) if qs else list(_DEFAULT_PARAMS)
-    params = params[:5]
+    # Append crawler-discovered param names (empty unless a hunt populated them),
+    # so a URL like /reflect?x=1 still probes the app's real 'q'/'search'/etc.
+    from core.payload_library import get_discovered_params
+    disc = get_discovered_params()
+    if disc:
+        params = list(dict.fromkeys(params + list(_DEFAULT_PARAMS) + disc))[:16]
+    else:
+        params = params[:5]
 
     findings: list[dict] = []
     for p in params:
