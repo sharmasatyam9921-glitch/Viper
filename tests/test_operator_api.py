@@ -44,6 +44,23 @@ def test_verify_requires_findings_and_runs_gate():
     assert r["ok"] and r["total"] == 1 and r["submittable"] == 0  # unreachable -> lead
 
 
+def test_modes_and_compliance():
+    m = op.get_modes()
+    ids = {x["id"] for x in m["modes"]}
+    assert ids == {"bugbounty", "pentest", "ctf"}
+    assert m["platforms"]["hackerone"]["auto_pull"] is True
+    assert m["platforms"]["bugcrowd"]["auto_pull"] is False
+    fw = {f["id"] for f in op.get_compliance()["frameworks"]}
+    assert {"owasp", "pci_dss", "nist", "hipaa", "soc2"} <= fw
+    # the pentest mode runs the full kill-chain
+    assert next(x for x in m["modes"] if x["id"] == "pentest")["go"] is True
+
+
+def test_scope_pull_non_hackerone_platform_is_graceful():
+    r = op.scope_pull({"handle": "demo", "platform": "bugcrowd"})
+    assert r["ok"] is False and "isn't wired yet" in r["error"]
+
+
 def test_scope_pull_without_creds_is_graceful(monkeypatch):
     monkeypatch.delenv("HACKERONE_API_USERNAME", raising=False)
     monkeypatch.delenv("HACKERONE_API_TOKEN", raising=False)

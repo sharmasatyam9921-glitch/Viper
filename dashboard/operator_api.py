@@ -39,10 +39,51 @@ def get_scope() -> dict:
         return _err(e)
 
 
+# Bug-bounty platforms. Only HackerOne has automated API scope-pull today; the
+# others fall back to the offline importer (honest — not faked).
+_PLATFORMS = {
+    "hackerone": {"label": "HackerOne", "auto_pull": True},
+    "bugcrowd": {"label": "Bugcrowd", "auto_pull": False},
+    "intigriti": {"label": "Intigriti", "auto_pull": False},
+    "yeswehack": {"label": "YesWeHack", "auto_pull": False},
+    "other": {"label": "Other / manual", "auto_pull": False},
+}
+_COMPLIANCE = {
+    "owasp": "OWASP Top 10 (2021)", "pci_dss": "PCI DSS v4.0",
+    "nist": "NIST SP 800-53", "hipaa": "HIPAA Security Rule",
+    "soc2": "SOC 2 Trust Services Criteria",
+}
+# Operating modes: a mode picks a hunt profile + the UI surface it needs.
+_MODES = [
+    {"id": "bugbounty", "label": "Bug Bounty", "profile": "bugbounty", "go": False,
+     "desc": "Scope-locked hunt on a public program: auto-pull scope, FP-averse "
+             "gate, submission drafts + dedup ledger."},
+    {"id": "pentest", "label": "Pentest (enterprise)", "profile": "bugbounty",
+     "go": True, "desc": "Authorized engagement: RoE + authorization, multi-target, "
+             "compliance mapping, executive report, evidence chain-of-custody."},
+    {"id": "ctf", "label": "CTF", "profile": "ctf", "go": True,
+     "desc": "Flag-capture: aggressive, fast, exploitation-focused (less FP-averse)."},
+]
+
+
+def get_modes() -> dict:
+    return {"modes": _MODES, "platforms": _PLATFORMS,
+            "compliance": [{"id": k, "label": v} for k, v in _COMPLIANCE.items()]}
+
+
+def get_compliance() -> dict:
+    return {"frameworks": [{"id": k, "label": v} for k, v in _COMPLIANCE.items()]}
+
+
 def scope_pull(data: dict) -> dict:
     handle = (data or {}).get("handle", "").strip()
+    platform = (data or {}).get("platform", "hackerone").strip().lower() or "hackerone"
     if not handle:
         return {"ok": False, "error": "handle required"}
+    if platform not in ("hackerone", "h1"):
+        return {"ok": False, "error": f"automated scope-pull for "
+                f"'{platform}' isn't wired yet — export the program scope and use "
+                "Import (HackerOne auto-pull works today)"}
     try:
         from scope.hackerone_scope import (fetch_structured_scopes_api,
                                            get_api_creds, save_current_scope,

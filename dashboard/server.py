@@ -4215,6 +4215,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/op/"):
             from dashboard import operator_api as _op
             _ops_get = {
+                "/api/op/modes": _op.get_modes,
+                "/api/op/compliance": _op.get_compliance,
                 "/api/op/scope": _op.get_scope,
                 "/api/op/scorecard": _op.get_scorecard,
                 "/api/op/classes": _op.get_classes,
