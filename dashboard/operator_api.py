@@ -1,0 +1,210 @@
+"""Dashboard operator API — backs the bug-bounty control panel endpoints.
+
+Each function returns a JSON-serializable dict (never raises to the handler; it
+catches and returns an ``error`` field) so the dashboard can drive VIPER's operator
+surface: scope pull/import/show, the precision scorecard, class coverage, the
+coverage critic, the attack-path graph, submission drafts, and the dedup ledger.
+
+These are READ/setup operations (and the scope pull uses the operator's OWN H1
+token to read their program scope). Launching a hunt stays the existing
+/api/hack/start path — the human's trigger.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import List, Optional
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _err(e) -> dict:
+    return {"error": f"{type(e).__name__}: {e}"}
+
+
+# ── scope ────────────────────────────────────────────────────────────────
+
+def get_scope() -> dict:
+    p = _ROOT / "scopes" / "current_scope.json"
+    if not p.exists():
+        return {"loaded": False, "in_scope": [], "out_of_scope": [],
+                "hint": "POST /api/scope/pull {handle} or /api/scope/import {path}"}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return {"loaded": True, "program_name": d.get("program_name"),
+                "program_url": d.get("program_url"),
+                "in_scope": d.get("in_scope", []),
+                "out_of_scope": d.get("out_of_scope", [])}
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+def scope_pull(data: dict) -> dict:
+    handle = (data or {}).get("handle", "").strip()
+    if not handle:
+        return {"ok": False, "error": "handle required"}
+    try:
+        from scope.hackerone_scope import (fetch_structured_scopes_api,
+                                           get_api_creds, save_current_scope,
+                                           to_scope)
+        user, token = get_api_creds()
+        if not (user and token):
+            return {"ok": False, "error": "no HackerOne API creds "
+                    "(set HACKERONE_API_USERNAME + HACKERONE_API_TOKEN)"}
+        raw = fetch_structured_scopes_api(handle, username=user, token=token)
+        scope = to_scope(raw, program_name=handle, handle=handle)
+        save_current_scope(scope, str(_ROOT / "scopes" / "current_scope.json"))
+        return {"ok": True, "handle": handle, "in_scope": len(scope.in_scope),
+                "out_of_scope": len(scope.out_of_scope)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, **_err(e)}
+
+
+def scope_import(data: dict) -> dict:
+    path = (data or {}).get("path", "").strip()
+    burp = (data or {}).get("burp", "").strip()
+    if not path:
+        return {"ok": False, "error": "path required (exported scope csv)"}
+    try:
+        from scope.hackerone_scope import (parse_burp_excludes, parse_csv_scopes,
+                                           save_current_scope, to_scope)
+        excl = parse_burp_excludes(burp) if burp else ()
+        if path.lower().endswith(".csv"):
+            raw = parse_csv_scopes(path)
+            scope = to_scope(raw, program_name="imported", extra_excludes=excl)
+        else:
+            scope = to_scope([], program_name="imported",
+                             extra_excludes=parse_burp_excludes(path))
+        save_current_scope(scope, str(_ROOT / "scopes" / "current_scope.json"))
+        return {"ok": True, "in_scope": len(scope.in_scope),
+                "out_of_scope": len(scope.out_of_scope)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, **_err(e)}
+
+
+# ── precision scorecard + class coverage ──────────────────────────────────
+
+def get_scorecard() -> dict:
+    try:
+        from core.gate_benchmark import overall, run_benchmark
+        scores = run_benchmark()                       # dict: class -> ClassScore
+        ov = overall(scores)
+        return {"classes": [{"cls": s.cls, "precision": round(s.precision, 3),
+                             "recall": round(s.recall, 3), "tp": s.tp, "fp": s.fp,
+                             "tn": s.tn, "fn": s.fn} for s in scores.values()],
+                "overall": {"precision": round(ov.precision, 3),
+                            "recall": round(ov.recall, 3), "tp": ov.tp,
+                            "fp": ov.fp, "tn": ov.tn, "fn": ov.fn}}
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+def get_classes() -> dict:
+    try:
+        from core.ops_cli import (_GATE_CONFIRMED, _OOB_CAPABLE,
+                                   _load_vuln_techniques)
+        techs = _load_vuln_techniques()
+        rows = []
+        for t in techs:
+            rows.append({
+                "technique": t,
+                "gate_confirmed": any(t.startswith(c) or c == t for c in _GATE_CONFIRMED),
+                "oob_capable": t in _OOB_CAPABLE})
+        return {"count": len(rows), "classes": rows}
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+# ── findings-derived views (coverage critic, attack-path graph) ───────────
+
+def _load_latest_findings() -> List[dict]:
+    """Newest findings/*.json that actually holds a list of finding dicts."""
+    fdir = _ROOT / "findings"
+    if not fdir.exists():
+        return []
+    for p in sorted(fdir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        items = d.get("findings") if isinstance(d, dict) else d
+        if isinstance(items, list):
+            dicts = [f for f in items if isinstance(f, dict)]
+            if dicts:
+                return dicts
+    return []
+
+
+def get_coverage(findings: Optional[List[dict]] = None) -> dict:
+    try:
+        from core.coverage_critic import critique
+        fs = findings if findings is not None else _load_latest_findings()
+        gaps = critique(fs)
+        return {"finding_count": len(fs),
+                "gaps": [{"kind": g.kind, "detail": g.detail,
+                          "suggestion": g.suggestion} for g in gaps]}
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+def get_attack_paths(findings: Optional[List[dict]] = None) -> dict:
+    try:
+        from core.attack_path import find_paths
+        fs = findings if findings is not None else _load_latest_findings()
+        paths = find_paths(fs)
+        return {"finding_count": len(fs), "paths": [{
+            "goal": p.goal, "severity": p.severity,
+            "fully_confirmed": p.fully_confirmed,
+            "confirmed_hops": p.confirmed_hops, "potential_hops": p.potential_hops,
+            "narrative": p.narrative} for p in paths]}
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+# ── submissions + dedup ledger ────────────────────────────────────────────
+
+def get_submissions() -> dict:
+    out = []
+    for base in (_ROOT / "reports", _ROOT / "findings"):
+        if not base.exists():
+            continue
+        for p in base.rglob("*submission*.md"):
+            out.append({"file": str(p.relative_to(_ROOT)),
+                        "size": p.stat().st_size, "mtime": p.stat().st_mtime})
+        for idx in base.rglob("INDEX.md"):
+            out.append({"file": str(idx.relative_to(_ROOT)), "index": True,
+                        "mtime": idx.stat().st_mtime})
+    out.sort(key=lambda r: r.get("mtime", 0), reverse=True)
+    return {"count": len(out), "submissions": out[:100]}
+
+
+def verify_findings(data: dict) -> dict:
+    """Re-confirm POSTed candidate findings through the validation gate."""
+    import asyncio
+    findings = (data or {}).get("findings") or []
+    if not findings:
+        return {"ok": False, "error": "findings list required"}
+    try:
+        from core.swarm_validation import validate_findings
+        out = asyncio.run(validate_findings(
+            findings, default_target=(data or {}).get("target", "")))
+        sub = [f for f in out if f.get("submittable")]
+        return {"ok": True, "total": len(out), "submittable": len(sub),
+                "results": [{"vuln_type": f.get("vuln_type"),
+                             "submittable": bool(f.get("submittable")),
+                             "confidence": f.get("validation_confidence"),
+                             "reason": f.get("validation_reason")} for f in out]}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, **_err(e)}
+
+
+def get_ledger() -> dict:
+    try:
+        from core.submission_ledger import SubmissionLedger
+        led = SubmissionLedger()
+        sigs = getattr(led, "_seen", {}) or {}
+        return {"count": len(sigs),
+                "entries": [{"signature": k, "info": v} for k, v in
+                            list(sigs.items())[:200]]}
+    except Exception as e:  # noqa: BLE001
+        return _err(e)

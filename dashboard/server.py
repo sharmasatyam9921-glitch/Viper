@@ -3314,6 +3314,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response(result, status=status)
             return
 
+        # ── Bug-bounty operator panel POSTs (scope pull/import, gate verify) ──
+        if path.startswith("/api/op/"):
+            from dashboard import operator_api as _op
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._json_response({"error": "invalid JSON"}, status=400)
+                return
+            _ops_post = {
+                "/api/op/scope/pull": _op.scope_pull,
+                "/api/op/scope/import": _op.scope_import,
+                "/api/op/verify": _op.verify_findings,
+            }
+            fn = _ops_post.get(path)
+            if fn is not None:
+                result = fn(data)
+                self._json_response(result, status=200 if result.get("ok") else 400)
+                return
+
         # ── POST /api/hack/report ─ render an HTML report for a hunt ──
         if path == "/api/hack/report":
             try:
@@ -4192,6 +4211,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": True, "ts": time.time()})
             return
 
+        # ── Bug-bounty operator panel (scope / scorecard / coverage / paths) ──
+        if path.startswith("/api/op/"):
+            from dashboard import operator_api as _op
+            _ops_get = {
+                "/api/op/scope": _op.get_scope,
+                "/api/op/scorecard": _op.get_scorecard,
+                "/api/op/classes": _op.get_classes,
+                "/api/op/coverage": _op.get_coverage,
+                "/api/op/paths": _op.get_attack_paths,
+                "/api/op/submissions": _op.get_submissions,
+                "/api/op/ledger": _op.get_ledger,
+            }
+            fn = _ops_get.get(path)
+            if fn is not None:
+                self._json_response(fn())
+                return
+
         # ── Overview ──
         if path == "/api/overview":
             self._json_response(get_overview())
@@ -4822,6 +4858,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/settings":
             self._serve_file(DASHBOARD_DIR / "settings_ui.html", "text/html")
+
+        elif path in ("/operator", "/bounty"):
+            self._serve_file(DASHBOARD_DIR / "operator.html", "text/html")
 
         # ── Root / static files ──
         # :8080 is now a headless API. The single UI lives on the Next.js app

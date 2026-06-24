@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIPER — Bug Bounty Operator</title>
+<style>
+  :root{--bg:#0b0f14;--panel:#121821;--bd:#1e2733;--fg:#d7e0ea;--mut:#7d8a9a;
+        --accent:#3fb6a8;--good:#36c98b;--bad:#e2556e;--warn:#e0a93b;}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}
+  header{padding:14px 20px;border-bottom:1px solid var(--bd);display:flex;
+    align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;letter-spacing:.5px}
+  header .tag{color:var(--accent)} header .sub{color:var(--mut);font-size:12px}
+  .wrap{padding:18px;display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(380px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:14px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--accent);text-transform:uppercase;
+    letter-spacing:1px} .full{grid-column:1/-1}
+  input,select,button{font:inherit;background:#0e141c;color:var(--fg);
+    border:1px solid var(--bd);border-radius:6px;padding:7px 9px}
+  button{cursor:pointer;background:#16202c} button:hover{border-color:var(--accent)}
+  button.go{background:var(--accent);color:#04110f;font-weight:700;border-color:var(--accent)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+  pre{background:#0a0e13;border:1px solid var(--bd);border-radius:6px;padding:10px;
+    margin:8px 0 0;overflow:auto;max-height:280px;font-size:12px;white-space:pre-wrap;word-break:break-word}
+  .ok{color:var(--good)} .err{color:var(--bad)} .mut{color:var(--mut)} .warn{color:var(--warn)}
+  table{width:100%;border-collapse:collapse;font-size:12px} td,th{padding:4px 6px;
+    border-bottom:1px solid var(--bd);text-align:left} th{color:var(--mut)}
+  .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;border:1px solid var(--bd)}
+  .pill.g{color:var(--good);border-color:#1c5} .pill.o{color:var(--warn);border-color:#a83}
+  .note{font-size:11px;color:var(--mut);margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>VIPER <span class="tag">// Bug Bounty Operator</span></h1>
+  <span class="sub" id="health">connecting…</span>
+</header>
+
+<div class="wrap">
+
+  <!-- SCOPE -->
+  <div class="card">
+    <h2>1 · Scope</h2>
+    <div class="row">
+      <input id="handle" placeholder="hackerone program handle (e.g. eternal)" style="flex:1">
+      <button onclick="scopePull()">Pull from H1</button>
+    </div>
+    <div class="row">
+      <input id="csv" placeholder="path to exported scope .csv (offline)" style="flex:1">
+      <button onclick="scopeImport()">Import</button>
+      <button onclick="get('/api/op/scope','scopeOut',renderScope)">Show</button>
+    </div>
+    <div class="note">Pull reads YOUR program scope via your own H1 API token. Writes a
+      scope-locked scopes/current_scope.json that guardrails enforce.</div>
+    <div id="scopeOut"></div>
+  </div>
+
+  <!-- LAUNCH -->
+  <div class="card">
+    <h2>2 · Launch hunt (you trigger)</h2>
+    <div class="row">
+      <input id="target" placeholder="https://in-scope-host" style="flex:1">
+    </div>
+    <div class="row">
+      <select id="profile">
+        <option value="bugbounty">bugbounty</option>
+        <option value="lab">lab</option>
+        <option value="ctf">ctf</option>
+      </select>
+      <input id="scopefile" value="scopes/current_scope.json" style="flex:1">
+      <button class="go" onclick="launch()">▶ Run</button>
+    </div>
+    <div class="note warn">Only launch against assets you're authorized to test, with the
+      program's automated-scanning policy confirmed. The hunt is scope-locked + rate-limited.</div>
+    <div id="launchOut"></div>
+  </div>
+
+  <!-- VERIFY -->
+  <div class="card">
+    <h2>3 · Verify candidates (gate)</h2>
+    <textarea id="vfind" rows="4" style="width:100%;background:#0e141c;color:var(--fg);
+      border:1px solid var(--bd);border-radius:6px;padding:8px"
+      placeholder='[{"vuln_type":"xss","url":"https://host/p?q=1","parameter":"q"}]'></textarea>
+    <div class="row" style="margin-top:8px"><button onclick="verify()">Re-confirm via gate</button></div>
+    <div id="verifyOut"></div>
+  </div>
+
+  <!-- read panels -->
+  <div class="card"><h2>Precision scorecard</h2>
+    <button onclick="get('/api/op/scorecard','scOut',renderScore)">Refresh</button><div id="scOut"></div></div>
+  <div class="card"><h2>Vuln classes</h2>
+    <button onclick="get('/api/op/classes','clOut',renderClasses)">Refresh</button><div id="clOut"></div></div>
+  <div class="card"><h2>Coverage gaps</h2>
+    <button onclick="get('/api/op/coverage','cvOut',renderCoverage)">Refresh</button><div id="cvOut"></div></div>
+  <div class="card"><h2>Attack paths (grounded)</h2>
+    <button onclick="get('/api/op/paths','paOut',renderPaths)">Refresh</button><div id="paOut"></div></div>
+  <div class="card"><h2>Submission drafts</h2>
+    <button onclick="get('/api/op/submissions','sbOut',renderSubs)">Refresh</button><div id="sbOut"></div></div>
+  <div class="card"><h2>Dedup ledger</h2>
+    <button onclick="get('/api/op/ledger','ldOut',renderLedger)">Refresh</button><div id="ldOut"></div></div>
+
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const TOKEN=new URLSearchParams(location.search).get("token")||"";
+function hdrs(){const h={"Content-Type":"application/json"};if(TOKEN)h["Authorization"]="Bearer "+TOKEN;return h;}
+async function get(path,outId,render){
+  const el=$(outId); el.innerHTML='<span class="mut">…</span>';
+  try{const r=await fetch(path,{headers:hdrs()});const j=await r.json();
+      render? render(el,j): el.innerHTML='<pre>'+JSON.stringify(j,null,2)+'</pre>';}
+  catch(e){el.innerHTML='<span class="err">'+e+'</span>';}
+}
+async function post(path,body){
+  const r=await fetch(path,{method:"POST",headers:hdrs(),body:JSON.stringify(body)});
+  return {status:r.status,json:await r.json()};
+}
+function flash(id,j,okmsg){const ok=!j.error&&j.ok!==false;
+  $(id).innerHTML='<pre class="'+(ok?'ok':'err')+'">'+(ok?(okmsg||JSON.stringify(j)):JSON.stringify(j))+'</pre>';}
+
+// --- actions
+async function scopePull(){const h=$('handle').value.trim();if(!h)return;
+  $('scopeOut').innerHTML='<span class="mut">pulling '+h+'…</span>';
+  const {json}=await post('/api/op/scope/pull',{handle:h});
+  flash('scopeOut',json,'pulled '+h+': '+json.in_scope+' in-scope, '+json.out_of_scope+' out-of-scope');
+  if(json.ok)get('/api/op/scope','scopeOut',renderScope);}
+async function scopeImport(){const p=$('csv').value.trim();if(!p)return;
+  const {json}=await post('/api/op/scope/import',{path:p});
+  flash('scopeOut',json,'imported: '+json.in_scope+' in-scope');
+  if(json.ok)get('/api/op/scope','scopeOut',renderScope);}
+async function launch(){const t=$('target').value.trim();if(!t)return;
+  if(!confirm("Launch VIPER against "+t+" ?\nYou confirm you're authorized to test this asset."))return;
+  $('launchOut').innerHTML='<span class="mut">starting…</span>';
+  const {json}=await post('/api/hack/start',{target:t,profile:$('profile').value,scope:$('scopefile').value});
+  flash('launchOut',json,'hunt started: '+(json.hunt_id||JSON.stringify(json)));}
+async function verify(){let f;try{f=JSON.parse($('vfind').value)}catch(e){return flash('verifyOut',{error:'invalid JSON'})}
+  const {json}=await post('/api/op/verify',{findings:f});
+  if(json.error)return flash('verifyOut',json);
+  let h='<pre>'+json.submittable+'/'+json.total+' submittable\n';
+  (json.results||[]).forEach(r=>h+=(r.submittable?'✓ ':'· ')+r.vuln_type+'  '+(r.confidence||'')+'  '+(r.reason||'')+'\n');
+  $('verifyOut').innerHTML=h+'</pre>';}
+
+// --- renderers
+function renderScope(el,j){if(!j.loaded)return el.innerHTML='<div class="note">'+(j.hint||'no scope loaded')+'</div>';
+  el.innerHTML='<div class="mut">'+(j.program_name||'')+'</div><table><tr><th>in-scope</th></tr>'+
+    j.in_scope.map(e=>'<tr><td>'+e.target+' <span class="mut">['+e.asset_type+']</span></td></tr>').join('')+
+    '</table><div class="note">out-of-scope ('+j.out_of_scope.length+'): '+
+    j.out_of_scope.slice(0,8).map(e=>e.target).join(', ')+'</div>';}
+function renderScore(el,j){if(j.error)return el.innerHTML='<span class="err">'+j.error+'</span>';
+  const o=j.overall;el.innerHTML='<div class="'+(o.fp==0?'ok':'err')+'">OVERALL precision '+o.precision+
+    '  recall '+o.recall+'  ('+o.tp+' TP / '+o.fp+' FP / '+o.tn+' TN)</div>'+
+    '<table><tr><th>class</th><th>prec</th><th>fp</th></tr>'+
+    j.classes.map(c=>'<tr><td>'+c.cls+'</td><td>'+c.precision+'</td><td class="'+(c.fp?'err':'')+'">'+c.fp+'</td></tr>').join('')+'</table>';}
+function renderClasses(el,j){if(j.error)return el.innerHTML='<span class="err">'+j.error+'</span>';
+  el.innerHTML='<div class="mut">'+j.count+' techniques</div><table>'+j.classes.map(c=>
+    '<tr><td>'+c.technique+'</td><td>'+(c.gate_confirmed?'<span class="pill g">gate</span>':'')+
+    (c.oob_capable?' <span class="pill o">oob</span>':'')+'</td></tr>').join('')+'</table>';}
+function renderCoverage(el,j){if(j.error)return el.innerHTML='<span class="err">'+j.error+'</span>';
+  el.innerHTML='<div class="mut">'+j.finding_count+' findings · '+j.gaps.length+' gaps</div><pre>'+
+    j.gaps.map(g=>'['+g.kind+'] '+g.detail).join('\n')+'</pre>';}
+function renderPaths(el,j){if(j.error)return el.innerHTML='<span class="err">'+j.error+'</span>';
+  if(!j.paths.length)return el.innerHTML='<div class="note">no grounded paths ('+j.finding_count+' findings, none submittable)</div>';
+  el.innerHTML='<pre>'+j.paths.map(p=>'['+p.severity+'] '+p.goal+(p.fully_confirmed?' (CONFIRMED)':' (potential)')+
+    '\n  '+p.narrative).join('\n\n')+'</pre>';}
+function renderSubs(el,j){if(j.error)return el.innerHTML='<span class="err">'+j.error+'</span>';
+  el.innerHTML='<div class="mut">'+j.count+' files</div><pre>'+j.submissions.slice(0,30).map(s=>s.file).join('\n')+'</pre>';}
+function renderLedger(el,j){if(j.error)return el.innerHTML='<span class="err">'+j.error+'</span>';
+  el.innerHTML='<div class="mut">'+j.count+' suppressed signatures</div>';}
+
+// boot
+(async()=>{try{const r=await fetch('/api/health');$('health').innerHTML=r.ok?
+  '<span class="ok">● API live</span>':'<span class="err">● offline</span>';}catch(e){$('health').innerHTML='<span class="err">● offline</span>';}
+  get('/api/op/scope','scopeOut',renderScope); get('/api/op/scorecard','scOut',renderScore);})();
+</script>
+</body>
+</html>
