@@ -56,6 +56,70 @@ def main():
         from core.hack_cli import run_hack_cli
         sys.exit(run_hack_cli(sys.argv[2:]))
 
+    # `viper.py scope pull <handle> | import <csv|burp.json> | show` — auto-load a
+    # HackerOne program's scope into scopes/current_scope.json so the operator only
+    # supplies a handle and the hunt is scope-locked (READ-only; touches no target).
+    if len(sys.argv) > 1 and sys.argv[1] == "scope":
+        import json as _json
+        from scope.hackerone_scope import (fetch_structured_scopes_api,
+                                           get_api_creds, parse_burp_excludes,
+                                           parse_csv_scopes, save_current_scope,
+                                           to_scope)
+        sub = sys.argv[2] if len(sys.argv) > 2 else "show"
+        if sub == "pull":
+            if len(sys.argv) < 4:
+                print("usage: viper.py scope pull <hackerone-program-handle>")
+                sys.exit(1)
+            handle = sys.argv[3]
+            user, token = get_api_creds()
+            if not (user and token):
+                print("HackerOne API creds required. Set HACKERONE_API_USERNAME +\n"
+                      "HACKERONE_API_TOKEN (or credentials/hackerone.json), or use\n"
+                      "`viper.py scope import <exported-scope.csv>` offline.")
+                sys.exit(2)
+            try:
+                raw = fetch_structured_scopes_api(handle, username=user, token=token)
+            except Exception as _e:
+                print(f"scope pull failed: {_e}")
+                sys.exit(1)
+            scope = to_scope(raw, program_name=handle, handle=handle)
+            path = save_current_scope(scope)
+            print(f"pulled '{handle}': {len(scope.in_scope)} in-scope + "
+                  f"{len(scope.out_of_scope)} out-of-scope -> {path}")
+            sys.exit(0)
+        if sub == "import":
+            if len(sys.argv) < 4:
+                print("usage: viper.py scope import <exported-scope.csv | burp-scope.json>")
+                sys.exit(1)
+            f = sys.argv[3]
+            try:
+                if f.lower().endswith(".csv"):
+                    raw = parse_csv_scopes(f)
+                    excl = parse_burp_excludes(sys.argv[4]) if len(sys.argv) > 4 else ()
+                    scope = to_scope(raw, program_name="imported", extra_excludes=excl)
+                else:  # treat as burp scope json -> excludes only (paired with a csv ideally)
+                    excl = parse_burp_excludes(f)
+                    scope = to_scope([], program_name="imported", extra_excludes=excl)
+            except Exception as _e:
+                print(f"scope import failed: {_e}")
+                sys.exit(1)
+            path = save_current_scope(scope)
+            print(f"imported {len(scope.in_scope)} in-scope + "
+                  f"{len(scope.out_of_scope)} out-of-scope -> {path}")
+            sys.exit(0)
+        # show
+        try:
+            d = _json.loads(open("scopes/current_scope.json", encoding="utf-8").read())
+            print(f"program: {d.get('program_name')}  ({d.get('program_url')})")
+            print(f"in-scope ({len(d.get('in_scope', []))}):")
+            for e in d.get("in_scope", []):
+                print(f"  + {e['target']}  [{e['asset_type']}]")
+            print(f"out-of-scope ({len(d.get('out_of_scope', []))}): "
+                  + ", ".join(e['target'] for e in d.get('out_of_scope', [])[:12]))
+        except Exception:
+            print("no scopes/current_scope.json — run `viper.py scope pull <handle>`")
+        sys.exit(0)
+
     # `viper.py bola <target> ...` — focused two-account BOLA/IDOR check
     # (Burp-import / cookie driven, capture-then-replay).
     if len(sys.argv) > 1 and sys.argv[1] == "bola":

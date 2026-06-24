@@ -17,6 +17,8 @@ python dashboard/server.py                              # Headless API only (:80
 ### Operator / triage CLIs
 
 ```bash
+python viper.py scope pull <h1-handle>   # auto-pull a HackerOne program's scope -> scopes/current_scope.json
+python viper.py scope import <csv|burp>   #   (offline) load an exported scope CSV / Burp scope file
 python viper.py classes                  # vuln classes VIPER tests; flags gate-confirmed + OOB-capable
 python viper.py scorecard [--strict]     # per-class validation-gate precision/recall benchmark
 python viper.py verify <findings.json>   # re-confirm saved findings via the gate (no full hunt)
