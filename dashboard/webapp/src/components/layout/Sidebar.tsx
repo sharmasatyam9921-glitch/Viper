@@ -5,14 +5,14 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Bot, Network, AlertTriangle, Target, Radar,
   BarChart3, Terminal, MessageSquare, Wrench, FileText, FolderKanban,
-  Settings, ShieldAlert,
+  Settings, ShieldAlert, Crosshair,
 } from "lucide-react";
 import clsx from "clsx";
 
 const ICONS = {
   LayoutDashboard, Bot, Network, AlertTriangle, Target, Radar,
   BarChart3, Terminal, MessageSquare, Wrench, FileText, FolderKanban,
-  Settings, ShieldAlert,
+  Settings, ShieldAlert, Crosshair,
 } as const;
 type IconName = keyof typeof ICONS;
 
@@ -26,6 +26,7 @@ const NAV: NavItem[] = [
   { kind: "link", href: "/overview", icon: "LayoutDashboard", label: "Dashboard" },
   { kind: "link", href: "/agents",   icon: "Bot",             label: "Agents", live: true },
   { kind: "link", href: "/hack",     icon: "ShieldAlert",     label: "Hunt", live: true },
+  { kind: "link", href: "/operator", icon: "Crosshair",       label: "Operator" },
 
   { kind: "section", label: "Discovery" },
   { kind: "link", href: "/recon",    icon: "Radar",           label: "Recon" },
