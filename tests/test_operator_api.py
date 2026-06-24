@@ -49,16 +49,35 @@ def test_modes_and_compliance():
     ids = {x["id"] for x in m["modes"]}
     assert ids == {"bugbounty", "pentest", "ctf"}
     assert m["platforms"]["hackerone"]["auto_pull"] is True
-    assert m["platforms"]["bugcrowd"]["auto_pull"] is False
+    assert m["platforms"]["bugcrowd"]["auto_pull"] is True       # now wired
+    assert m["platforms"]["yeswehack"]["auto_pull"] is False     # not yet
     fw = {f["id"] for f in op.get_compliance()["frameworks"]}
     assert {"owasp", "pci_dss", "nist", "hipaa", "soc2"} <= fw
     # the pentest mode runs the full kill-chain
     assert next(x for x in m["modes"] if x["id"] == "pentest")["go"] is True
 
 
-def test_scope_pull_non_hackerone_platform_is_graceful():
+def test_scope_pull_bugcrowd_without_token_is_graceful(monkeypatch):
+    monkeypatch.delenv("BUGCROWD_API_TOKEN", raising=False)
     r = op.scope_pull({"handle": "demo", "platform": "bugcrowd"})
+    assert r["ok"] is False and "BUGCROWD_API_TOKEN" in r["error"]
+
+
+def test_scope_pull_unsupported_platform_is_graceful():
+    r = op.scope_pull({"handle": "demo", "platform": "synack"})
     assert r["ok"] is False and "isn't wired yet" in r["error"]
+
+
+def test_compliance_report_maps_and_filters():
+    finds = [{"vuln_type": "xss", "cwe": "CWE-79", "url": "http://t/x"}]
+    rep = op.compliance_report({"findings": finds})
+    assert rep["ok"] and rep["finding_count"] == 1
+    ids = {f["id"] for f in rep["frameworks"]}
+    assert {"owasp", "pci_dss", "nist", "hipaa"} <= ids          # CWE-79 mapping
+    # framework filter narrows the result
+    only = op.compliance_report({"findings": finds, "frameworks": ["owasp"]})
+    assert {f["id"] for f in only["frameworks"]} == {"owasp"}
+    assert only["frameworks"][0]["controls"]                     # has a control ref
 
 
 def test_scope_pull_without_creds_is_graceful(monkeypatch):
@@ -66,7 +85,7 @@ def test_scope_pull_without_creds_is_graceful(monkeypatch):
     monkeypatch.delenv("HACKERONE_API_TOKEN", raising=False)
     monkeypatch.setattr(op, "_ROOT", Path("/nonexistent-root-xyz"))  # no creds file
     r = op.scope_pull({"handle": "demo"})
-    assert r["ok"] is False and "creds" in r["error"].lower()
+    assert r["ok"] is False and "token" in r["error"].lower()
 
 
 def test_scope_import_csv(tmp_path, monkeypatch):

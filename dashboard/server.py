@@ -3326,6 +3326,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "/api/op/scope/pull": _op.scope_pull,
                 "/api/op/scope/import": _op.scope_import,
                 "/api/op/verify": _op.verify_findings,
+                "/api/op/compliance/report": _op.compliance_report,
             }
             fn = _ops_post.get(path)
             if fn is not None:

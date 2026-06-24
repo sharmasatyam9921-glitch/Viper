@@ -121,6 +121,14 @@
     <div id="pt_launchOut"></div>
   </div>
 
+  <div class="card ent mode m-pentest" data-modes="pentest"><h2>Compliance report</h2>
+    <div class="note">Maps the hunt's findings to your selected frameworks (control refs
+      per standard) for the executive report.</div>
+    <div class="row" style="margin-top:8px">
+      <button onclick="complianceReport()">Generate from latest findings</button></div>
+    <div id="cmpOut"></div>
+  </div>
+
   <!-- ════════ CTF ════════ -->
   <div class="card mode m-ctf" data-modes="ctf">
     <h2>Challenge</h2>
@@ -215,6 +223,14 @@ async function launchPentest(){
     results.push(t+' -> '+(json.hunt_id||json.error||'ok'));}
   $('pt_launchOut').innerHTML='<pre class="ok">engagement: '+$('pt_eid').value+'  client: '+$('pt_client').value+
     '\ncompliance: '+(cmp.join(', ')||'none')+'\n'+results.join('\n')+'</pre>';}
+async function complianceReport(){
+  const fw=[...document.querySelectorAll('#pt_compliance input:checked')].map(c=>c.value);
+  $('cmpOut').innerHTML='<span class="mut">mapping…</span>';
+  const {json}=await post('/api/op/compliance/report',{frameworks:fw});
+  if(json.error||json.ok===false)return $('cmpOut').innerHTML='<span class="err">'+(json.error||'failed')+'</span>';
+  if(!json.frameworks.length)return $('cmpOut').innerHTML='<div class="note">no compliance mappings in '+json.finding_count+' findings'+(fw.length?' for selected frameworks':'')+'</div>';
+  $('cmpOut').innerHTML='<div class="mut">'+json.finding_count+' findings</div><pre>'+
+    json.frameworks.map(f=>f.label+'\n'+f.controls.map(c=>'  · '+c).join('\n')).join('\n\n')+'</pre>';}
 async function verify(){let f;try{f=JSON.parse($('vfind').value)}catch(e){return flash('verifyOut',{error:'invalid JSON'})}
   const {json}=await post('/api/op/verify',{findings:f});if(json.error)return flash('verifyOut',json);
   let h='<pre>'+json.submittable+'/'+json.total+' submittable\n';

@@ -42,12 +42,13 @@ def get_scope() -> dict:
 # Bug-bounty platforms. Only HackerOne has automated API scope-pull today; the
 # others fall back to the offline importer (honest — not faked).
 _PLATFORMS = {
-    "hackerone": {"label": "HackerOne", "auto_pull": True},
-    "bugcrowd": {"label": "Bugcrowd", "auto_pull": False},
-    "intigriti": {"label": "Intigriti", "auto_pull": False},
-    "yeswehack": {"label": "YesWeHack", "auto_pull": False},
-    "other": {"label": "Other / manual", "auto_pull": False},
+    "hackerone": {"label": "HackerOne", "auto_pull": True, "env": "HACKERONE_API_TOKEN"},
+    "bugcrowd": {"label": "Bugcrowd", "auto_pull": True, "env": "BUGCROWD_API_TOKEN"},
+    "intigriti": {"label": "Intigriti", "auto_pull": True, "env": "INTIGRITI_API_TOKEN"},
+    "yeswehack": {"label": "YesWeHack", "auto_pull": False, "env": ""},
+    "other": {"label": "Other / manual", "auto_pull": False, "env": ""},
 }
+_AUTO_PLATFORMS = {"hackerone", "h1", "bugcrowd", "intigriti"}
 _COMPLIANCE = {
     "owasp": "OWASP Top 10 (2021)", "pci_dss": "PCI DSS v4.0",
     "nist": "NIST SP 800-53", "hipaa": "HIPAA Security Rule",
@@ -80,23 +81,43 @@ def scope_pull(data: dict) -> dict:
     platform = (data or {}).get("platform", "hackerone").strip().lower() or "hackerone"
     if not handle:
         return {"ok": False, "error": "handle required"}
-    if platform not in ("hackerone", "h1"):
+    if platform not in _AUTO_PLATFORMS:
         return {"ok": False, "error": f"automated scope-pull for "
                 f"'{platform}' isn't wired yet — export the program scope and use "
-                "Import (HackerOne auto-pull works today)"}
+                "Import (HackerOne / Bugcrowd / Intigriti auto-pull work today)"}
     try:
-        from scope.hackerone_scope import (fetch_structured_scopes_api,
-                                           get_api_creds, save_current_scope,
-                                           to_scope)
-        user, token = get_api_creds()
-        if not (user and token):
-            return {"ok": False, "error": "no HackerOne API creds "
-                    "(set HACKERONE_API_USERNAME + HACKERONE_API_TOKEN)"}
-        raw = fetch_structured_scopes_api(handle, username=user, token=token)
-        scope = to_scope(raw, program_name=handle, handle=handle)
+        from scope.hackerone_scope import save_current_scope, to_scope
+        from scope.platform_scope import fetch_scope, platform_creds
+        user, token = platform_creds(platform)
+        if not token:
+            env = _PLATFORMS.get(platform, {}).get("env", "<token>")
+            return {"ok": False, "error": f"no {platform} API token (set {env}"
+                    + (" + HACKERONE_API_USERNAME)" if platform in ("hackerone", "h1") else ")")}
+        raw = fetch_scope(platform, handle, username=user, token=token)
+        scope = to_scope(raw, program_name=f"{handle} ({platform})", handle=handle)
         save_current_scope(scope, str(_ROOT / "scopes" / "current_scope.json"))
-        return {"ok": True, "handle": handle, "in_scope": len(scope.in_scope),
-                "out_of_scope": len(scope.out_of_scope)}
+        return {"ok": True, "platform": platform, "handle": handle,
+                "in_scope": len(scope.in_scope), "out_of_scope": len(scope.out_of_scope)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, **_err(e)}
+
+
+def compliance_report(data: dict) -> dict:
+    """Map findings -> compliance controls (filtered to the selected frameworks)."""
+    frameworks = set((data or {}).get("frameworks") or [])
+    findings = (data or {}).get("findings") or _load_latest_findings()
+    if not findings:
+        return {"ok": False, "error": "no findings to map"}
+    try:
+        from core.compliance_mapper import enrich_finding
+        hits: dict = {}
+        for f in findings:
+            for std, ref in (enrich_finding(f).get("compliance") or {}).items():
+                if not frameworks or std in frameworks:
+                    hits.setdefault(std, set()).add(ref)
+        return {"ok": True, "finding_count": len(findings),
+                "frameworks": [{"id": k, "label": _COMPLIANCE.get(k, k.upper()),
+                                "controls": sorted(v)} for k, v in sorted(hits.items())]}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, **_err(e)}
 
