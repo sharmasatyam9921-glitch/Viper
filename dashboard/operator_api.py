@@ -90,9 +90,17 @@ def scope_pull(data: dict) -> dict:
         from scope.platform_scope import fetch_scope, platform_creds
         user, token = platform_creds(platform)
         if not token:
-            env = _PLATFORMS.get(platform, {}).get("env", "<token>")
-            return {"ok": False, "error": f"no {platform} API token (set {env}"
-                    + (" + HACKERONE_API_USERNAME)" if platform in ("hackerone", "h1") else ")")}
+            hints = {
+                "hackerone": "generate an API token at hackerone.com/settings/api_token "
+                             "(this is NOT your login password), then set HACKERONE_API_TOKEN "
+                             "(env) or add \"api_token\" to credentials/hackerone.json",
+                "bugcrowd": "create an API token in Bugcrowd account settings, then set "
+                            "BUGCROWD_API_TOKEN",
+                "intigriti": "create a researcher API token in Intigriti, then set "
+                             "INTIGRITI_API_TOKEN",
+            }
+            return {"ok": False, "error": f"no {platform} API token - "
+                    + hints.get(platform, "configure the platform API token")}
         raw = fetch_scope(platform, handle, username=user, token=token)
         scope = to_scope(raw, program_name=f"{handle} ({platform})", handle=handle)
         save_current_scope(scope, str(_ROOT / "scopes" / "current_scope.json"))
