@@ -312,6 +312,12 @@ class TestStartSubprocess:
         })
         assert result["ok"] is True
         assert result["pid"] == 4242
+        # the launcher returns a hunt_id + target so the UI can track + show the
+        # hunt's live findings (the dashboard scan -> results flow).
+        from core.audit_logger import make_hunt_id
+        slug = make_hunt_id("http://127.0.0.1:9999").rsplit("_", 1)[0]  # ts may drift 1s
+        assert result["hunt_id"].startswith(slug)
+        assert result["target"] == "http://127.0.0.1:9999"
         # argv contains our flags
         argv = captured["argv"]
         assert "hack" in argv

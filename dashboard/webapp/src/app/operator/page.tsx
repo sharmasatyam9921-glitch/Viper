@@ -8,8 +8,9 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { apiGet, apiPost } from "@/lib/api";
-import { Play, ShieldCheck, FileSearch, Scale, RefreshCw } from "lucide-react";
+import { Play, ShieldCheck, FileSearch, Scale, RefreshCw, Radar, ExternalLink } from "lucide-react";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Card, CardHeader } from "@/components/ui/Card";
 
@@ -45,6 +46,8 @@ interface VerifyResp { ok: boolean; total: number; submittable: number; results:
 interface CmpFw { id: string; label: string; controls: string[] }
 interface CmpResp { ok: boolean; finding_count: number; frameworks: CmpFw[]; error?: string }
 interface ActionResp { ok?: boolean; error?: string; in_scope?: number; out_of_scope?: number; hunt_id?: string }
+interface HuntRow { hunt_id: string; target: string; finding_count: number; started_at: number; last_event_at: number }
+interface HuntsResp { hunts: HuntRow[] }
 
 const inputCls =
   "bg-[var(--surface-2,#0e141c)] border border-[var(--border,#1e2733)] rounded-md px-3 py-2 text-sm w-full";
@@ -81,6 +84,9 @@ export default function OperatorPage() {
   const [vText, setVText] = useState("");
   const [verify, setVerify] = useState<VerifyResp | null>(null);
   const [cmp, setCmp] = useState<CmpResp | null>(null);
+  // live hunt tracking — after a launch we watch the matching hunt by target
+  const [watch, setWatch] = useState("");
+  const [live, setLive] = useState<HuntRow | null>(null);
 
   useEffect(() => {
     apiGet<ModesResp>("/api/op/modes").then((m) => {
@@ -88,6 +94,22 @@ export default function OperatorPage() {
     });
     apiGet<ScopeResp>("/api/op/scope").then(setScope);
   }, []);
+
+  // Poll the hunts list and surface the newest hunt matching the launched
+  // target. The backend's predicted hunt_id can drift by a second, so the
+  // target match is authoritative.
+  useEffect(() => {
+    if (!watch) return;
+    const host = (() => { try { return new URL(watch).host || watch; } catch { return watch; } })();
+    const tick = async () => {
+      const r = await apiGet<HuntsResp>("/api/hack/hunts");
+      const m = (r?.hunts || []).find((h) => h.target === watch || h.target.includes(host));
+      if (m) setLive(m);
+    };
+    tick();
+    const id = setInterval(tick, 3000);
+    return () => clearInterval(id);
+  }, [watch]);
 
   const set = (k: string, v: string) => setMsg((m) => ({ ...m, [k]: v }));
   const modeCfg = cfg?.modes.find((m) => m.id === mode);
@@ -114,7 +136,8 @@ export default function OperatorPage() {
     const body: Record<string, unknown> = { target, profile };
     if (scopeFile) body.scope = scopeFile;
     const r = await apiPost<ActionResp>("/api/hack/start", body);
-    set("launch", r?.hunt_id ? `hunt started: ${r.hunt_id}` : r?.error || JSON.stringify(r));
+    if (r?.ok) { set("launch", `hunt started — watching ${target}`); setLive(null); setWatch(target); }
+    else { set("launch", r?.error || "launch failed"); }
   }, []);
 
   const launchPentest = useCallback(async () => {
@@ -126,9 +149,10 @@ export default function OperatorPage() {
     const out: string[] = [];
     for (const t of targets) {
       const r = await apiPost<ActionResp>("/api/hack/start", { target: t, profile: "bugbounty", scope: bbScope });
-      out.push(`${t} → ${r?.hunt_id || r?.error || "ok"}`);
+      out.push(`${t} → ${r?.ok ? "started" : r?.error || "failed"}`);
     }
     set("launch", `engagement ${eid} (${client}): ${out.join("  |  ")}`);
+    if (targets[0]) { setLive(null); setWatch(targets[0]); }
   }, [auth, ptTargets, client, eid, bbScope]);
 
   const runVerify = useCallback(async () => {
@@ -168,6 +192,26 @@ export default function OperatorPage() {
           </select>
         }
       />
+
+      {watch && (
+        <Card>
+          <CardHeader
+            title="Live hunt"
+            kicker={live ? (Date.now() / 1000 - live.last_event_at < 30 ? "● running" : "completed") : "starting…"}
+            action={<Link href="/hack" className="text-xs flex items-center gap-1 text-[var(--accent,#3fb6a8)]">full live view <ExternalLink size={12} /></Link>}
+          />
+          <div className="p-4 flex items-center gap-6 text-sm">
+            <Radar size={18} className="text-[var(--accent,#3fb6a8)]" />
+            <div><span className="text-[var(--muted,#7d8a9a)]">target</span> {watch}</div>
+            {live
+              ? <>
+                  <div><span className="text-[var(--muted,#7d8a9a)]">findings</span> <b>{live.finding_count}</b></div>
+                  <div className="text-xs text-[var(--muted,#7d8a9a)]">{live.hunt_id}</div>
+                </>
+              : <div className="text-[var(--muted,#7d8a9a)]">discovering the hunt…</div>}
+          </div>
+        </Card>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
 

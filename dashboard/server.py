@@ -200,10 +200,20 @@ def _hack_start_subprocess(data: dict) -> dict:
     except OSError as e:
         return {"ok": False, "error": f"spawn failed: {e!r}"}
 
-    # Don't wait — return immediately so the UI can start polling
+    # Don't wait — return immediately so the UI can start polling. Return a
+    # predicted hunt_id (the subprocess derives its own a moment later, so its
+    # timestamp may differ by 1-2s; the UI resolves the REAL hunt by matching the
+    # target in /api/hack/hunts, which is authoritative).
+    try:
+        from core.audit_logger import make_hunt_id
+        hunt_id = resume or make_hunt_id(target)
+    except Exception:
+        hunt_id = resume or ""
     return {
         "ok": True,
         "pid": proc.pid,
+        "hunt_id": hunt_id,
+        "target": target or resume,
         "command_preview": " ".join(shlex.quote(a) for a in argv[2:]),
     }
 
