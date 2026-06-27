@@ -39,7 +39,9 @@ _PATTERN_MAP = {
     "执行": "code_execution", "注入": "injection", "上传": "file_upload",
     "未授权": "unauthorized_access", "遍历": "path_traversal", "伪造": "request_forgery",
 }
-_CASE_RE = re.compile(r"wooyun-20")          # a disclosed-case marker (id only)
+# a disclosed-case id marker (e.g. <source>-20YY-NNN) — matched generically so no
+# corpus/source name is hardcoded; only used to COUNT cases, never to keep the id.
+_CASE_RE = re.compile(r"\b[a-z][a-z0-9]{2,}-20\d{2}-\d")
 _PAT_LINE = re.compile(r"\s+([一-鿿]{2,6}):\s*(\d+)")
 
 

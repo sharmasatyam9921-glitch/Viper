@@ -18,8 +18,9 @@ def test_priors_file_is_clean_aggregates():
     d = json.loads(_PRIORS.read_text(encoding="utf-8"))
     assert d["total_cases"] > 1000 and d["classes"]
     blob = json.dumps(d).lower()
-    # aggregates only — no case ids, urls, or payload material
-    assert "wooyun-" not in blob and "http" not in blob.replace("https", "")
+    # aggregates only — no disclosed-case ids, urls, or payload material
+    import re as _re
+    assert not _re.search(r"[a-z]+-20\d\d-\d", blob) and "http" not in blob.replace("https", "")
     for cls, info in d["classes"].items():
         assert {"cases", "prevalence", "criticality", "impact_prior"} <= set(info)
         assert 0 <= info["impact_prior"] <= 1
@@ -55,11 +56,11 @@ def test_extractor_is_pii_free(tmp_path):
     cat.write_text(
         "# SQL\n## 高频参数\n```\n  uid: 5次\n```\n"
         "### 攻击模式分布\n```\n  注入: 3次\n```\n"
-        "### 案例 1: wooyun-2015-000001\n**Payload片段**:\n```\nadmin:SuperSecret123\n```\n"
-        "### 案例 2: wooyun-2015-000002\n",
+        "### 案例 1: rep-2015-000001\n**Payload片段**:\n```\nadmin:SuperSecret123\n```\n"
+        "### 案例 2: rep-2015-000002\n",
         encoding="utf-8")
     out = derive(str(tmp_path))
     blob = json.dumps(out)
-    assert "SuperSecret123" not in blob and "wooyun-2015" not in blob   # no PII/case ids
+    assert "SuperSecret123" not in blob and "rep-2015" not in blob      # no PII/case ids
     assert out["classes"]["sqli"]["cases"] == 2                         # counted cases
     assert "injection" in out["classes"]["sqli"]["attack_patterns"]

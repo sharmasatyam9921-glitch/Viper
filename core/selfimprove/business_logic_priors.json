@@ -1,10 +1,10 @@
 {
   "description": "Per-class priors derived from a corpus of disclosed business-logic / web vulnerability reports. Aggregates only (case counts + attack-pattern taxonomy); no payloads/PII. impact_prior = log-prevalence x inherent criticality, used by core.prioritization to rank findings by historical impact.",
-  "total_cases": 78543,
+  "total_cases": 78560,
   "classes": {
     "command_injection": {
-      "cases": 16776,
-      "share": 0.2136,
+      "cases": 16799,
+      "share": 0.2138,
       "prevalence": 0.961,
       "criticality": 1.0,
       "impact_prior": 0.961,
@@ -22,18 +22,18 @@
       "attack_patterns": {}
     },
     "lfi": {
-      "cases": 1624,
-      "share": 0.0207,
-      "prevalence": 0.731,
+      "cases": 1622,
+      "share": 0.0206,
+      "prevalence": 0.73,
       "criticality": 0.75,
-      "impact_prior": 0.548,
+      "impact_prior": 0.547,
       "attack_patterns": {
         "path_traversal": 2,
         "info_disclosure": 1
       }
     },
     "secrets": {
-      "cases": 5970,
+      "cases": 5971,
       "share": 0.076,
       "prevalence": 0.859,
       "criticality": 0.55,
@@ -44,7 +44,7 @@
       }
     },
     "business_logic": {
-      "cases": 1289,
+      "cases": 1288,
       "share": 0.0164,
       "prevalence": 0.708,
       "criticality": 0.7,
@@ -57,7 +57,7 @@
       }
     },
     "cors": {
-      "cases": 1396,
+      "cases": 1398,
       "share": 0.0178,
       "prevalence": 0.716,
       "criticality": 0.4,
@@ -91,7 +91,7 @@
       }
     },
     "ssrf": {
-      "cases": 1537,
+      "cases": 1536,
       "share": 0.0196,
       "prevalence": 0.725,
       "criticality": 0.8,
@@ -99,8 +99,8 @@
       "attack_patterns": {}
     },
     "access_control": {
-      "cases": 7153,
-      "share": 0.0911,
+      "cases": 7150,
+      "share": 0.091,
       "prevalence": 0.877,
       "criticality": 0.8,
       "impact_prior": 0.702,
@@ -112,7 +112,7 @@
       }
     },
     "auth_bypass": {
-      "cases": 7086,
+      "cases": 7087,
       "share": 0.0902,
       "prevalence": 0.876,
       "criticality": 0.8,
@@ -124,8 +124,8 @@
       }
     },
     "xss": {
-      "cases": 10117,
-      "share": 0.1288,
+      "cases": 10114,
+      "share": 0.1287,
       "prevalence": 0.911,
       "criticality": 0.5,
       "impact_prior": 0.456,
