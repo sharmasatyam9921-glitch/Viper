@@ -1,0 +1,14 @@
+{
+  "_comment": "Operator-local external MCP servers consumed by VIPER's MCP client (their output is gate-filtered before it can become submittable). Copy to mcp_servers.json (gitignored) and edit. VIPER's client is stdio; for SSE/HTTP servers (e.g. an external Burp Suite MCP) use a stdio<->SSE bridge as below, or run: viper.py mcp connect <name> <sse-url> <token>",
+
+  "burp": {
+    "_about": "External Burp Suite MCP (e.g. BurpMCP-Ultra) running its SSE endpoint at http://127.0.0.1:9876/. Load that extension in Burp Pro first, copy its session token, and replace <token>. mcp-remote bridges VIPER's stdio client to the SSE endpoint.",
+    "command": ["npx", "-y", "mcp-remote", "http://127.0.0.1:9876/",
+                "--header", "Authorization: Bearer <token>"]
+  },
+
+  "example-stdio": {
+    "_about": "Any spec-compliant stdio MCP server is consumed directly (no bridge).",
+    "command": ["python", "-m", "your_mcp_server"]
+  }
+}

@@ -45,6 +45,12 @@ def run_mcp_cli(argv: List[str]) -> int:
     pa.add_argument("name")
     pa.add_argument("command", nargs="+", help="server command (e.g. python -m x)")
     pa.add_argument("--cwd")
+    pco = sub.add_parser("connect", help="register an SSE/HTTP MCP server (e.g. a "
+                         "Burp Suite MCP) via a stdio<->SSE bridge")
+    pco.add_argument("name")
+    pco.add_argument("url", help="SSE endpoint, e.g. http://127.0.0.1:9876/")
+    pco.add_argument("token", nargs="?", help="auth token (operator-local config)")
+    pco.add_argument("--header", default="Authorization")
     pr = sub.add_parser("remove", help="remove an external MCP server")
     pr.add_argument("name")
     ps = sub.add_parser("scan", help="call a tool and show gate-bound findings")
@@ -60,6 +66,17 @@ def run_mcp_cli(argv: List[str]) -> int:
         from core.mcp.config import add_server
         add_server(args.name, args.command, cwd=args.cwd)
         print(f"registered MCP server {args.name!r}: {' '.join(args.command)}")
+        return 0
+    if args.cmd == "connect":
+        from core.mcp.config import register_sse_bridge
+        cmd = register_sse_bridge(args.name, args.url, token=args.token,
+                                  header=args.header)
+        shown = [("--header" if a == "--header" else a) for a in cmd]
+        if args.token:
+            shown[-1] = f"{args.header}: <token>"      # don't echo the token
+        print(f"registered SSE MCP {args.name!r} -> {' '.join(shown)}")
+        print("requires `npx` + mcp-remote (auto-fetched on first run) and the "
+              "external MCP server already listening at the URL.")
         return 0
     if args.cmd == "remove":
         from core.mcp.config import remove_server

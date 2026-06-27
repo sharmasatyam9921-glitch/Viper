@@ -66,6 +66,25 @@ def add_server(name: str, command, *, cwd: Optional[str] = None,
     save_servers(servers, path)
 
 
+def register_sse_bridge(name: str, url: str, *, token: Optional[str] = None,
+                        header: str = "Authorization",
+                        bridge=("npx", "-y", "mcp-remote"),
+                        path: Optional[Path] = None) -> list:
+    """Register an SSE/HTTP MCP server (e.g. an external Burp Suite MCP) for VIPER's
+    stdio-only client by spawning a stdio<->SSE bridge (mcp-remote). VIPER runs the
+    bridge as a subprocess; the bridge speaks SSE to `url`. `token`, when given, is
+    forwarded as an auth header so the bridge authenticates to the server. The
+    config is operator-local + gitignored, so the token in the command is fine.
+    This does NOT build a Burp integration — it wires VIPER to an already-running
+    external MCP server. Returns the registered command."""
+    cmd = list(bridge) + [str(url)]
+    if token:
+        value = f"Bearer {token}" if header.lower() == "authorization" else token
+        cmd += ["--header", f"{header}: {value}"]
+    add_server(name, cmd, path=path)
+    return cmd
+
+
 def remove_server(name: str, path: Optional[Path] = None) -> bool:
     servers = load_servers(path)
     if name in servers:

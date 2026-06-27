@@ -252,3 +252,4 @@ data/imported_skills.json
 
 # Operator-configured external MCP servers (may hold local paths/keys)
 config/mcp_servers.json
+tools/burp-mcp/
