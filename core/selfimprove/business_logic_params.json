@@ -1,0 +1,35 @@
+{
+  "description": "Business-logic & object-reference parameter names observed across disclosed business-logic / access-control vulnerability reports. Fed to the IDOR/BOLA workers and the logic modeler so they probe the parameter names that real authorization and logic flaws actually hide in (the injection workers already have their own hint set). No payloads or PII — parameter names only.",
+  "object_ref": [
+    "id", "uid", "user_id", "userid", "user", "member_id", "memberid",
+    "account", "account_id", "acc_id", "owner_id", "customer_id",
+    "order_id", "orderid", "order_userid", "item_id", "itemid", "file_id",
+    "fileid", "issue_id", "issueid", "doc_id", "report_id", "ticket_id",
+    "pid", "puid", "rid", "vid", "cid", "aid", "gsid", "course_id",
+    "employee_id", "employeeid", "no_user", "wp_id", "site_id", "type_id",
+    "typeid", "column_num", "columnnum", "object_id", "record_id", "ref",
+    "invoice_id", "transaction_id", "session_id", "group_id", "team_id",
+    "project_id", "folder_id", "msg_id", "message_id", "comment_id"
+  ],
+  "auth_priv": [
+    "password", "repassword", "pwd", "pwpwd", "old_password", "new_password",
+    "auth_str", "need_change_pwd", "needchangepwd", "hideid", "status",
+    "lstate", "state", "role", "roleid", "is_admin", "isadmin", "admin",
+    "level", "grade", "vip", "perm", "permission", "privilege", "access",
+    "is_vip", "verified", "approved", "enabled", "active"
+  ],
+  "signature": [
+    "sign", "signature", "sig", "timestamp", "ts", "time", "createtime",
+    "create_time", "nonce", "token", "csrf", "_token", "hash", "checksum"
+  ],
+  "redirect": [
+    "jumpurl", "jump_url", "returnto", "return_to", "returnurl", "return_url",
+    "redirect", "redirect_url", "redirect_uri", "next", "target", "goto",
+    "dest", "destination", "continue", "callback_url", "back", "u", "rurl"
+  ],
+  "payment": [
+    "price", "amount", "total", "money", "qty", "quantity", "num", "count",
+    "coupon", "coupon_code", "discount", "promo", "voucher", "balance",
+    "cart_id", "cartid", "pay_amount", "fee", "cost"
+  ]
+}

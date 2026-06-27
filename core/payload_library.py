@@ -48,6 +48,33 @@ def add_discovered_params(params) -> None:
             _discovered_params.add(s)
 
 
+_BLP_PATH: Path = Path(__file__).parent / "selfimprove" / "business_logic_params.json"
+_blp_cache: Dict[str, List[str]] | None = None
+
+
+def get_business_logic_params(category: Optional[str] = None) -> List[str]:
+    """Business-logic / object-reference parameter names mined from disclosed
+    access-control + logic-flaw reports. `category` ∈ object_ref | auth_priv |
+    signature | redirect | payment, or None for the flat union. The IDOR/BOLA
+    workers and the logic modeler probe these — the params real authz/logic bugs
+    hide in. Never raises; [] if unavailable."""
+    global _blp_cache
+    if _blp_cache is None:
+        try:
+            data = json.loads(_BLP_PATH.read_text(encoding="utf-8"))
+            _blp_cache = {k: [str(x) for x in v] for k, v in data.items()
+                          if isinstance(v, list)}
+        except Exception:
+            _blp_cache = {}
+    if category:
+        return list(_blp_cache.get(category, []))
+    seen: dict = {}
+    for vals in _blp_cache.values():
+        for p in vals:
+            seen[p] = None
+    return list(seen)
+
+
 def get_discovered_params() -> List[str]:
     return list(_discovered_params)
 

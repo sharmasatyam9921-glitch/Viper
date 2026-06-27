@@ -126,7 +126,8 @@ async def hunt(base: str, *, classes: Optional[set] = None, oob=None,
     `fast=True` disables the politeness rate limiter (~10x faster) and is ONLY for
     AUTHORIZED localhost / benchmark targets; leave it off for real engagements.
     """
-    from core.payload_library import add_discovered_params, clear_discovered_params
+    from core.payload_library import (add_discovered_params, clear_discovered_params,
+                                       get_business_logic_params)
     from core.swarm_validation import validate_findings
     from core.swarm_workers.vuln._http import clear_oob, set_oob
     from core.swarm_workers.vuln._rate_limit import set_unthrottled
@@ -142,6 +143,10 @@ async def hunt(base: str, *, classes: Optional[set] = None, oob=None,
         for params in surf["endpoints"].values():
             discovered |= params
         add_discovered_params(discovered)
+        # Seed common access-control / object-reference parameter names (mined from
+        # disclosed business-logic reports) so the IDOR + injection workers probe
+        # the params real authz/logic bugs hide in. Bounded so the sweep stays fast.
+        add_discovered_params(get_business_logic_params("object_ref")[:15])
 
         names = list(dict.fromkeys(_scope(_INJECT_WORKERS, classes)
                                    + _scope(_SURFACE_WORKERS, classes)))

@@ -173,7 +173,10 @@ async def run(agent: SwarmAgent) -> List[dict]:
     from core.payload_library import get_discovered_params
     disc = get_discovered_params()
     if disc:
-        params = list(dict.fromkeys(params + list(_DEFAULT_PARAMS) + disc))[:16]
+        # URL's own params + the worker defaults FIRST (highest signal), then the
+        # broader discovered/seeded set. Cap is generous so crawl/form-discovered
+        # params are never crowded out by seeded access-control param names.
+        params = list(dict.fromkeys(params + list(_DEFAULT_PARAMS) + disc))[:32]
     else:
         params = params[:5]
 
