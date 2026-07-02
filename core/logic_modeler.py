@@ -94,6 +94,16 @@ class LogicModeler:
         self.flows: List[AppFlow] = []
         self.findings: List[LogicFinding] = []
 
+    @staticmethod
+    def subclass_playbook() -> dict:
+        """Business-logic subclass playbook (test patterns + hot params per sub-flaw:
+        password_reset, idor_horizontal, privilege_escalation, captcha_bypass,
+        credential_stuffing, payment_tampering, auth_bypass), curated from disclosed
+        reports. Guides which sub-flaw to probe and where, beyond the built-in
+        step-skip / price / privilege tests."""
+        from core.payload_library import get_business_logic_subclasses
+        return get_business_logic_subclasses()
+
     async def run_all(self) -> List[LogicFinding]:
         """Run all logic modeling tests."""
         # First, map application flows

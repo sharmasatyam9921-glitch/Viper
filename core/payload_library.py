@@ -75,6 +75,26 @@ def get_business_logic_params(category: Optional[str] = None) -> List[str]:
     return list(seen)
 
 
+_BLS_PATH: Path = Path(__file__).parent / "selfimprove" / "business_logic_subclasses.json"
+_bls_cache: Dict[str, dict] | None = None
+
+
+def get_business_logic_subclasses() -> Dict[str, dict]:
+    """Business-logic SUBCLASS taxonomy (test patterns + hot params per sub-flaw:
+    password_reset, idor_horizontal, privilege_escalation, captcha_bypass,
+    credential_stuffing, payment_tampering, auth_bypass) curated from disclosed
+    reports. Sharper than the flat class list — tells the logic modeler which
+    sub-flaw to test and where. Never raises; {} if unavailable."""
+    global _bls_cache
+    if _bls_cache is None:
+        try:
+            _bls_cache = json.loads(_BLS_PATH.read_text(encoding="utf-8")).get(
+                "subclasses", {})
+        except Exception:
+            _bls_cache = {}
+    return dict(_bls_cache)
+
+
 def get_discovered_params() -> List[str]:
     return list(_discovered_params)
 

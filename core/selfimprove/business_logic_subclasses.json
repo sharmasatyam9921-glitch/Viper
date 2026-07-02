@@ -1,0 +1,60 @@
+{
+  "description": "Business-logic vulnerability SUBCLASSES + their concrete test patterns and hot parameters, curated from a corpus of disclosed business-logic reports. Sharper than the flat class priors: it tells the logic modeler WHICH sub-flaw to test and WHERE. `cases` is corpus prevalence (count) — NOT a fabricated severity %, which the corpus does not cleanly provide; `severity` is the class/pattern-inherited grade. No payloads or PII.",
+  "subclasses": {
+    "password_reset": {
+      "parent": "auth_bypass", "cases": 22, "severity": "critical",
+      "patterns": [
+        "reset token / code echoed in the response or a redirect",
+        "reset token not bound to the requesting user (swap victim id)",
+        "reset flow step skippable (jump straight to set-password)",
+        "credential/identity parameter attacker-controlled (uid, email)"
+      ],
+      "params": ["token", "code", "otp", "reset_token", "email", "account",
+                 "uid", "user_id", "mobile", "phone"]
+    },
+    "idor_horizontal": {
+      "parent": "access_control", "cases": 22, "severity": "high",
+      "patterns": ["sequential/UUID object-id traversal reads another user's data",
+                   "resource-id replacement (swap id A -> id B across accounts)"],
+      "params": ["id", "uid", "user_id", "order_id", "item_id", "file_id",
+                 "account_id", "member_id", "doc_id"]
+    },
+    "privilege_escalation": {
+      "parent": "access_control", "cases": 22, "severity": "critical",
+      "patterns": ["role/permission parameter tamper (user -> admin)",
+                   "admin-only endpoint reachable by a low-priv identity"],
+      "params": ["role", "roleid", "is_admin", "isadmin", "admin", "level",
+                 "grade", "perm", "access", "type"]
+    },
+    "captcha_bypass": {
+      "parent": "auth_bypass", "cases": 20, "severity": "medium",
+      "patterns": ["captcha not refreshed / reusable across requests",
+                   "captcha brute-forceable (short, no lockout)",
+                   "captcha absent on the sensitive endpoint"],
+      "params": ["captcha", "code", "vcode", "verify_code", "sms", "smscode",
+                 "img_code"]
+    },
+    "credential_stuffing": {
+      "parent": "auth_bypass", "cases": 20, "severity": "high",
+      "patterns": ["login has no rate-limit / lockout (mass credential replay)",
+                   "user-enumeration oracle in login/reset error messages"],
+      "params": ["username", "account", "email", "mobile", "password", "pwd"]
+    },
+    "payment_tampering": {
+      "parent": "business_logic", "cases": 9, "severity": "high",
+      "patterns": ["price/amount attacker-controlled (set to 0 or negative)",
+                   "quantity manipulation (negative qty, integer overflow)",
+                   "coupon/discount reuse or stacking",
+                   "currency / decimal-precision manipulation"],
+      "params": ["price", "amount", "total", "money", "qty", "quantity",
+                 "coupon", "coupon_code", "discount", "pay_amount", "fee"]
+    },
+    "auth_bypass": {
+      "parent": "auth_bypass", "cases": 15, "severity": "critical",
+      "patterns": ["signature/timestamp check replayable or forgeable (sign, ts)",
+                   "state/step flag trusts the client (status=paid, verified=1)"],
+      "params": ["sign", "signature", "timestamp", "ts", "nonce", "status",
+                 "state", "verified", "step"]
+    }
+  }
+}
