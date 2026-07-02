@@ -551,3 +551,136 @@ def test_fetchhttp_returns_status0_stub_on_network_failure(monkeypatch):
     monkeypatch.setattr(_http, "fetch", dead_fetch)
     resp = asyncio.run(FetchHTTP().get("http://unreachable/"))
     assert resp.status == 0 and resp.body == ""
+
+
+# --- open redirect (fresh-random-host re-test) ---
+
+def _oredir_param_driven(m, url, h):
+    # Redirects (302 Location) to whatever host the parameter names.
+    return HttpResp(302, {"location": _injected(url)}, "", url)
+
+
+def test_open_redirect_param_driven_is_submittable():
+    f = _run1({"vuln_type": "open_redirect:next", "url": "http://t/r?next=x",
+               "parameter": "next"}, _oredir_param_driven)
+    assert f["submittable"] and f["validation_confidence"] >= 0.8
+
+
+def test_open_redirect_body_reflection_only_is_lead():
+    # Value echoed in the body, but no actual redirect -> not a real open redirect.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        f"<p>redirecting to {_injected(url)}</p>", url)
+    f = _run1({"vuln_type": "open_redirect:next", "url": "http://t/r?next=x",
+               "parameter": "next"}, resp)
+    assert not f["submittable"]
+
+
+def test_open_redirect_hardcoded_target_is_lead():
+    # Always bounces to its own host regardless of the param -> not attacker-driven.
+    def resp(m, url, h):
+        return HttpResp(302, {"location": "https://t/home"}, "", url)
+    f = _run1({"vuln_type": "open_redirect:next", "url": "http://t/r?next=x",
+               "parameter": "next"}, resp)
+    assert not f["submittable"]
+
+
+def test_open_redirect_gesture_gated_js_is_lead():
+    # location.href assignment inside a click handler -> safe interstitial.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        f"<a onclick=\"location.href='{_injected(url)}'\">go</a>", url)
+    f = _run1({"vuln_type": "open_redirect:next", "url": "http://t/r?next=x",
+               "parameter": "next"}, resp)
+    assert not f["submittable"]
+
+
+def test_open_redirect_missing_parameter_is_lead():
+    f = _run1({"vuln_type": "open_redirect", "url": "http://t/r"}, _oredir_param_driven)
+    assert not f["submittable"]
+
+
+# --- graphql (independent introspection re-query) ---
+
+def _graphql_canonical(m, url, h):
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"queryType":{"name":"Query"},'
+                    '"types":[{"name":"User","kind":"OBJECT"}]}}}', url)
+
+
+def test_graphql_introspection_canonical_is_submittable():
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              _graphql_canonical)
+    assert f["submittable"] and f["validation_confidence"] >= 0.7
+
+
+def test_graphql_generic_json_nesting_schema_is_lead():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"data":{"__schema":{"types":["invoices","customers"]}}}', url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
+def test_graphql_introspection_disabled_is_lead():
+    def resp(m, url, h):
+        return HttpResp(400, {"content-type": "application/json"},
+                        '{"errors":[{"message":"introspection is disabled"}]}', url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
+def test_graphql_html_mentioning_schema_is_lead():
+    # HTML body containing the word __schema -> content-type guard rejects it.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        "<html>__schema types User Query</html>", url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
+def test_graphql_ide_live_markup_is_submittable():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        '<html><div id="graphiql"></div></html>', url)
+    f = _run1({"vuln_type": "graphql_ide:/graphql", "url": "http://t/graphql"}, resp)
+    assert f["submittable"]
+
+
+def test_graphql_ide_prose_only_is_lead():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html"},
+                        "<html><p>we retired our GraphiQL explorer</p></html>", url)
+    f = _run1({"vuln_type": "graphql_ide:/graphql", "url": "http://t/graphql"}, resp)
+    assert not f["submittable"]
+
+
+# --- cmdi timing-only structural veto (defense-in-depth) ---
+
+def test_submittable_ok_vetoes_timing_only_rce():
+    from core.swarm_validation import _submittable_ok
+    # strict class: only reflection/oob-confirmed retests may be submittable
+    assert _submittable_ok({"vuln_type": "rce:cmdi:id",
+                            "retest_type": "reflection_confirmed"}) is True
+    assert _submittable_ok({"vuln_type": "cmdi", "retest_type": "oob_confirmed"}) is True
+    assert _submittable_ok({"vuln_type": "rce:cmdi:id",
+                            "retest_type": "timing_only"}) is False
+    assert _submittable_ok({"vuln_type": "rce:cmdi:id"}) is False   # unstamped
+    # non-strict classes are unaffected
+    assert _submittable_ok({"vuln_type": "xss_text:q"}) is True
+    assert _submittable_ok({"vuln_type": "open_redirect:next"}) is True
+
+
+def test_cmdi_non_reproducible_stays_lead_even_at_low_threshold():
+    # Native path re-runs the real worker against an unreachable host -> not
+    # reproduced, retest_type stamped, and NOT submittable even at min_confidence 0.01.
+    def resp(m, url, h):
+        return HttpResp(200, {}, "x", url)
+    out = asyncio.run(validate_findings(
+        [{"vuln_type": "rce:cmdi:id", "url": "http://127.0.0.1:9/x?id=1",
+          "parameter": "id"}], fetch=_fetch_returning(resp), min_confidence=0.01))
+    assert out[0]["submittable"] is False
+    assert out[0].get("retest_type") == "not_reproduced"

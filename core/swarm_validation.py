@@ -451,11 +451,14 @@ async def _recheck_cmdi(finding, fetch, timeout):
     fs = fs or []
     if any("cmdi" in str(f.get("vuln_type", "")) and str(f.get("severity")) == "critical"
            for f in fs):
+        finding["retest_type"] = "reflection_confirmed"
         return True, 0.85, ("command injection reproduced with EXECUTED command output "
                             "(marker echoed) — not timing-only")
     if any("cmdi" in str(f.get("vuln_type", "")) for f in fs):
+        finding["retest_type"] = "timing_only"
         return False, 0.3, ("only a timing-based signal reproduced (no executed output) "
                             "— a tarpit can fake this; manual corroboration needed (lead)")
+    finding["retest_type"] = "not_reproduced"
     return False, 0.2, "not reproduced on re-run"
 
 
@@ -519,6 +522,105 @@ async def _recheck_idor(finding, fetch, timeout, bola_config):
     return False, 0.2, "two-account replay did not confirm cross-user access"
 
 
+async def _recheck_open_redirect(finding, fetch, timeout):
+    """Confirm an open redirect (CWE-601) by injecting a FRESH random attacker host
+    into the redirect parameter and requiring the server to actually REDIRECT there.
+
+    Independence: the host is one the server has NEVER seen (secrets.token_hex), so a
+    hardcoded redirect or a body-echoed constant can't reproduce it — only genuine
+    parameter-driven control can. Detection is single-sourced from the worker's
+    ``detect_redirect_to`` (3xx Location / auto meta-refresh / load-time JS, never a
+    click-handler reflection). A benign SAME-HOST control must NOT resolve to the
+    fresh host, proving the redirect target tracks our input rather than being fixed.
+    GET-only, non-destructive."""
+    import secrets
+    from core.swarm_workers.vuln._http import add_query
+    from core.swarm_workers.vuln.open_redirect import _host_of, detect_redirect_to
+    param = finding.get("parameter")
+    url = finding.get("url") or ""
+    if not (param and url):
+        return False, 0.0, "open-redirect finding missing url/parameter — can't re-test"
+    host = f"viper-oredir-{secrets.token_hex(6)}.example"
+    hit = None
+    for payload in (f"https://{host}/x", f"//{host}"):   # absolute then scheme-relative
+        r = await fetch("GET", add_query(url, param, payload), timeout=timeout,
+                        follow_redirects=False)
+        if r is None:
+            continue
+        hit = detect_redirect_to(r, host)
+        if hit:
+            break
+    if not hit:
+        return False, 0.2, ("fresh random attacker host is not the redirect target — "
+                            "no parameter-driven redirect (lead)")
+    channel, evidence = hit
+    # Benign control: a SAME-HOST value must not make the fresh host the target. If
+    # it does, the redirect isn't driven by our input (fixed/echoed) -> lead.
+    own = _host_of(url) or "example.com"
+    ctrl = await fetch("GET", add_query(url, param, f"https://{own}/ok"),
+                       timeout=timeout, follow_redirects=False)
+    if ctrl is not None and detect_redirect_to(ctrl, host):
+        return False, 0.2, ("redirect target does not track the parameter value "
+                            "(fixed/echoed) — not attacker-controlled (lead)")
+    conf = 0.85 if channel == "location_header" else 0.75
+    return True, conf, (f"parameter '{param}' redirects to a fresh random attacker host "
+                        f"via {channel} ({evidence[:80]}), absent under a benign control "
+                        f"— attacker-controlled open redirect")
+
+
+async def _recheck_graphql(finding, fetch, timeout):
+    """Confirm GraphQL exposure by an INDEPENDENT re-query (the worker only fetched).
+
+    Introspection: re-POST the canonical minimal introspection query and require the
+    response to be JSON that the worker's own ``_is_graphql_schema`` predicate accepts
+    as GraphQL-canonical (not a generic JSON API that merely nests ``__schema``). IDE:
+    re-GET and re-match the live-IDE bootstrap markers. Reusing the worker's predicates
+    keeps one source of truth. ``graphql_endpoint`` (introspection blocked, severity
+    info) has no impact to confirm -> stays a lead. Read-only introspection only."""
+    import json
+    from core.swarm_workers.vuln.graphql import (
+        _IDE_LIVE_MARKERS, _INTROSPECTION_Q, _is_graphql_schema,
+    )
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    head = (finding.get("vuln_type") or "").lower().split(":")[0]
+    if head == "graphql_ide":
+        r = await fetch("GET", url, timeout=timeout)
+        if r is None or not (200 <= getattr(r, "status", 0) < 300):
+            return False, 0.2, "IDE url no longer serves 2xx (lead)"
+        body = getattr(r, "body", "") or ""
+        ctype = (getattr(r, "headers", {}) or {}).get("content-type", "")
+        if ctype and "html" not in ctype.lower():
+            return False, 0.2, "IDE endpoint no longer HTML (lead)"
+        m = _IDE_LIVE_MARKERS.search(body)
+        if m:
+            return True, 0.7, (f"live GraphQL IDE bootstrap marker reproduced on re-fetch "
+                               f"({m.group(0)[:60]!r})")
+        return False, 0.2, "no live-IDE bootstrap marker on re-fetch (prose mention, lead)"
+    # introspection (or generic graphql head): re-run introspection ourselves.
+    r = await fetch("POST", url, headers={"Content-Type": "application/json"},
+                    body=_INTROSPECTION_Q.encode("utf-8"), timeout=timeout,
+                    follow_redirects=False)
+    if r is None:
+        return False, 0.0, "introspection re-query failed"
+    ctype = (getattr(r, "headers", {}) or {}).get("content-type", "")
+    if ctype and "json" not in ctype.lower():
+        return False, 0.2, "introspection response is not JSON — not a GraphQL schema (lead)"
+    try:
+        data = json.loads(getattr(r, "body", "") or "")
+    except (ValueError, TypeError):
+        return False, 0.2, "introspection response is not valid JSON (lead)"
+    schema_obj = ((data or {}).get("data", {}) or {}).get("__schema") or {}
+    types = schema_obj.get("types") if isinstance(schema_obj, dict) else None
+    types = types or []
+    if types and _is_graphql_schema(schema_obj, types):
+        return True, 0.7, (f"independent introspection re-query returned a canonical "
+                           f"GraphQL schema ({len(types)} types)")
+    return False, 0.2, ("no canonical GraphQL schema from an independent introspection "
+                        "query — introspection disabled or not GraphQL (lead)")
+
+
 async def _reconfirm(finding: dict, fetch, timeout: float,
                      bola_config=None, oob_store=None) -> Tuple[bool, float, str]:
     """Independently re-test a swarm finding by its OWN shape (fresh request).
@@ -545,6 +647,9 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
             hit = False
         if hit:
             n = len(oob_store.interactions_for(oob_token))
+            # An out-of-band callback is the strongest confirmation there is — mark it
+            # so the strict-retest classes (cmdi/rce) accept it as trustworthy proof.
+            finding["retest_type"] = "oob_confirmed"
             return True, 0.95, (f"confirmed via out-of-band interaction: canary "
                                 f"{oob_token} received {n} callback(s)")
         return False, 0.3, ("out-of-band payload fired but no interaction observed "
@@ -675,6 +780,10 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
     # when two sessions are configured; otherwise stay a lead.
     if head == "idor":
         return await _recheck_idor(finding, fetch, timeout, bola_config)
+    if head == "open_redirect":
+        return await _recheck_open_redirect(finding, fetch, timeout)
+    if head.startswith("graphql"):
+        return await _recheck_graphql(finding, fetch, timeout)
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)
@@ -802,11 +911,40 @@ async def validate_findings(
         g["validation_confidence"] = round(float(conf), 3)
         g["validation_reason"] = reason
         g["submittable"] = bool(ok) and float(conf) >= min_confidence
+        # Defense-in-depth (native gate path only): for classes where a timing-only
+        # signal is not trustworthy — a tarpit or a load spike can fake a delay — an
+        # EXECUTED-output reflection or an out-of-band interaction is REQUIRED before
+        # a finding may be submittable, regardless of how min_confidence is tuned.
+        # This makes "timing-only RCE can never be submittable" a structural
+        # guarantee, not a numeric-threshold accident. (An injected custom validator
+        # is an explicit operator override and is trusted as-is.)
+        if g["submittable"] and validator is None and not _submittable_ok(g):
+            g["submittable"] = False
+            g["validation_reason"] = (reason + " | blocked: a timing-only signal is "
+                                      "not submittable for this class (needs executed "
+                                      "output or an out-of-band callback)")
         logger.debug("validate %s -> validated=%s conf=%.2f submittable=%s",
                      vt, g["validated"], g["validation_confidence"], g["submittable"])
         return g
 
     return list(await asyncio.gather(*[_validate_one(f) for f in findings]))
+
+
+# Classes where a NON-orthogonal (timing-only) re-test must NEVER be enough to
+# submit: a delay can be faked by a tarpit or a transient load spike, so only an
+# EXECUTED-output reflection or an out-of-band interaction is trustworthy.
+_STRICT_RETEST_CLASSES = {"cmdi", "rce", "command_injection"}
+_TRUSTED_RETESTS = {"reflection_confirmed", "oob_confirmed"}
+
+
+def _submittable_ok(finding: dict) -> bool:
+    """Structural veto for the strict-retest classes: a cmdi/rce finding may only be
+    submittable when its recheck was reflection- or OOB-confirmed (retest_type),
+    never on a timing-only signal — no matter the confidence. Other classes pass."""
+    head = (finding.get("vuln_type") or finding.get("type") or "").lower().split(":")[0]
+    if head in _STRICT_RETEST_CLASSES:
+        return finding.get("retest_type") in _TRUSTED_RETESTS
+    return True
 
 
 def partition(findings: List[dict]) -> Tuple[List[dict], List[dict]]:

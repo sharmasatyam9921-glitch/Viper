@@ -127,20 +127,26 @@ def _js_assignment_is_load_time(body: str, match: "re.Match[str]") -> bool:
     return _JS_GESTURE_RE.search(ctx) is None
 
 
-def _detect(resp: HttpResp) -> Optional[tuple[str, str]]:
-    """Return (channel, evidence_value) if the response redirects to attacker.
+def detect_redirect_to(resp: HttpResp, host: str) -> Optional[tuple[str, str]]:
+    """Return (channel, evidence_value) if `resp` actually REDIRECTS to `host`.
 
-    A finding requires the response to actually REDIRECT to the attacker host —
-    not merely reflect the URL somewhere in the body. So each channel is gated
-    on real redirect behavior: a 3xx Location, an auto-firing meta-refresh, or a
-    load-time JS assignment (never a click-handler reflection).
+    Host-parametrized so the same detection logic serves two callers: the worker
+    (which passes the fixed ``_ATTACKER_HOST``) and the validation gate (which
+    passes a FRESH random host the server has never seen, so a hardcoded/echoed
+    constant can't be mistaken for a parameter-driven redirect). A finding
+    requires a REAL redirect to `host` — not a mere reflection in the body — so
+    each channel is gated on redirect behavior: a 3xx Location, an auto-firing
+    meta-refresh, or a load-time JS assignment (never a click-handler reflection).
     """
+    host = (host or "").lower()
+    if not host:
+        return None
     # 1) Location header — only honor it on a real redirect status (3xx). A
     #    200/4xx response carrying a Location is not a redirect the browser
     #    follows, so a reflected/echoed Location on a 200 is not evidence.
     if 300 <= resp.status < 400:
         loc = (resp.headers.get("location") or "").strip()
-        if loc and _points_to_attacker(loc):
+        if loc and _host_of(loc) == host:
             return ("location_header", loc)
 
     body = resp.body or ""
@@ -152,22 +158,26 @@ def _detect(resp: HttpResp) -> Optional[tuple[str, str]]:
     scan_body = _INERT_RE.sub(" ", body)
 
     # 2) HTML meta-refresh — the browser follows this automatically (no user
-    #    interaction), so a matching directive to the attacker host is a real
-    #    redirect.
+    #    interaction), so a matching directive to `host` is a real redirect.
     m = _META_RE.search(scan_body)
-    if m and _points_to_attacker(m.group(1)):
+    if m and _host_of(m.group(1)) == host:
         return ("meta_refresh", m.group(1).strip())
 
     # 3) JS location assignment — only when it executes at LOAD time. Reject
     #    assignments gated behind a user gesture (click/submit handlers): those
     #    are the safe-interstitial pattern that drove the audit false positive.
     for j in _JS_RE.finditer(scan_body):
-        if not _points_to_attacker(j.group(1)):
+        if _host_of(j.group(1)) != host:
             continue
         if _js_assignment_is_load_time(scan_body, j):
             return ("js_location", j.group(1).strip())
 
     return None
+
+
+def _detect(resp: HttpResp) -> Optional[tuple[str, str]]:
+    """Worker-side detection: does the response redirect to ``_ATTACKER_HOST``?"""
+    return detect_redirect_to(resp, _ATTACKER_HOST)
 
 
 async def run(agent: SwarmAgent) -> List[dict]:

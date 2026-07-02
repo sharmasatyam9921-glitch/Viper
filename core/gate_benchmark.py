@@ -258,6 +258,61 @@ def _s3_private(m, url, h):
                     '</Code></Error>', url)
 
 
+def _oredir_vuln(m, url, h):
+    # Parameter-driven: bounces (302 Location) to whatever host the param names —
+    # so injecting the gate's FRESH random host makes it the redirect target.
+    v = _injected(url)
+    if v.startswith("http://t/") or v.startswith("https://t/"):
+        return HttpResp(302, {"location": v}, "", url)   # benign same-host control
+    return HttpResp(302, {"location": v}, "", url)
+
+
+def _oredir_reflect(m, url, h):
+    # Reflects the value in the BODY but never actually redirects (200, no channel).
+    return HttpResp(200, {"content-type": "text/html"},
+                    f"<p>Taking you to {_injected(url)} shortly...</p>", url)
+
+
+def _oredir_fixed(m, url, h):
+    # Always bounces to its OWN dashboard, ignoring the param (not attacker-driven).
+    return HttpResp(302, {"location": "https://t/dashboard"}, "", url)
+
+
+def _oredir_gesture(m, url, h):
+    # Reflects the value into a CLICK handler — the browser only navigates after a
+    # user gesture, so it is a safe interstitial, not an auto open redirect.
+    v = _injected(url)
+    return HttpResp(200, {"content-type": "text/html"},
+                    f"<button onclick=\"location.href='{v}'\">continue</button>", url)
+
+
+def _graphql_live(m, url, h):
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"queryType":{"name":"Query"},'
+                    '"types":[{"name":"User","kind":"OBJECT"}]}}}', url)
+
+
+def _graphql_fake(m, url, h):
+    # Generic JSON API that merely nests __schema.types as plain strings — NOT GraphQL.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"types":["invoices","customers"]}}}', url)
+
+
+def _graphql_blocked(m, url, h):
+    return HttpResp(400, {"content-type": "application/json"},
+                    '{"errors":[{"message":"introspection is disabled"}]}', url)
+
+
+def _graphql_ide_live(m, url, h):
+    return HttpResp(200, {"content-type": "text/html"},
+                    '<html><body><div id="graphiql">Loading...</div></body></html>', url)
+
+
+def _graphql_ide_prose(m, url, h):
+    return HttpResp(200, {"content-type": "text/html"},
+                    "<html><p>We previously offered a GraphiQL explorer here.</p></html>", url)
+
+
 # --- the labeled benchmark -------------------------------------------------
 
 @dataclass(frozen=True)
@@ -268,6 +323,8 @@ class Scenario:
     finding: dict
     responder: object
     bola_config: dict = None
+    min_confidence: float = 0.5   # gate threshold; lowered in scenarios that prove
+                                  # a low threshold still can't leak a class
 
 
 BENCHMARK = [
@@ -396,6 +453,43 @@ BENCHMARK = [
     Scenario("web_cache_deception", "safe", "unconfirmed cache candidate",
              {"vuln_type": "web_cache_deception:/account",
               "url": "http://t/account/x.css"}, _ok),
+
+    # open_redirect — fresh random attacker host must be the real redirect target
+    Scenario("open_redirect", "vuln", "parameter-driven 302 to a fresh attacker host",
+             {"vuln_type": "open_redirect:next", "url": "http://t/redirect?next=x",
+              "parameter": "next"}, _oredir_vuln),
+    Scenario("open_redirect", "safe", "value reflected in body, no actual redirect",
+             {"vuln_type": "open_redirect:next", "url": "http://t/redirect?next=x",
+              "parameter": "next"}, _oredir_reflect),
+    Scenario("open_redirect", "safe", "hardcoded redirect ignoring the parameter",
+             {"vuln_type": "open_redirect:next", "url": "http://t/redirect?next=x",
+              "parameter": "next"}, _oredir_fixed),
+    Scenario("open_redirect", "safe", "gesture-gated JS assignment (interstitial)",
+             {"vuln_type": "open_redirect:next", "url": "http://t/redirect?next=x",
+              "parameter": "next"}, _oredir_gesture),
+
+    # graphql — independent introspection re-query must return a canonical schema
+    Scenario("graphql", "vuln", "introspection returns a canonical GraphQL schema",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_live),
+    Scenario("graphql", "safe", "generic JSON nesting __schema as plain strings",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_fake),
+    Scenario("graphql", "safe", "introspection disabled (errors)",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_blocked),
+    Scenario("graphql", "vuln", "live GraphiQL IDE bootstrap markup",
+             {"vuln_type": "graphql_ide:/graphql", "url": "http://t/graphql"},
+             _graphql_ide_live),
+    Scenario("graphql", "safe", "prose merely mentioning GraphiQL",
+             {"vuln_type": "graphql_ide:/graphql", "url": "http://t/graphql"},
+             _graphql_ide_prose),
+
+    # cmdi defense-in-depth — a non-reproducible RCE must stay a lead EVEN when the
+    # operator lowers the confidence threshold (structural, not a threshold accident)
+    Scenario("cmdi", "safe", "non-reproducible cmdi stays lead at min_confidence=0.05",
+             {"vuln_type": "rce:cmdi:id", "url": "http://127.0.0.1:9/x?id=1",
+              "parameter": "id"}, _ok, min_confidence=0.05),
 ]
 
 
@@ -427,7 +521,8 @@ class ClassScore:
 
 def _evaluate(sc: Scenario) -> bool:
     out = asyncio.run(validate_findings(
-        [dict(sc.finding)], fetch=_fetch(sc.responder), bola_config=sc.bola_config))
+        [dict(sc.finding)], fetch=_fetch(sc.responder), bola_config=sc.bola_config,
+        min_confidence=sc.min_confidence))
     return bool(out[0].get("submittable"))
 
 

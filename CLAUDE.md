@@ -272,7 +272,11 @@ Beyond the injection family (sqli/xss/ssti/lfi/cmdi) and exposures
 (two-account, `core/specialist/{bola,bfla}_engine.py`), **Host Header Injection**
 (`host_header.py`), **Subdomain Takeover** (`subdomain_takeover.py`, fingerprint
 + CNAME corroboration), **Web Cache Deception** (`web_cache_deception.py`,
-two-identity), **CRLF**, and **clickjacking**. `viper.py classes` lists coverage.
+two-identity), **CRLF**, **clickjacking**, **Open Redirect** (CWE-601 — the gate
+re-injects a FRESH random attacker host and requires it to be the real redirect
+target, absent under a benign control) and **GraphQL** introspection / exposed IDE
+(independent introspection re-query, canonical-schema check). `viper.py classes`
+lists coverage. The gate scorecard now covers 17 classes at precision 1.00 (0 FP).
 
 ### New core modules (since v5.0)
 
