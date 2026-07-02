@@ -31,6 +31,9 @@ python viper.py oob [start|demo]         # out-of-band interaction listener (bli
 ```
 
 Hunt flags worth knowing: `HackMode(..., oob=OOBServer, mcp_plan=[...], bola_config=..., proxy=..., validate=True)`.
+`viper.py hack <t> --burp-mcp` auto-builds an mcp_plan against an external Burp MCP
+(access-control sweep + Collaborator poll + scanner issues), merged into `--mcp-plan`
+and gate-filtered like any `mcp:*` source; two-account BOLA flags arm the sweep.
 
 ## Directory Structure
 

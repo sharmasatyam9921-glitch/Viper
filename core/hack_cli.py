@@ -113,6 +113,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Run configured external MCP tools during the hunt. Pass a "
                         "JSON array of {server,tool,arguments?} or a path to such a "
                         "file. Their output is gate-filtered like any finding.")
+    p.add_argument("--burp-mcp", nargs="?", const="burp", metavar="SERVER",
+                   help="Auto-invoke an external Burp MCP mid-hunt: the "
+                        "access-control (BOLA/IDOR/privesc) sweep, Collaborator OOB "
+                        "poll, and scanner issues. Optional value = the configured "
+                        "MCP server name (default: burp). Merged into --mcp-plan and "
+                        "gate-filtered like any external finding; if BOLA identities "
+                        "(--cookie-b + --owner-marker) are set they arm the sweep.")
 
     # --- Two-account BOLA / IDOR (specialist) -----------------------------
     # Identity A is the primary session above (--cookie / --auth-bearer /
@@ -274,6 +281,7 @@ def run_hack_cli(argv: list[str]) -> int:
               + f"; canary domain {args.oob_domain}. Blind vulns confirm on callback.",
               file=sys.stderr)
     mcp_plan = _load_mcp_plan(args)
+    mcp_plan = _merge_burp_plan(args, mcp_plan, bola_config)
     if mcp_plan and not args.quiet:
         print(f"[i] {len(mcp_plan)} external MCP tool call(s) will run in-hunt "
               "(gate-filtered).", file=sys.stderr)
@@ -514,6 +522,33 @@ def _load_mcp_plan(args) -> Optional[list]:
               file=sys.stderr)
         return None
     return plan
+
+
+def _merge_burp_plan(args, base: Optional[list],
+                     bola_config: Optional[dict]) -> Optional[list]:
+    """If --burp-mcp is set, append the Burp preset plan (access-control sweep +
+    Collaborator poll + scanner issues) to any --mcp-plan. When two-account BOLA
+    identities are configured, hand them to the sweep so it tests true cross-user
+    access control; otherwise the sweep still runs anon/self checks."""
+    server = getattr(args, "burp_mcp", None)
+    if not server:
+        return base
+    from core.mcp.burp_preset import burp_hunt_plan, merge_plan
+    identities = None
+    if bola_config:  # reuse the operator-supplied sessions (VIPER never makes accounts)
+        identities = [
+            {"name": bola_config.get("owner_name", "A"),
+             "headers": bola_config.get("owner_headers", {})},
+            {"name": bola_config.get("attacker_name", "B"),
+             "headers": bola_config.get("attacker_headers", {})},
+        ]
+    preset = burp_hunt_plan(args.target, server=server, identities=identities)
+    if not args.quiet:
+        print(f"[i] Burp MCP preset armed on server '{server}' "
+              f"({len(preset)} tool call(s)"
+              + (", 2 identities" if identities else "")
+              + "); results gate-filtered.", file=sys.stderr)
+    return merge_plan(base, preset)
 
 
 def _build_scope_reasoner(scope_file: Optional[str], db_path: str) -> Optional[ScopeReasoner]:
