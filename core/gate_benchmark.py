@@ -298,6 +298,40 @@ def _graphql_fake(m, url, h):
                     '{"data":{"__schema":{"types":["invoices","customers"]}}}', url)
 
 
+def _graphql_names_only(m, url, h):
+    # Adversarial-review FP: a generic metadata API whose __schema.types are dicts
+    # carrying only a "name" — no queryType, no canonical kind. The name-only
+    # fallback would misread this as GraphQL; the richer gate query must reject it.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"types":[{"name":"users"},{"name":"orders"},'
+                    '{"name":"products"}]}}}', url)
+
+
+def _graphql_coincidental_kind(m, url, h):
+    # A columnar/metadata API that DOES carry a "kind", but a non-GraphQL one
+    # (table/view). Must not be mistaken for the canonical __TypeKind enum.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"types":[{"name":"users","kind":"table"},'
+                    '{"name":"orders","kind":"view"}]}}}', url)
+
+
+def _graphql_kinds_no_querytype(m, url, h):
+    # Adversarial re-review: a metadata API whose type "kind" labels happen to be
+    # uppercase GraphQL enums (OBJECT/SCALAR) but with NO queryType. The kind signal
+    # alone must not confirm — GraphQL introspection always names a queryType.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"types":[{"name":"users","kind":"OBJECT"},'
+                    '{"name":"id","kind":"SCALAR"}]}}}', url)
+
+
+def _graphql_querytype_no_kind(m, url, h):
+    # Adversarial re-review: an API that nests a "queryType" key but whose types
+    # carry no canonical __TypeKind. queryType alone must not confirm.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"data":{"__schema":{"queryType":{"name":"Query"},'
+                    '"types":[{"name":"User"},{"name":"Post"}]}}}', url)
+
+
 def _graphql_blocked(m, url, h):
     return HttpResp(400, {"content-type": "application/json"},
                     '{"errors":[{"message":"introspection is disabled"}]}', url)
@@ -475,6 +509,18 @@ BENCHMARK = [
     Scenario("graphql", "safe", "generic JSON nesting __schema as plain strings",
              {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
              _graphql_fake),
+    Scenario("graphql", "safe", "metadata API: __schema.types are name-only dicts",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_names_only),
+    Scenario("graphql", "safe", "metadata API with non-GraphQL kind (table/view)",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_coincidental_kind),
+    Scenario("graphql", "safe", "canonical kinds but no queryType (kind-only spoof)",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_kinds_no_querytype),
+    Scenario("graphql", "safe", "queryType but no canonical kind (queryType-only spoof)",
+             {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+             _graphql_querytype_no_kind),
     Scenario("graphql", "safe", "introspection disabled (errors)",
              {"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
              _graphql_blocked),

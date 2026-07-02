@@ -277,6 +277,49 @@ def test_whitespace_collapse_sanitizer_not_flagged():
     assert findings == [], f"whitespace-collapse reflection wrongly flagged: {findings}"
 
 
+def test_bare_token_highlighter_reflection_not_flagged():
+    """Regression (adversarial review): a search highlighter that extracts and
+    re-displays the LAST whitespace/;-delimited token echoes the BARE marker (not
+    the whole payload), slipping past the injected-value strip in
+    _executed_not_reflected. The inert-marker reflection guard sends the marker as
+    benign, metachar-free data and catches that the endpoint echoes it verbatim."""
+    import re as _re
+    from urllib.parse import urlsplit, parse_qs, unquote_plus
+
+    async def fake(method, url, **kw):
+        q = parse_qs(urlsplit(url).query)
+        val = unquote_plus(next((v[0] for v in q.values() if v), ""))
+        # highlight only the LAST token, split on shell separators / whitespace
+        last = _re.split(r"[;\s|&`]+", val)[-1] if val else ""
+        return _resp(body=f"<p>Showing results for <mark>{last}</mark></p>")
+
+    findings = _run(fake)
+    assert findings == [], f"bare-token reflection wrongly flagged as RCE: {findings}"
+
+
+def test_metacharacter_gated_reflection_not_flagged():
+    """Regression (adversarial re-review): an endpoint that echoes the extracted
+    marker ONLY when a shell separator is present (so the plain-space inert probe
+    sees nothing) but never executes. The second inert probe ';true <marker>'
+    carries a metacharacter yet cannot emit the marker, exposing the reflection."""
+    import re as _re
+    from urllib.parse import urlsplit, parse_qs, unquote_plus
+
+    _MARK = _re.compile(r"CMDI[0-9a-f]{8}")
+
+    async def fake(method, url, **kw):
+        q = parse_qs(urlsplit(url).query)
+        val = unquote_plus(next((v[0] for v in q.values() if v), ""))
+        if _re.search(r"[;|&`]", val):           # reflects only when a metachar is seen
+            m = _MARK.search(val)
+            if m:
+                return _resp(body=f"Extracted token: {m.group(0)}")
+        return _resp(body="Control: OK")
+
+    findings = _run(fake)
+    assert findings == [], f"metachar-gated reflection wrongly flagged as RCE: {findings}"
+
+
 if __name__ == "__main__":
     test_registered()
     test_marker_reflection_true_positive()

@@ -568,19 +568,32 @@ async def _recheck_open_redirect(finding, fetch, timeout):
                         f"— attacker-controlled open redirect")
 
 
-async def _recheck_graphql(finding, fetch, timeout):
-    """Confirm GraphQL exposure by an INDEPENDENT re-query (the worker only fetched).
+# A RICHER introspection query than the worker's name-only projection: it asks for
+# queryType and each type's `kind`. A real GraphQL server answers with a queryType
+# name and canonical `kind` enums; a generic JSON API that merely nests
+# {"__schema":{"types":[{"name":...}]}} cannot conjure these on demand — so the gate
+# is a genuinely STRONGER, orthogonal confirmation than the worker.
+_GATE_INTROSPECTION_Q = ('{"query":"{ __schema { queryType { name } '
+                         'types { name kind } } }"}')
+# The canonical GraphQL __TypeKind enum. A metadata API using kind="table"/"view"
+# fails this, so a coincidental {"name":...,"kind":...} blob is not mistaken for GraphQL.
+_GQL_TYPE_KINDS = {"SCALAR", "OBJECT", "INTERFACE", "UNION", "ENUM",
+                   "INPUT_OBJECT", "LIST", "NON_NULL"}
 
-    Introspection: re-POST the canonical minimal introspection query and require the
-    response to be JSON that the worker's own ``_is_graphql_schema`` predicate accepts
-    as GraphQL-canonical (not a generic JSON API that merely nests ``__schema``). IDE:
-    re-GET and re-match the live-IDE bootstrap markers. Reusing the worker's predicates
-    keeps one source of truth. ``graphql_endpoint`` (introspection blocked, severity
-    info) has no impact to confirm -> stays a lead. Read-only introspection only."""
+
+async def _recheck_graphql(finding, fetch, timeout):
+    """Confirm GraphQL exposure by an INDEPENDENT, STRONGER re-query.
+
+    Introspection: issue a richer query than the worker's minimal one — asking for
+    queryType and each type's ``kind`` — and require a canonical GraphQL signal
+    (a queryType name, or >=2 types carrying a canonical ``__TypeKind`` enum). We
+    deliberately do NOT reuse the worker's name-only fallback: a generic metadata
+    API can coincidentally return ``{"__schema":{"types":[{"name":...}]}}``, so
+    name-only is not proof. IDE: re-GET and re-match the live-IDE bootstrap markers.
+    ``graphql_endpoint`` (introspection blocked, severity info) has no impact to
+    confirm -> stays a lead. Read-only introspection only."""
     import json
-    from core.swarm_workers.vuln.graphql import (
-        _IDE_LIVE_MARKERS, _INTROSPECTION_Q, _is_graphql_schema,
-    )
+    from core.swarm_workers.vuln.graphql import _IDE_LIVE_MARKERS
     url = finding.get("url") or ""
     if not url:
         return False, 0.0, "no url to re-test"
@@ -598,9 +611,9 @@ async def _recheck_graphql(finding, fetch, timeout):
             return True, 0.7, (f"live GraphQL IDE bootstrap marker reproduced on re-fetch "
                                f"({m.group(0)[:60]!r})")
         return False, 0.2, "no live-IDE bootstrap marker on re-fetch (prose mention, lead)"
-    # introspection (or generic graphql head): re-run introspection ourselves.
+    # introspection (or generic graphql head): re-run a RICHER introspection query.
     r = await fetch("POST", url, headers={"Content-Type": "application/json"},
-                    body=_INTROSPECTION_Q.encode("utf-8"), timeout=timeout,
+                    body=_GATE_INTROSPECTION_Q.encode("utf-8"), timeout=timeout,
                     follow_redirects=False)
     if r is None:
         return False, 0.0, "introspection re-query failed"
@@ -612,13 +625,31 @@ async def _recheck_graphql(finding, fetch, timeout):
     except (ValueError, TypeError):
         return False, 0.2, "introspection response is not valid JSON (lead)"
     schema_obj = ((data or {}).get("data", {}) or {}).get("__schema") or {}
-    types = schema_obj.get("types") if isinstance(schema_obj, dict) else None
-    types = types or []
-    if types and _is_graphql_schema(schema_obj, types):
-        return True, 0.7, (f"independent introspection re-query returned a canonical "
-                           f"GraphQL schema ({len(types)} types)")
-    return False, 0.2, ("no canonical GraphQL schema from an independent introspection "
-                        "query — introspection disabled or not GraphQL (lead)")
+    if not isinstance(schema_obj, dict):
+        return False, 0.2, "no __schema object — not GraphQL introspection (lead)"
+    types = schema_obj.get("types") or []
+    qt = schema_obj.get("queryType")
+    has_query_type = isinstance(qt, dict) and bool(qt.get("name"))
+    canonical_kinds = sum(
+        1 for t in types
+        if isinstance(t, dict) and str(t.get("kind", "")).upper() in _GQL_TYPE_KINDS)
+    # Require BOTH GraphQL-specific signals together: (1) queryType names the root
+    # Query type — a concept a REST/metadata API has no reason to emit under
+    # data.__schema — AND (2) at least one type carrying a canonical __TypeKind enum.
+    # Either alone is spoofable by a JSON blob that coincidentally reuses one shape
+    # (a schema-listing API using an "OBJECT"/"SCALAR" label, or one that nests a
+    # "queryType" key); together they mean the endpoint actually answered a GraphQL
+    # introspection query with a genuine __Schema result. Every compliant GraphQL
+    # server with introspection enabled returns both for our query, so recall holds.
+    strong = has_query_type and canonical_kinds >= 1
+    if types and strong:
+        return True, 0.7, (f"independent introspection re-query returned a genuine GraphQL "
+                           f"__Schema: named queryType + {canonical_kinds} canonical "
+                           f"__TypeKind(s) across {len(types)} types")
+    return False, 0.2, ("introspection query did not return a genuine GraphQL __Schema "
+                        "(needs a named queryType AND a canonical __TypeKind) — "
+                        "introspection disabled, or a generic JSON endpoint that merely "
+                        "nests __schema (lead)")
 
 
 async def _reconfirm(finding: dict, fetch, timeout: float,

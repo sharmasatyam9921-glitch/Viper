@@ -150,6 +150,38 @@ def _executed_not_reflected(body: str, marker: str, injected_value: str) -> bool
     return marker in nows
 
 
+def _reflects_bare_marker(body: str, marker: str, inert_value: str) -> bool:
+    """True if the server echoes the BARE marker as a standalone token.
+
+    ``inert_value`` carries the marker inside a benign, space-separated value with
+    NO shell metacharacter, so nothing can execute — the marker can only appear by
+    being reflected. If it survives after stripping every reflected copy of the
+    whole inert value, the endpoint echoes the marker on its own: a search
+    highlighter, a breadcrumb, a "you searched for X" banner that extracts and
+    re-displays a single token. The strip in :func:`_executed_not_reflected` only
+    removes the WHOLE injected value and the ``echo MARKER`` command, so such a
+    bare-token reflection would otherwise be misread as executed output. When this
+    fires, the echo-based signal is a reflection artifact, not proof of execution.
+    """
+    if not body or marker not in body:
+        return False
+    variants = {
+        inert_value,
+        urllib.parse.quote(inert_value, safe=""),
+        urllib.parse.quote_plus(inert_value),
+        inert_value.replace(" ", "+"),
+        inert_value.replace(" ", "%20"),
+    }
+    stripped = body
+    for v in variants:
+        if v:
+            stripped = stripped.replace(v, "")
+    if marker not in stripped:
+        return False
+    nows = re.sub(r"\s+", "", stripped)
+    return marker in nows
+
+
 # Clock seam: real time in production; tests patch this to a virtual clock so the
 # timing logic can be exercised without real sleeps (and without touching the
 # asyncio event loop's own time.monotonic).
@@ -197,6 +229,25 @@ async def run(agent: SwarmAgent) -> List[dict]:
         if marker in (control.body or ""):
             continue  # marker leaks without injection → no signal
 
+        # Reflection guard: probe with the marker as data that CANNOT execute to
+        # emit it, then check whether the BARE marker comes back (a search
+        # highlighter / breadcrumb echoing a standalone token would slip past the
+        # injected-value strip and look like executed output). Two shapes:
+        #   1. a plain benign value with NO metacharacter — catches endpoints that
+        #      reflect any input token;
+        #   2. behind a shell separator with a NO-OUTPUT command (`;true MARKER`, and
+        #      `true` ignores its args) — catches endpoints that only reflect when a
+        #      metacharacter is present, yet still cannot emit the marker by running.
+        # If either surfaces the bare marker, the echo signal is a reflection, not
+        # execution, so skip it and rely on timing/OOB (differential, un-spoofable).
+        reflects_marker = False
+        for inert_value in (f"{_CONTROL_VALUE} {marker}", f";true {marker}"):
+            inert = await fetch("GET", add_query(url, param, inert_value), timeout=timeout)
+            if inert is not None and _reflects_bare_marker(inert.body or "", marker,
+                                                           inert_value):
+                reflects_marker = True
+                break
+
         # --- Marker reflection (high confidence) ---------------------------
         reflected = False
         for payload in _echo_payloads(marker):
@@ -207,8 +258,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 continue
             # The marker must appear as EXECUTED OUTPUT, not as a reflection of
             # the payload itself (query strings get echoed into og:url/canonical
-            # tags all the time — that is NOT command execution).
-            if _executed_not_reflected(resp.body, marker, injected_value):
+            # tags all the time — that is NOT command execution). Also skip when the
+            # endpoint reflects the bare marker as a standalone token (see above).
+            if not reflects_marker and _executed_not_reflected(resp.body, marker, injected_value):
                 findings.append({
                     "type": "command_injection",
                     "vuln_type": f"rce:cmdi:{param}",

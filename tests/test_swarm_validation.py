@@ -623,6 +623,53 @@ def test_graphql_generic_json_nesting_schema_is_lead():
     assert not f["submittable"]
 
 
+def test_graphql_name_only_dicts_is_lead():
+    # Adversarial-review FP: __schema.types are dicts with ONLY a name (no queryType,
+    # no canonical kind) — a generic metadata API, not GraphQL. Must stay a lead.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"data":{"__schema":{"types":[{"name":"users"},'
+                        '{"name":"orders"},{"name":"products"}]}}}', url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
+def test_graphql_non_graphql_kind_is_lead():
+    # A metadata API with a "kind" that is NOT a GraphQL __TypeKind enum (table/view).
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"data":{"__schema":{"types":[{"name":"users","kind":"table"},'
+                        '{"name":"orders","kind":"view"}]}}}', url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
+def test_graphql_canonical_kinds_without_querytype_is_lead():
+    # Adversarial re-review: canonical-looking kinds (OBJECT/SCALAR) but NO queryType.
+    # A real GraphQL introspection always names a queryType, so kind-alone is a lead.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"data":{"__schema":{"types":[{"name":"User","kind":"OBJECT"},'
+                        '{"name":"ID","kind":"SCALAR"}]}}}', url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
+def test_graphql_querytype_without_canonical_kind_is_lead():
+    # A JSON blob that nests a "queryType" key but whose types have no canonical
+    # __TypeKind — queryType alone is not proof.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"data":{"__schema":{"queryType":{"name":"Query"},'
+                        '"types":[{"name":"User"},{"name":"Post"}]}}}', url)
+    f = _run1({"vuln_type": "graphql_introspection:/graphql", "url": "http://t/graphql"},
+              resp)
+    assert not f["submittable"]
+
+
 def test_graphql_introspection_disabled_is_lead():
     def resp(m, url, h):
         return HttpResp(400, {"content-type": "application/json"},
