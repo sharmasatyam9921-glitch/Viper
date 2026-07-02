@@ -652,6 +652,55 @@ async def _recheck_graphql(finding, fetch, timeout):
                         "nests __schema (lead)")
 
 
+async def _recheck_nosql(finding, fetch, timeout):
+    """Independently reproduce the NoSQL operator-injection AUTH BYPASS differential.
+
+    Only the login sub-class (``nosql_injection:login``) carries an un-spoofable
+    proof: a bogus credential must NOT mint a session token, while the finding's
+    operator body (e.g. ``{"email":{"$ne":null},...}``) MUST — the same
+    token-presence proof ``login_sqli`` uses. The gate re-runs both halves from a
+    fresh context, reusing the worker's own ``_has_token`` predicate so detection is
+    single-sourced. Login attempts only; any session is never used. Submittable iff
+    BOTH halves reproduce. The weaker query sub-class stays a lead."""
+    import json as _json
+    vt = (finding.get("vuln_type") or "").lower()
+    if ":login" not in vt:
+        return False, 0.0, ("NoSQL query-divergence candidate — no safe token-differential "
+                            "proof; manual review (lead)")
+    from core.swarm_workers.vuln.nosql_injection import _has_token
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    raw = finding.get("payload")
+    try:
+        op_body = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (ValueError, TypeError):
+        op_body = {}
+    if not isinstance(op_body, dict) or not op_body:
+        return False, 0.0, "nosql finding carries no operator login body to replay (lead)"
+
+    async def _post(body_obj):
+        try:
+            return await fetch("POST", url,
+                               headers={"Content-Type": "application/json"},
+                               body=_json.dumps(body_obj).encode(), timeout=timeout,
+                               follow_redirects=False)
+        except Exception:   # noqa: BLE001 — fail closed
+            return None
+    # Baseline discipline: a bogus credential must NOT mint a token, else the
+    # endpoint hands sessions to anyone and a token proves no injection.
+    baseline = await _post({"email": "viper_nomatch_zzz9@example.invalid",
+                            "password": "viper_wrong_zzz9"})
+    if _has_token(baseline):
+        return False, 0.2, ("login endpoint mints a token for a bogus credential too "
+                            "— not an injection signal (lead)")
+    inj = await _post(op_body)
+    if _has_token(inj):
+        return True, 0.9, ("operator-injection login body minted a session token while a "
+                           "bogus credential did not — NoSQL auth bypass reproduced (CWE-943)")
+    return False, 0.3, "operator login body did not re-mint a token on re-test (lead)"
+
+
 async def _reconfirm(finding: dict, fetch, timeout: float,
                      bola_config=None, oob_store=None) -> Tuple[bool, float, str]:
     """Independently re-test a swarm finding by its OWN shape (fresh request).
@@ -815,6 +864,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_open_redirect(finding, fetch, timeout)
     if head.startswith("graphql"):
         return await _recheck_graphql(finding, fetch, timeout)
+    if head == "nosql_injection":
+        return await _recheck_nosql(finding, fetch, timeout)
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)

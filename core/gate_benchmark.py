@@ -46,7 +46,12 @@ def _injected(url: str) -> str:
 
 
 def _fetch(responder):
-    async def fake(method, url, *, headers=None, timeout=10.0, **kw):
+    async def fake(method, url, *, headers=None, timeout=10.0, body=None, **kw):
+        # Body-aware responders (e.g. NoSQL login, which must distinguish a bogus
+        # credential from an operator body) opt in via a `wants_body` attribute;
+        # every existing responder keeps its (method, url, headers) signature.
+        if getattr(responder, "wants_body", False):
+            return responder(method, url, headers or {}, body)
         return responder(method, url, headers or {})
     return fake
 
@@ -332,6 +337,67 @@ def _graphql_querytype_no_kind(m, url, h):
                     '"types":[{"name":"User"},{"name":"Post"}]}}}', url)
 
 
+# --- clickjacking (fetch-driven; both directions offline) ---
+
+def _cj_framable(m, url, h):
+    return HttpResp(200, {"content-type": "text/html"},
+                    "<html><body>Account settings</body></html>", url)
+
+
+def _cj_xfo(m, url, h):
+    return HttpResp(200, {"content-type": "text/html", "x-frame-options": "DENY"},
+                    "<html></html>", url)
+
+
+def _cj_csp(m, url, h):
+    return HttpResp(200, {"content-type": "text/html",
+                          "content-security-policy": "frame-ancestors 'none'"},
+                    "<html></html>", url)
+
+
+def _cj_json(m, url, h):
+    return HttpResp(200, {"content-type": "application/json"}, '{"ok":true}', url)
+
+
+# --- NoSQL login auth-bypass (body-aware; token differential) ---
+
+_NOSQL_JWT = ('{"token":"eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoxfQ.'
+              + "s" * 24 + '"}')
+
+
+def _nosql_has_operator(body) -> bool:
+    raw = body.decode() if isinstance(body, (bytes, bytearray)) else (body or "")
+    return "$ne" in raw or "$gt" in raw
+
+
+def _nosql_login_vuln(m, url, h, body):
+    # Operator body mints a token; a bogus credential does not — real injection.
+    if _nosql_has_operator(body):
+        return HttpResp(200, {"content-type": "application/json"}, _NOSQL_JWT, url)
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"authentication":"failed"}', url)
+
+
+_nosql_login_vuln.wants_body = True
+
+
+def _nosql_login_promiscuous(m, url, h, body):
+    # Hands a token to ANY credential (bogus too) — baseline discipline rejects it.
+    return HttpResp(200, {"content-type": "application/json"}, _NOSQL_JWT, url)
+
+
+_nosql_login_promiscuous.wants_body = True
+
+
+def _nosql_login_safe(m, url, h, body):
+    # Never mints a token — the operator body does not reproduce a session.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"authentication":"failed"}', url)
+
+
+_nosql_login_safe.wants_body = True
+
+
 def _graphql_blocked(m, url, h):
     return HttpResp(400, {"content-type": "application/json"},
                     '{"errors":[{"message":"introspection is disabled"}]}', url)
@@ -536,6 +602,42 @@ BENCHMARK = [
     Scenario("cmdi", "safe", "non-reproducible cmdi stays lead at min_confidence=0.05",
              {"vuln_type": "rce:cmdi:id", "url": "http://127.0.0.1:9/x?id=1",
               "parameter": "id"}, _ok, min_confidence=0.05),
+
+    # clickjacking — framable HTML with no anti-framing controls (fetch-driven)
+    Scenario("clickjacking", "vuln", "HTML page, no X-Frame-Options / no CSP frame-ancestors",
+             {"vuln_type": "clickjacking_frameable:/settings", "url": "http://t/settings"},
+             _cj_framable),
+    Scenario("clickjacking", "safe", "X-Frame-Options: DENY present",
+             {"vuln_type": "clickjacking_frameable:/settings", "url": "http://t/settings"},
+             _cj_xfo),
+    Scenario("clickjacking", "safe", "CSP frame-ancestors present",
+             {"vuln_type": "clickjacking_frameable:/settings", "url": "http://t/settings"},
+             _cj_csp),
+    Scenario("clickjacking", "safe", "non-HTML (JSON) response — no framing surface",
+             {"vuln_type": "clickjacking_frameable:/api", "url": "http://t/api"}, _cj_json),
+
+    # (xxe / crlf gate branches re-run the real worker against a LIVE target, so
+    # they can't be exercised offline here without a slow dead-host connect; their
+    # behaviour is covered by their dedicated worker+gate tests — test_xxe_gate,
+    # test_crlf_gate — rather than by a scorecard row that would slow every run.)
+
+    # nosql login auth-bypass — bogus credential mints NO token, operator body DOES
+    # (body-aware responders); the weaker query sub-class must stay a lead.
+    Scenario("nosql", "vuln", "operator body mints a token, bogus does not",
+             {"vuln_type": "nosql_injection:login", "url": "http://t/api/login",
+              "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'},
+             _nosql_login_vuln),
+    Scenario("nosql", "safe", "endpoint hands a token to any credential (promiscuous)",
+             {"vuln_type": "nosql_injection:login", "url": "http://t/api/login",
+              "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'},
+             _nosql_login_promiscuous),
+    Scenario("nosql", "safe", "operator body does not mint a token",
+             {"vuln_type": "nosql_injection:login", "url": "http://t/api/login",
+              "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'},
+             _nosql_login_safe),
+    Scenario("nosql", "safe", "query-divergence candidate stays a lead",
+             {"vuln_type": "nosql_injection:query", "url": "http://t/search?q=x",
+              "parameter": "q", "payload": "[$ne]="}, _ok),
 ]
 
 

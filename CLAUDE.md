@@ -22,6 +22,7 @@ python viper.py scope import <csv|burp>   #   (offline) load an exported scope C
 python viper.py classes                  # vuln classes VIPER tests; flags gate-confirmed + OOB-capable
 python viper.py scorecard [--strict]     # per-class validation-gate precision/recall benchmark
 python viper.py verify <findings.json>   # re-confirm saved findings via the gate (no full hunt)
+python viper.py leads [findings.json]    # group non-submittable leads by why the gate demoted them
 python viper.py submissions [hunt_id]    # review gate-confirmed submission drafts
 python viper.py ledger [list|clear]      # cross-hunt duplicate-suppression ledger
 python viper.py bola <target> ...        # focused two-account BOLA/IDOR check
@@ -274,9 +275,15 @@ Beyond the injection family (sqli/xss/ssti/lfi/cmdi) and exposures
 + CNAME corroboration), **Web Cache Deception** (`web_cache_deception.py`,
 two-identity), **CRLF**, **clickjacking**, **Open Redirect** (CWE-601 — the gate
 re-injects a FRESH random attacker host and requires it to be the real redirect
-target, absent under a benign control) and **GraphQL** introspection / exposed IDE
-(independent introspection re-query, canonical-schema check). `viper.py classes`
-lists coverage. The gate scorecard now covers 17 classes at precision 1.00 (0 FP).
+target, absent under a benign control), **GraphQL** introspection / exposed IDE
+(independent introspection re-query requiring a genuine __Schema: named queryType +
+canonical __TypeKind), and **NoSQL operator-injection auth bypass** (`nosql_injection.py`
+`:login` — re-runs the token differential: a bogus credential mints no token, the
+operator body does). `viper.py classes` lists coverage; `viper.py leads` explains why
+any non-submittable finding was demoted. The scorecard is at 19 classes / precision
+1.00 / 0 FP, and `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
+re-runs every SAFE scenario across confidence thresholds + benign response
+perturbations so precision 1.00 is a guarded invariant, not a snapshot.
 
 ### New core modules (since v5.0)
 

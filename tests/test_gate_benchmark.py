@@ -27,12 +27,17 @@ def test_no_safe_responder_is_ever_submittable():
         assert cs.precision == 1.0, f"{cls} precision {cs.precision} (FPs: {cs.fps})"
 
 
+# Classes whose gate branch RE-RUNS the real worker (which needs a live target), so
+# their vulnerable direction can't be reproduced offline in the benchmark — only the
+# safe/non-reproducible direction is modeled here (their TP path is covered by their
+# own worker+gate tests: test_cmdi_*, test_xxe_gate, test_crlf_gate).
+_WORKER_RERUN_CLASSES = {"cmdi", "xxe", "crlf"}
+
+
 def test_every_vuln_class_has_a_confirmed_true_positive():
-    # each weakness class contributes at least one vuln scenario the gate confirms,
-    # except cmdi (whose offline re-test models the safe/non-reproducible direction).
     scores = run_benchmark()
     for cls, cs in scores.items():
-        if cls == "cmdi":
+        if cls in _WORKER_RERUN_CLASSES:
             continue
         assert cs.tp >= 1, f"{cls} produced no confirmed true positive"
 

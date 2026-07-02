@@ -18,7 +18,7 @@ _GATE_CONFIRMED = {
     "bola", "bola_multi", "bfla", "bfla_multi", "host_header",
     "subdomain_takeover", "access_control", "ssrf", "crlf",
     "web_cache_deception", "xxe", "clickjacking", "cloud_exposure",
-    "open_redirect", "graphql",
+    "open_redirect", "graphql", "nosql_injection",
 }
 _OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header"}
 
@@ -75,4 +75,93 @@ def run_ledger_cli(argv: List[str]) -> int:
         print(f"  [{meta.get('status','?'):<9}] x{meta.get('count',1)} "
               f"{meta.get('vuln_type','?'):<26} {meta.get('url','')}")
         print(f"      sig: {sig}")
+    return 0
+
+
+def _load_findings_for_leads(path=None) -> List[dict]:
+    """Load findings from an explicit JSON path, or the newest findings/*.json that
+    holds a list of finding dicts. Accepts a bare list or a {"findings":[...]}
+    envelope. Never raises; returns [] if nothing usable is found."""
+    import json
+    from pathlib import Path
+
+    def _dicts(d):
+        items = d.get("findings") if isinstance(d, dict) else d
+        return [f for f in items if isinstance(f, dict)] if isinstance(items, list) else []
+
+    if path:
+        try:
+            return _dicts(json.loads(Path(path).read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            return []
+    fdir = Path(__file__).resolve().parents[1] / "findings"
+    if not fdir.exists():
+        return []
+    for p in sorted(fdir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            got = _dicts(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:  # noqa: BLE001
+            continue
+        if got:
+            return got
+    return []
+
+
+def _lead_reason_bucket(reason: str) -> str:
+    """Collapse a per-finding validation_reason to a stable bucket by stripping the
+    volatile specifics (urls, numbers, quoted tokens) so leads group cleanly."""
+    import re
+    r = (reason or "").strip() or "not gate-evaluated"
+    r = re.sub(r"https?://\S+", "<url>", r)
+    r = re.sub(r"\b\d+(?:\.\d+)?\b", "N", r)
+    r = re.sub(r"'[^']*'", "'X'", r)
+    r = re.sub(r'"[^"]*"', '"X"', r)
+    return r[:110]
+
+
+def run_leads_cli(argv: List[str]) -> int:
+    """`viper.py leads [findings.json] [--show N]` — group the non-submittable
+    findings (leads) by WHY the gate demoted them. Pure read-out of the
+    (submittable, validation_reason) the gate already stamped — no network, no
+    re-test — so an operator can see what to corroborate (two sessions for BOLA, an
+    OOB listener for blind vulns) instead of guessing."""
+    import argparse
+    from collections import defaultdict
+    p = argparse.ArgumentParser(
+        prog="viper.py leads",
+        description="Group leads (non-submittable findings) by gate-failure reason")
+    p.add_argument("file", nargs="?",
+                   help="findings JSON (default: newest in findings/)")
+    p.add_argument("--show", type=int, default=3,
+                   help="example leads to list per reason (default 3)")
+    args = p.parse_args(argv)
+
+    findings = _load_findings_for_leads(args.file)
+    if not findings:
+        print("no findings found - run a hunt, or pass a findings JSON path.")
+        return 0
+    leads = [f for f in findings if not f.get("submittable")]
+    subs = len(findings) - len(leads)
+    print(f"{len(findings)} finding(s): {subs} submittable, {len(leads)} lead(s)\n")
+    if not leads:
+        print("no leads - every finding was independently gate-confirmed.")
+        return 0
+
+    groups = defaultdict(list)
+    for f in leads:
+        groups[_lead_reason_bucket(f.get("validation_reason"))].append(f)
+    for reason, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        print(f"[{len(items):>3}] {reason}")
+        for f in items[:max(0, args.show)]:
+            vt = f.get("vuln_type") or f.get("type") or "?"
+            url = f.get("url") or f.get("target") or ""
+            conf = f.get("validation_confidence")
+            ctag = f" (conf {conf})" if conf is not None else ""
+            print(f"       - {vt}{ctag}  {url}")
+        if len(items) > args.show:
+            print(f"       ... and {len(items) - args.show} more")
+        print()
+    print("Leads are candidates the gate could not INDEPENDENTLY reproduce. To promote "
+          "them: supply two sessions (--cookie-b + --owner-marker) for access-control "
+          "classes, run an OOB listener (--oob) for blind vulns, or review manually.")
     return 0

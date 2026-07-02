@@ -156,6 +156,11 @@ def main():
         from core.ops_cli import run_ledger_cli
         sys.exit(run_ledger_cli(sys.argv[2:]))
 
+    # `viper.py leads [findings.json]` — group leads by why the gate demoted them.
+    if len(sys.argv) > 1 and sys.argv[1] == "leads":
+        from core.ops_cli import run_leads_cli
+        sys.exit(run_leads_cli(sys.argv[2:]))
+
     # `viper.py verify <findings.json>` — re-confirm saved findings via the gate.
     if len(sys.argv) > 1 and sys.argv[1] == "verify":
         from core.verify_cli import run_verify_cli
