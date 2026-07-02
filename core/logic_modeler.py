@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import ssl
 import time
 import urllib.parse
@@ -37,6 +38,29 @@ class AppFlow:
             "final_url": self.final_url,
             "requires_auth": self.requires_auth,
         }
+
+
+# A reset-secret leak is a value in an explicit reset/OTP/verification CONTEXT
+# (not a bare long string — that would false-positive on per-request CSRF tokens).
+_LEAK_CTX = re.compile(
+    r'(?:reset[_-]?(?:token|code|key|link|pass\w*)|otp|one[_-]?time[_-]?(?:code|password)|'
+    r'verif\w*[_-]?code|sms[_-]?code|email[_-]?code|pin[_-]?code|'
+    r'activation[_-]?(?:code|token)|new[_-]?password|temp[_-]?password)'
+    r'["\']?\s*[:=]\s*["\']?([A-Za-z0-9_\-]{4,64})', re.I)
+_LEAK_JUNK = {"null", "none", "undefined", "true", "false", "0000", "000000", "123456"}
+
+
+def _reset_secret_leaks(real_body: str, control_body: str) -> List[str]:
+    """Secrets in a reset/OTP context present for the REAL account but absent from
+    a bogus-account control -> the leaked, account-specific reset secret. The
+    context requirement + account-specificity rule out CSRF/static tokens."""
+    out: List[str] = []
+    for m in _LEAK_CTX.finditer(real_body or ""):
+        sec = m.group(1)
+        if (sec and sec.lower() not in _LEAK_JUNK and len(sec) >= 4
+                and sec not in (control_body or "")):
+            out.append(sec)
+    return list(dict.fromkeys(out))[:3]          # dedup (order-preserving), cap
 
 
 @dataclass
@@ -86,10 +110,14 @@ class LogicModeler:
         base_url: str,
         session: Optional[Dict[str, str]] = None,
         timeout: float = 15.0,
+        reset_config: Optional[Dict[str, str]] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.session = session or {}
         self.timeout = timeout
+        # Opt-in password-reset-leak test config (operator's OWN test account):
+        # {url, param, value[, control_value]}. Empty -> the test no-ops.
+        self.reset_config = reset_config or {}
         self._ssl_ctx = ssl.create_default_context()
         self.flows: List[AppFlow] = []
         self.findings: List[LogicFinding] = []
@@ -104,6 +132,40 @@ class LogicModeler:
         from core.payload_library import get_business_logic_subclasses
         return get_business_logic_subclasses()
 
+    async def test_reset_token_leak(self) -> List[LogicFinding]:
+        """OPT-IN: detect a password-reset token/OTP echoed in the HTTP response —
+        an account-takeover bug. Runs only when reset_config = {url, param, value
+        [, control_value]} is supplied (the operator's OWN test account, so it's one
+        non-destructive request). A secret in a reset/OTP CONTEXT that appears for
+        the real account but NOT a bogus-account control is the leaked reset secret;
+        the context + account-specificity rule out per-request CSRF/static tokens."""
+        cfg = self.reset_config
+        if not (cfg.get("url") and cfg.get("param") and cfg.get("value")):
+            return []
+        url = cfg["url"] if "://" in cfg["url"] else self.base_url + "/" + cfg["url"].lstrip("/")
+        param, value = cfg["param"], cfg["value"]
+        control = cfg.get("control_value") or f"viper-nobody-{secrets.token_hex(4)}@example.invalid"
+        enc = urllib.parse.urlencode
+        findings: List[LogicFinding] = []
+        try:
+            _, real_body, _ = await self._request(url, method="POST", data=enc({param: value}))
+            _, ctrl_body, _ = await self._request(url, method="POST", data=enc({param: control}))
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("viper.logic_modeler").debug("reset-leak probe failed: %s", e)
+            return []
+        leaks = _reset_secret_leaks(real_body, ctrl_body)
+        if leaks:
+            findings.append(LogicFinding(
+                test_name="reset_token_leak", vulnerable=True, severity="critical", cvss=8.1,
+                description="Password-reset token/OTP is returned in the HTTP response. "
+                            "An attacker who triggers a reset for any account reads the "
+                            "secret directly from the response and takes the account over.",
+                evidence=f"reset response for {param}={value} carried a reset/OTP secret "
+                         f"(redacted: {leaks[0][:2]}…{leaks[0][-2:]}) absent from a "
+                         "bogus-account control request",
+                endpoint=url, payload=f"{param}={value}"))
+        return findings
+
     async def run_all(self) -> List[LogicFinding]:
         """Run all logic modeling tests."""
         # First, map application flows
@@ -115,6 +177,8 @@ class LogicModeler:
             self.test_price_manipulation,
             self.test_privilege_escalation,
         ]
+        if self.reset_config:                       # opt-in, operator-provided account
+            tests.append(self.test_reset_token_leak)
         for test in tests:
             try:
                 result = await test()
