@@ -29,8 +29,9 @@ class _Agent:
 
 
 def _server(mode: str):
-    """mode: 'vuln' (operator body mints a token, bogus does not),
-    'promiscuous' (any credential mints a token), 'safe' (never mints)."""
+    """mode: 'vuln' (match-all operator mints a token, others don't),
+    'promiscuous' (any credential mints a token), 'safe' (never mints),
+    'object' (any object-typed credential mints a token — not operator-driven)."""
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -38,8 +39,15 @@ def _server(mode: str):
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0) or 0)
             raw = self.rfile.read(n).decode("utf-8", "replace")
-            has_op = "$ne" in raw or "$gt" in raw
-            tok = True if mode == "promiscuous" else (False if mode == "safe" else has_op)
+            has_matchall = "$ne" in raw or "$gt" in raw
+            if mode == "promiscuous":
+                tok = True
+            elif mode == "safe":
+                tok = False
+            elif mode == "object":
+                tok = '":{' in raw.replace(" ", "")   # ANY object body (incl. $eq control)
+            else:                            # vuln: only match-all operators
+                tok = has_matchall
             body = _JWT if tok else _FAIL
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -86,6 +94,21 @@ def test_nosql_operator_no_token_is_gate_lead():
              "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'}
         out = asyncio.run(validate_findings([f], default_target=base))
         assert not out[0]["submittable"]
+    finally:
+        srv.shutdown()
+
+
+def test_nosql_object_session_is_gate_lead():
+    # Adversarial review: an endpoint that hands a token to ANY object-typed
+    # credential (a guest session), not driven by operator matching, must be caught
+    # by the $eq-to-bogus operator-semantics control -> lead, not submittable.
+    srv, base = _server("object")
+    try:
+        f = {"vuln_type": "nosql_injection:login", "url": base + "/api/login",
+             "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'}
+        out = asyncio.run(validate_findings([f], default_target=base))
+        assert not out[0]["submittable"]
+        assert "$eq" in out[0]["validation_reason"]
     finally:
         srv.shutdown()
 

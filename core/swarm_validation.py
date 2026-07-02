@@ -687,17 +687,30 @@ async def _recheck_nosql(finding, fetch, timeout):
                                follow_redirects=False)
         except Exception:   # noqa: BLE001 — fail closed
             return None
-    # Baseline discipline: a bogus credential must NOT mint a token, else the
+    # Baseline discipline: a bogus STRING credential must NOT mint a token, else the
     # endpoint hands sessions to anyone and a token proves no injection.
     baseline = await _post({"email": "viper_nomatch_zzz9@example.invalid",
                             "password": "viper_wrong_zzz9"})
     if _has_token(baseline):
         return False, 0.2, ("login endpoint mints a token for a bogus credential too "
                             "— not an injection signal (lead)")
+    # Operator-SEMANTICS control: an object body with the SAME shape but an $eq to a
+    # bogus value must ALSO mint no token. A genuinely injectable query runs $eq
+    # against a non-existent record and matches nothing; only the match-all operators
+    # ($ne/$gt) bypass auth. If this $eq control DOES mint a token, the session is
+    # driven by sending an object-typed credential (a guest/anon session, a code path
+    # unrelated to auth), NOT by operator matching — so it is not a confirmed bypass.
+    eq_ctrl = await _post({"email": {"$eq": "viper_nomatch_zzz9@example.invalid"},
+                           "password": {"$eq": "viper_wrong_zzz9"}})
+    if _has_token(eq_ctrl):
+        return False, 0.2, ("an $eq-to-bogus object body also mints a token — the session "
+                            "is not driven by operator matching semantics, so this is not "
+                            "a confirmed injection (lead)")
     inj = await _post(op_body)
     if _has_token(inj):
-        return True, 0.9, ("operator-injection login body minted a session token while a "
-                           "bogus credential did not — NoSQL auth bypass reproduced (CWE-943)")
+        return True, 0.9, ("a match-all operator body minted a session token while both a "
+                           "bogus string credential AND an $eq-to-bogus object body did "
+                           "not — operator-driven NoSQL auth bypass reproduced (CWE-943)")
     return False, 0.3, "operator login body did not re-mint a token on re-test (lead)"
 
 

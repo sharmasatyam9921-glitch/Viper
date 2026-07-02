@@ -398,6 +398,22 @@ def _nosql_login_safe(m, url, h, body):
 _nosql_login_safe.wants_body = True
 
 
+def _nosql_object_session(m, url, h, body):
+    # Adversarial review: hands a token to ANY object-typed credential (e.g. a guest
+    # session created for object bodies), regardless of operator matching semantics —
+    # a bogus STRING credential gets none. The $eq-to-bogus operator-semantics control
+    # must catch this: mere object-presence is not a confirmed injection.
+    raw = body.decode() if isinstance(body, (bytes, bytearray)) else (body or "")
+    # a field whose value is a JSON object (operator or not); whitespace-tolerant
+    # because the gate serializes bodies with `json.dumps` default separators.
+    minted = '":{' in raw.replace(" ", "")
+    return HttpResp(200, {"content-type": "application/json"},
+                    _NOSQL_JWT if minted else '{"authentication":"failed"}', url)
+
+
+_nosql_object_session.wants_body = True
+
+
 def _graphql_blocked(m, url, h):
     return HttpResp(400, {"content-type": "application/json"},
                     '{"errors":[{"message":"introspection is disabled"}]}', url)
@@ -635,6 +651,10 @@ BENCHMARK = [
              {"vuln_type": "nosql_injection:login", "url": "http://t/api/login",
               "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'},
              _nosql_login_safe),
+    Scenario("nosql", "safe", "token for any object body (not operator-driven)",
+             {"vuln_type": "nosql_injection:login", "url": "http://t/api/login",
+              "payload": '{"email":{"$ne":null},"password":{"$ne":null}}'},
+             _nosql_object_session),
     Scenario("nosql", "safe", "query-divergence candidate stays a lead",
              {"vuln_type": "nosql_injection:query", "url": "http://t/search?q=x",
               "parameter": "q", "payload": "[$ne]="}, _ok),
