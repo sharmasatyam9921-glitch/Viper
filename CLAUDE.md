@@ -292,6 +292,14 @@ finding was demoted. The scorecard is at 20 classes / precision 1.00 / 0 FP, and
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.
 
+Lead-only (read-only) detectors stay leads by design: **client-side prototype
+pollution** (`proto_pollution.py`, CWE-1321) statically flags a user-input source
+reaching a prototype-touching sink in the page's JS (or a versioned vulnerable merge
+lib) — confirming it needs a browser/DOM probe, and polluting server-side would be
+destructive, so it is never auto-submitted. Same principle blocks a gate write-back
+for **mass assignment** (needs a PATCH) — both surface an actionable `viper.py leads`
+reason instead of a false claim.
+
 ### New core modules (since v5.0)
 
 ```

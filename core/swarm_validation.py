@@ -977,6 +977,15 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
                             "field on a self-owned object. Confirming requires a WRITE "
                             "(PATCH the field + read back), which the read-only gate will "
                             "not perform — verify manually with your own account (lead)")
+    # Client-side prototype pollution is found by STATIC JS analysis (a user-input
+    # source reaching a prototype-touching sink). Confirming it needs a real browser
+    # to pollute and observe the DOM — the read-only gate does not drive one, and
+    # polluting server-side would be destructive — so it stays a manual-review lead.
+    if head == "prototype_pollution":
+        return False, 0.3, ("client-side prototype-pollution gadget (user-input source + "
+                            "prototype-reaching sink in the page's JS). Confirming needs a "
+                            "browser/DOM probe the read-only gate does not run — verify "
+                            "manually (lead)")
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)
