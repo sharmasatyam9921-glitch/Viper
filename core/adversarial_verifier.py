@@ -56,26 +56,48 @@ async def refute_unreproducible(
     for f in findings:
         if not f.get("submittable"):
             continue
-        reproduced = True
+        refuted = False
         for _ in range(max(1, int(rounds))):
             try:
-                ok, conf, _reason = await _reconfirm(
+                ok, conf, reason = await _reconfirm(
                     dict(f), fetch, timeout, bola_config, oob_store=oob_store)
-            except Exception as exc:   # noqa: BLE001 — a re-test error is not a refutation
+            except Exception as exc:   # noqa: BLE001 — an error is not a refutation
                 logger.debug("refutation re-test errored for %s: %s",
                              f.get("vuln_type"), exc)
-                reproduced = True      # fail OPEN: don't demote on our own error
-                break
-            if not (ok and float(conf) >= min_confidence):
-                reproduced = False
-                break
-        if not reproduced:
+                break                  # fail OPEN
+            if ok and float(conf) >= min_confidence:
+                continue               # reproduced this round — keep looking
+            # It did NOT reproduce this round. Only treat that as a refutation when the
+            # re-test actually RAN a differential and found the bug absent — never when
+            # the re-test was inconclusive (a network/rate-limit failure, an
+            # unreachable target, an executor error). An inconclusive re-test is not
+            # evidence the bug is gone, so it must not demote a real finding.
+            if _is_inconclusive(reason):
+                continue               # fail OPEN for this round
+            refuted = True
+            break
+        if refuted:
             f["submittable"] = False
             f["validated"] = False
             f["refuted"] = True
             f["validation_reason"] = ((f.get("validation_reason") or "").rstrip()
-                                      + " | REFUTED: the gate's confirmation did not "
-                                        "reproduce on an independent re-test (likely "
+                                      + " | REFUTED: an independent re-test ran but did "
+                                        "not reproduce the gate's confirmation (likely "
                                         "transient/flaky) — demoted to lead")
             demoted += 1
     return demoted
+
+
+# Reasons that mean the re-test could NOT be carried out (infrastructure/execution
+# failure), as opposed to a real "the bug is not there" verdict. A refutation requires
+# the latter — a failed re-test is inconclusive and must never demote a finding.
+_INCONCLUSIVE_MARKERS = (
+    "re-fetch failed", "re-query failed", "request failed", "no url to re-test",
+    "re-run error", "escalation error", "unavailable", "validation error",
+    "invalid format",
+)
+
+
+def _is_inconclusive(reason: Optional[str]) -> bool:
+    r = (reason or "").lower()
+    return any(m in r for m in _INCONCLUSIVE_MARKERS)

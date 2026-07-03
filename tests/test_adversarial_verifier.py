@@ -81,6 +81,19 @@ def test_refuter_fails_open_on_retest_error():
     assert n == 0 and annotated[0]["submittable"] is True
 
 
+def test_refuter_fails_open_on_inconclusive_retest():
+    # A re-test that cannot run (fetch returns None -> "re-fetch failed") is
+    # INCONCLUSIVE, not a refutation — a rate-limited / unreachable target must never
+    # demote a real finding.
+    annotated = asyncio.run(validate_findings([dict(_XSS)], fetch=_fetch(_xss_vuln)))
+    assert annotated[0]["submittable"]
+
+    async def none_fetch(*a, **k):
+        return None
+    n = asyncio.run(refute_unreproducible(annotated, fetch=none_fetch))
+    assert n == 0 and annotated[0]["submittable"] is True
+
+
 def test_oob_confirmed_finding_survives_refutation():
     from core.oob.canary import new_token
 
