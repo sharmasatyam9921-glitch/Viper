@@ -301,7 +301,16 @@ core/chain_recipes.py      Low→critical escalation correlation (submittable if
 core/prioritization.py     P1-P4 scoring (submittable + severity + gate confidence)
 core/submission_ledger.py  Cross-hunt duplicate suppression
 core/hack_mode.py          Swarm HackMode orchestrator (threads OOB + MCP + gate)
-core/{ops,verify}_cli.py    classes / ledger / verify operator CLIs
+core/attack_priors.py      Closes the evograph write->read loop: records each
+                           technique's per-hunt outcome and reorders phase dispatch
+                           so attacks that historically worked on the target's stack
+                           run first. Best-effort; never touches the gate (exploration
+                           ORDER only). Disable via profile.learn_priors = False.
+core/gate_mutations.py     Mutation/regression harness: re-runs every SAFE benchmark
+                           scenario across confidence thresholds + benign perturbations
+                           so precision 1.00 is a guarded invariant (python -m
+                           core.gate_mutations --strict).
+core/{ops,verify}_cli.py    classes / ledger / leads / verify operator CLIs
 ```
 
 ## External Tools

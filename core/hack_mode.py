@@ -260,6 +260,10 @@ class HackMode:
         )
         self._started = False
         self._stopped = False
+        # Cross-hunt attack priors (best-effort learning). Built lazily at hunt
+        # start (see _run_loop) so unit-constructing HackMode never opens the
+        # evograph DB; None until then. Never touches the validation gate.
+        self._priors = None
         # State carried into stop_conditions
         self._state: dict[str, Any] = {
             "iteration": 0,
@@ -783,6 +787,19 @@ class HackMode:
         max_iterations = self.profile.max_iterations
         total_phases = len(phases_to_run)
 
+        # Build the cross-hunt attack priors here (not __init__) so unit tests that
+        # merely construct HackMode never open the evograph DB. Best-effort: any
+        # failure leaves self._priors None and the hunt runs exactly as before. It
+        # reorders technique dispatch and records outcomes — never the gate.
+        if self._priors is None:
+            try:
+                from core.attack_priors import AttackPriors
+                self._priors = AttackPriors(
+                    enabled=bool(getattr(self.profile, "learn_priors", True)))
+                self._priors.start(self.target, [])
+            except Exception:   # noqa: BLE001 — learning must never block a hunt
+                self._priors = None
+
         # On resume: skip phases that already completed in the prior run.
         # Applies only to the FIRST iteration after a resume; subsequent
         # iterations re-run the full pipeline.
@@ -948,6 +965,13 @@ class HackMode:
         # Build payload. A targeted-expansion override scopes to just the probes
         # that escalate the seed finding; otherwise use the profile's phase set.
         phase_techniques = techniques or self.profile.workers.get(phase, [])
+        # Cross-hunt priors: run techniques that have historically succeeded against
+        # this target's detected stack first (more value inside the time budget).
+        # No-op unless an explicit ordered list exists and priors have history; the
+        # SET of techniques is never changed, so coverage is identical.
+        _tech_tokens = self._priors_tech_tokens()
+        if self._priors is not None and phase_techniques:
+            phase_techniques = self._priors.rank(phase_techniques, _tech_tokens)
         payload = {
             "target": self.target,
             "scope_reasoner": self.scope_reasoner,
@@ -980,7 +1004,34 @@ class HackMode:
         elif phase != "recon":
             payload["findings"] = list(self._state.get("findings", []))
 
-        return await coord.handle_message(payload)
+        res = await coord.handle_message(payload)
+        # Record each attempted technique's outcome (success = it produced a finding)
+        # so the next hunt of a similar stack starts smarter. Best-effort.
+        self._record_priors(phase_techniques, res, _tech_tokens)
+        return res
+
+    def _priors_tech_tokens(self) -> list[str]:
+        """Stable technology tokens from the hunt's accumulated `technology`
+        findings (recon runs before vuln, so these are populated by then)."""
+        if self._priors is None:
+            return []
+        try:
+            from core.attack_priors import tech_tokens_from_findings
+            return tech_tokens_from_findings(self._state.get("findings", []))
+        except Exception:   # noqa: BLE001
+            return []
+
+    def _record_priors(self, attempted, res, tech_tokens) -> None:
+        """Record per-technique outcomes for this phase (best-effort, never fatal)."""
+        if self._priors is None:
+            return
+        try:
+            produced = {str(f.get("technique") or "") for f in (res.findings or [])}
+            produced.discard("")
+            for t in (set(attempted or []) | produced):
+                self._priors.record(t, tech_tokens, success=t in produced)
+        except Exception:   # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Bounded finding-driven chaining (mythos-style)
