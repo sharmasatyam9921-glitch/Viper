@@ -257,11 +257,17 @@ async def fetch(
         if not ok:
             logger.debug("rate limit blocked %s %s", method, url)
             return None
-    return await asyncio.to_thread(
+    resp = await asyncio.to_thread(
         _fetch_sync, method, url,
         headers=headers, body=body, timeout=timeout,
         follow_redirects=follow_redirects, proxy=_proxy_var.get(),
     )
+    # Feed the response back so the per-host rate adapts to the target's own overload
+    # signals (429/503 -> back off; sustained success -> recover). Best-effort.
+    if rate_limit and url and resp is not None:
+        from ._rate_limit import record_response
+        await record_response(url, getattr(resp, "status", 0))
+    return resp
 
 
 def normalize_target_url(target: str) -> str:
