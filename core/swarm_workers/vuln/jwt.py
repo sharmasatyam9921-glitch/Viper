@@ -231,6 +231,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
                     "url": url,
                     "cwe": "CWE-326",
                     "confidence": 0.99,
+                    # Structured fields let the validation gate attempt a forge-accept
+                    # confirmation (opt-in, operator-supplied endpoint). Cracking the
+                    # key OFFLINE proves the key is weak, not that the SERVER accepts a
+                    # forged token — the gate closes that gap when given an endpoint.
+                    "jwt_token": tok,
+                    "jwt_key": cracked,
+                    "jwt_alg": alg,
+                    "jwt_source": cookie_name or "authorization",
                     "evidence": (
                         f"HMAC signature verified locally with key={cracked!r}. "
                         f"alg={alg}. Token can be forged with arbitrary claims. "

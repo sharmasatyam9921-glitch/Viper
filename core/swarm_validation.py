@@ -652,6 +652,76 @@ async def _recheck_graphql(finding, fetch, timeout):
                         "nests __schema (lead)")
 
 
+async def _recheck_jwt(finding, fetch, timeout):
+    """Confirm a weak-HMAC-key JWT only by proving the SERVER ACCEPTS A FORGERY.
+
+    Cracking the key offline proves the key is weak, not that the live token handler
+    verifies with it — so this stays a LEAD unless the operator supplies an in-scope
+    authed endpoint (``jwt_probe_endpoint``). Given one, the gate forges the ORIGINAL
+    token with a single added BENIGN marker claim (no identity/privilege change),
+    re-signed with the recovered key, plus a matching GARBAGE-signature control, and
+    GETs the endpoint with each. Submittable iff the forged token is accepted (2xx)
+    where the bad-signature control is rejected (401/403) — proof the server verifies
+    signatures with the weak key, so arbitrary forgery is possible (CWE-347). GET-only,
+    no privilege escalation. Non-weak-key jwt observations stay leads."""
+    vt = (finding.get("vuln_type") or "").lower()
+    if ":weak_key" not in vt or vt.endswith(("_noauth", "_sample")):
+        return False, 0.3, "jwt observation — no safe read-only auto-confirmation (lead)"
+    endpoint = (finding.get("jwt_probe_endpoint") or "").strip()
+    if not endpoint:
+        return False, 0.3, ("weak HMAC key recovered OFFLINE, but the server's acceptance "
+                            "of a forged token is unproven — supply jwt_probe_endpoint (an "
+                            "in-scope authed GET) to confirm forgeability (lead)")
+    tok = finding.get("jwt_token") or ""
+    key = finding.get("jwt_key")
+    alg = (finding.get("jwt_alg") or "").upper()
+    if not tok or key is None or alg not in ("HS256", "HS384", "HS512"):
+        return False, 0.0, "jwt finding missing token/key/alg for a forge-probe (lead)"
+    import hashlib as _hashlib
+    import hmac as _hmac
+    import json as _json
+    import secrets as _secrets
+    from core.swarm_workers.vuln.jwt import _b64url_encode, _parse_jwt
+    parsed = _parse_jwt(tok)
+    if not parsed:
+        return False, 0.0, "could not parse the original JWT to forge (lead)"
+    header, payload, _ = parsed
+    payload = dict(payload)
+    payload["viper_recheck"] = _secrets.token_hex(6)   # benign marker; no privilege change
+    digest = {"HS256": _hashlib.sha256, "HS384": _hashlib.sha384,
+              "HS512": _hashlib.sha512}[alg]
+    h_b64 = _b64url_encode(_json.dumps(header, separators=(",", ":")).encode())
+    p_b64 = _b64url_encode(_json.dumps(payload, separators=(",", ":")).encode())
+    signing_input = (h_b64 + "." + p_b64).encode("ascii")
+    good_sig = _b64url_encode(_hmac.new(key.encode("utf-8"), signing_input, digest).digest())
+    forged = f"{h_b64}.{p_b64}.{good_sig}"
+    control = f"{h_b64}.{p_b64}.{_b64url_encode(b'viper-invalid-signature')}"
+    src = (finding.get("jwt_source") or "authorization").lower()
+
+    async def _probe(token):
+        headers = {"Authorization": f"Bearer {token}"}
+        if src and src != "authorization":     # token was set as a cookie
+            headers["Cookie"] = f"{src}={token}"
+        return await fetch("GET", endpoint, headers=headers, timeout=timeout,
+                           use_session_auth=False)
+    forged_r = await _probe(forged)
+    control_r = await _probe(control)
+    if forged_r is None or control_r is None:
+        return False, 0.0, "forge-probe request failed (lead)"
+    fs = getattr(forged_r, "status", 0)
+    cs = getattr(control_r, "status", 0)
+    if 200 <= fs < 300 and cs in (401, 403):
+        return True, 0.85, (f"server ACCEPTED a token forged with the recovered key "
+                            f"(HTTP {fs}) but rejected a bad-signature control (HTTP {cs}) "
+                            "— the weak HMAC key is exploitable for JWT forgery (CWE-347)")
+    if 200 <= fs < 300 and 200 <= cs < 300:
+        return False, 0.2, ("both the forged and the bad-signature token were accepted — "
+                            "the endpoint does not verify signatures / needs no auth; not "
+                            "a weak-key forgery proof (lead)")
+    return False, 0.2, (f"forged token not accepted (HTTP {fs}) — weak key recovered but "
+                        "forgery unconfirmed at this endpoint (lead)")
+
+
 async def _recheck_nosql(finding, fetch, timeout):
     """Independently reproduce the NoSQL operator-injection AUTH BYPASS differential.
 
@@ -879,6 +949,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_graphql(finding, fetch, timeout)
     if head == "nosql_injection":
         return await _recheck_nosql(finding, fetch, timeout)
+    if head == "jwt":
+        return await _recheck_jwt(finding, fetch, timeout)
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)

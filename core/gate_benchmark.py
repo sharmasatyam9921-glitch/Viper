@@ -398,6 +398,49 @@ def _nosql_login_safe(m, url, h, body):
 _nosql_login_safe.wants_body = True
 
 
+def _mk_jwt(header: dict, payload: dict) -> str:
+    import base64 as _b64
+    import json as _j
+
+    def e(o):
+        return _b64.urlsafe_b64encode(
+            _j.dumps(o, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    return f"{e(header)}.{e(payload)}.AAAA"   # signature is irrelevant to the gate
+
+
+_JWT_KEY = "secret"
+_JWT_TOKEN = _mk_jwt({"alg": "HS256", "typ": "JWT"}, {"sub": "user1"})
+
+
+def _jwt_verifies_sig(h) -> bool:
+    """Model a server that verifies the HS256 signature with the weak key: True iff
+    the Authorization Bearer token carries a valid signature under _JWT_KEY."""
+    import base64 as _b64
+    import hashlib as _hashlib
+    import hmac as _hmac
+    auth = (h or {}).get("Authorization", "")
+    tok = auth[7:] if auth.startswith("Bearer ") else ""
+    parts = tok.split(".")
+    if len(parts) != 3:
+        return False
+    want = _b64.urlsafe_b64encode(
+        _hmac.new(_JWT_KEY.encode(), (parts[0] + "." + parts[1]).encode(),
+                  _hashlib.sha256).digest()).rstrip(b"=").decode()
+    return parts[2] == want
+
+
+def _jwt_forge_accept(m, url, h):
+    # Verifies signatures with the weak key: a weak-key-forged token is accepted, a
+    # bad-signature control is rejected — the forge-accept a real bypass produces.
+    return (HttpResp(200, {}, '{"ok":true}', url) if _jwt_verifies_sig(h)
+            else HttpResp(401, {}, "unauthorized", url))
+
+
+def _jwt_accept_all(m, url, h):
+    # Accepts ANY token (no signature verification / no auth) — forging proves nothing.
+    return HttpResp(200, {}, '{"ok":true}', url)
+
+
 def _nosql_object_session(m, url, h, body):
     # Adversarial review: hands a token to ANY object-typed credential (e.g. a guest
     # session created for object bodies), regardless of operator matching semantics —
@@ -658,6 +701,21 @@ BENCHMARK = [
     Scenario("nosql", "safe", "query-divergence candidate stays a lead",
              {"vuln_type": "nosql_injection:query", "url": "http://t/search?q=x",
               "parameter": "q", "payload": "[$ne]="}, _ok),
+
+    # jwt weak-key forge-probe — a cracked key is only submittable when an operator
+    # supplies an authed endpoint AND a forged token is accepted where a bad-sig
+    # control is rejected. No endpoint (the autonomous default) stays a lead.
+    Scenario("jwt", "vuln", "forged token accepted, bad-sig control rejected",
+             {"vuln_type": "jwt:weak_key", "url": "http://t/api/me",
+              "jwt_token": _JWT_TOKEN, "jwt_key": _JWT_KEY, "jwt_alg": "HS256",
+              "jwt_probe_endpoint": "http://t/api/me"}, _jwt_forge_accept),
+    Scenario("jwt", "safe", "weak key cracked but no probe endpoint (stays lead)",
+             {"vuln_type": "jwt:weak_key", "url": "http://t/", "jwt_token": _JWT_TOKEN,
+              "jwt_key": _JWT_KEY, "jwt_alg": "HS256"}, _ok),
+    Scenario("jwt", "safe", "endpoint accepts any token (no signature verification)",
+             {"vuln_type": "jwt:weak_key", "url": "http://t/api/me",
+              "jwt_token": _JWT_TOKEN, "jwt_key": _JWT_KEY, "jwt_alg": "HS256",
+              "jwt_probe_endpoint": "http://t/api/me"}, _jwt_accept_all),
 ]
 
 

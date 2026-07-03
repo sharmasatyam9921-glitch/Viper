@@ -277,11 +277,15 @@ two-identity), **CRLF**, **clickjacking**, **Open Redirect** (CWE-601 — the ga
 re-injects a FRESH random attacker host and requires it to be the real redirect
 target, absent under a benign control), **GraphQL** introspection / exposed IDE
 (independent introspection re-query requiring a genuine __Schema: named queryType +
-canonical __TypeKind), and **NoSQL operator-injection auth bypass** (`nosql_injection.py`
+canonical __TypeKind), **NoSQL operator-injection auth bypass** (`nosql_injection.py`
 `:login` — re-runs the token differential: a bogus credential mints no token, the
-operator body does). `viper.py classes` lists coverage; `viper.py leads` explains why
-any non-submittable finding was demoted. The scorecard is at 19 classes / precision
-1.00 / 0 FP, and `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
+operator body does; an $eq-to-bogus control proves it's operator-driven), and **JWT
+weak-key forgery** (`jwt.py` `:weak_key` — a cracked key stays a LEAD until an
+operator-supplied `jwt_probe_endpoint` proves a forged token is accepted where a
+bad-signature control is rejected; opt-in, GET-only, no privilege escalation).
+`viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
+finding was demoted. The scorecard is at 20 classes / precision 1.00 / 0 FP, and
+`core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.
 
