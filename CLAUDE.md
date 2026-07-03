@@ -264,7 +264,10 @@ The only way to confirm blind SSRF / RCE / XXE / OAST-SQLi / Host-header SSRF.
 `OOBServer` mints unique canary tokens, runs HTTP+DNS listeners, and records only
 interactions for tokens IT issued (no false confirms from background traffic).
 Blind-capable workers (`ssrf`, `command_injection`, `xxe`, `host_header`) fire a
-canary; a callback flips the finding to submittable at the gate.
+canary; a callback flips the finding to submittable at the gate. Before the gate
+decides, `HackMode._await_late_oob_callbacks` waits a bounded window (only while
+canary tokens are still outstanding) so a LATE callback — arriving just after the
+hunt — still rescues a genuine blind vuln instead of it being filed as a lead.
 
 ### Confirmed vulnerability classes (gate-verified)
 

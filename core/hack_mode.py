@@ -580,6 +580,57 @@ class HackMode:
                 except Exception:
                     pass
 
+    async def _await_late_oob_callbacks(self, result: "HackResult", *,
+                                        max_wait_s: float = 5.0,
+                                        poll_s: float = 0.5) -> None:
+        """Wait (bounded) for any still-outstanding blind-vuln OOB canaries to call
+        back before the gate runs. A DNS/HTTP callback for a token WE minted is
+        irrefutable whether it arrives during the hunt or a few seconds after, so
+        polling here promotes a genuine late-firing blind vuln that would otherwise be
+        a lead. Only waits WHILE tokens are outstanding (returns the moment they all
+        fire), and only when an OOB server is attached. FP-safe: it merely lets the
+        existing OOB confirmation path see a late interaction — the gate logic is
+        unchanged."""
+        if self._oob is None:
+            return
+        store = getattr(self._oob, "store", None)
+        if store is None:
+            return
+
+        def _pending() -> list[str]:
+            out = []
+            for f in result.findings:
+                tok = f.get("oob_token")
+                if not tok:
+                    continue
+                try:
+                    if not store.has_interaction(tok):
+                        out.append(tok)
+                except Exception:   # noqa: BLE001 — a flaky store never blocks the gate
+                    pass
+            return out
+
+        pending = _pending()
+        if not pending:
+            return
+        self.narrator.info(
+            f"awaiting late OOB callbacks for {len(pending)} blind canary(s) "
+            f"(up to {max_wait_s:.0f}s)")
+        deadline = time.time() + max_wait_s
+        while time.time() < deadline:
+            await asyncio.sleep(poll_s)
+            still = _pending()
+            if len(still) < len(pending):
+                try:
+                    self.audit.event(
+                        "oob.late_callback", target=self.target,
+                        payload={"fired": len(pending) - len(still)})
+                except Exception:
+                    pass
+            if not still:
+                break
+            pending = still
+
     async def _run_validation_gate(self, result: "HackResult") -> None:
         """Re-confirm every finding via an INDEPENDENT code path and tag each
         validated/submittable. A worker that finds a bug is not allowed to be the
@@ -592,6 +643,11 @@ class HackMode:
         await self._run_mcp_tools(result)
         if not self._validate or not result.findings:
             return
+        # Give blind-vuln canaries that hadn't called back yet a brief, bounded window
+        # to fire BEFORE the gate decides — a late OOB callback is just as irrefutable
+        # as an early one, so this rescues a real blind SSRF/RCE/XXE from being filed
+        # as a lead. No-op when there is no OOB server or no outstanding token.
+        await self._await_late_oob_callbacks(result)
         try:
             from core.swarm_validation import partition, validate_findings
             annotated = await validate_findings(
