@@ -951,11 +951,23 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_nosql(finding, fetch, timeout)
     if head == "jwt":
         return await _recheck_jwt(finding, fetch, timeout)
+    # Mass assignment can only be PROVEN by a write (PATCH an extra/privileged field,
+    # then read it back) — which violates VIPER's read-only-PoC rule, so the gate
+    # never auto-confirms it. Return an actionable lead reason (surfaced by
+    # `viper.py leads`) instead of the generic fallback, so the operator knows the
+    # exact manual step: with an authenticated session, PATCH the self-owned object
+    # adding a server-controlled field (e.g. role/is_admin — NEVER on a
+    # money/transfer/delete path) and GET it back to see if the field stuck.
+    if head == "mass_assignment":
+        return False, 0.3, ("mass-assignment candidate: a response exposed a privileged "
+                            "field on a self-owned object. Confirming requires a WRITE "
+                            "(PATCH the field + read back), which the read-only gate will "
+                            "not perform — verify manually with your own account (lead)")
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)
-    #   mass_assignment      -> needs a write + read-back (non-destructive: no writes)
-    #   jwt / nosql          -> need the auth flow / a body mutation to prove impact
+    #   nosql (query)        -> weaker divergence signal; no token differential
+    #   business_logic       -> needs domain-specific corroboration
     return False, 0.0, f"no safe read-only re-test for '{head}' — manual review"
 
 # Map the swarm workers' vuln_type strings (the head token before ':') to the

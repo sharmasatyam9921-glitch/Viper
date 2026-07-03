@@ -707,6 +707,17 @@ def test_graphql_ide_prose_only_is_lead():
 
 # --- cmdi timing-only structural veto (defense-in-depth) ---
 
+def test_mass_assignment_is_an_actionable_lead():
+    # The gate never auto-confirms mass assignment (it needs a WRITE, which violates
+    # the read-only-PoC rule) — but the lead reason must be actionable, not generic.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"id":1,"is_admin":false}', url)
+    f = _run1({"vuln_type": "mass_assignment:profile", "url": "http://t/api/me"}, resp)
+    assert not f["submittable"]
+    assert "WRITE" in f["validation_reason"] and "read-only gate" in f["validation_reason"]
+
+
 def test_submittable_ok_vetoes_timing_only_rce():
     from core.swarm_validation import _submittable_ok
     # strict class: only reflection/oob-confirmed retests may be submittable
