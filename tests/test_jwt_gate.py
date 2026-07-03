@@ -39,7 +39,11 @@ def _valid_sig(token: str) -> bool:
 
 def _server(mode: str):
     """mode: 'verify' (accepts a valid weak-key signature, else 401),
-    'accept_all' (200 for anything), 'reject_all' (401 for anything)."""
+    'accept_all' (200 for anything), 'reject_all' (401 for anything),
+    'single_use' (accepts the FIRST valid-sig token, 401 on any repeat — a stateful
+    endpoint whose control-401 is order-dependent, NOT a signature verdict)."""
+    seen: set = set()
+
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -51,6 +55,9 @@ def _server(mode: str):
                 ok = True
             elif mode == "reject_all":
                 ok = False
+            elif mode == "single_use":
+                ok = _valid_sig(tok) and tok not in seen
+                seen.add(tok)
             else:
                 ok = _valid_sig(tok)
             self.send_response(200 if ok else 401)
@@ -97,6 +104,19 @@ def test_jwt_reject_all_endpoint_is_lead():
     try:
         f = _run(_finding(base, jwt_probe_endpoint=base + "/api/me"))
         assert not f["submittable"]
+    finally:
+        srv.shutdown()
+
+
+def test_jwt_single_use_endpoint_is_lead():
+    # Adversarial review: a stateful single-use endpoint accepts the forged token
+    # once then rejects the repeat — the control-401 is order-dependent, not a
+    # signature verdict. The forged-twice bracket must keep this a lead.
+    srv, base = _server("single_use")
+    try:
+        f = _run(_finding(base, jwt_probe_endpoint=base + "/api/me"))
+        assert not f["submittable"]
+        assert "state-dependent" in f["validation_reason"] or "repeat" in f["validation_reason"]
     finally:
         srv.shutdown()
 

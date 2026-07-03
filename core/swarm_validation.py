@@ -704,17 +704,31 @@ async def _recheck_jwt(finding, fetch, timeout):
             headers["Cookie"] = f"{src}={token}"
         return await fetch("GET", endpoint, headers=headers, timeout=timeout,
                            use_session_auth=False)
+    # Send the forged token TWICE, bracketing the control. A stateless weak-key
+    # verifier accepts the SAME forged token every time; a stateful endpoint (nonce,
+    # single-use, first-request-wins) rejects the repeat — so a control-401 there is
+    # order/state-dependent, not a signature verdict. Confirm only when the forged
+    # token is accepted BOTH times AND the control is rejected: then the sole reason
+    # the control differs is its bad signature, proving weak-key signature bypass.
     forged_r = await _probe(forged)
     control_r = await _probe(control)
-    if forged_r is None or control_r is None:
+    forged_r2 = await _probe(forged)
+    if forged_r is None or control_r is None or forged_r2 is None:
         return False, 0.0, "forge-probe request failed (lead)"
     fs = getattr(forged_r, "status", 0)
     cs = getattr(control_r, "status", 0)
-    if 200 <= fs < 300 and cs in (401, 403):
-        return True, 0.85, (f"server ACCEPTED a token forged with the recovered key "
-                            f"(HTTP {fs}) but rejected a bad-signature control (HTTP {cs}) "
-                            "— the weak HMAC key is exploitable for JWT forgery (CWE-347)")
-    if 200 <= fs < 300 and 200 <= cs < 300:
+    fs2 = getattr(forged_r2, "status", 0)
+    forged_ok = (200 <= fs < 300) and (200 <= fs2 < 300)
+    if forged_ok and cs in (401, 403):
+        return True, 0.85, (f"server accepted a weak-key-forged token REPEATABLY (HTTP "
+                            f"{fs}/{fs2}) but rejected a bad-signature control (HTTP {cs}) "
+                            "— stateless signature verification with the recovered key; "
+                            "JWT forgery confirmed (CWE-347)")
+    if (200 <= fs < 300) and not (200 <= fs2 < 300):
+        return False, 0.2, (f"forged token accepted once (HTTP {fs}) then rejected on repeat "
+                            f"(HTTP {fs2}) — order/state-dependent (nonce/single-use/replay), "
+                            "not a stateless weak-key signature bypass (lead)")
+    if (200 <= fs < 300) and (200 <= cs < 300):
         return False, 0.2, ("both the forged and the bad-signature token were accepted — "
                             "the endpoint does not verify signatures / needs no auth; not "
                             "a weak-key forgery proof (lead)")
