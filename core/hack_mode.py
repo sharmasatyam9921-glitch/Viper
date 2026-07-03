@@ -654,6 +654,25 @@ class HackMode:
                 result.findings, default_target=self.target,
                 bola_config=self._bola_config,
                 oob_store=(self._oob.store if self._oob is not None else None))
+            # Adversarial self-verifier: independently RE-run the gate's confirmation
+            # on each submittable finding and demote any that does not reproduce
+            # (transient/flaky). Only ever demotes, so it can improve precision but
+            # never cost recall on a deterministic true positive. Opt out with
+            # profile.adversarial_verify = False.
+            if getattr(self.profile, "adversarial_verify", True):
+                try:
+                    from core.adversarial_verifier import refute_unreproducible
+                    n_ref = await refute_unreproducible(
+                        annotated, bola_config=self._bola_config,
+                        oob_store=(self._oob.store if self._oob is not None else None))
+                    if n_ref:
+                        self.audit.event("findings.refuted", target=self.target,
+                                         payload={"demoted": n_ref})
+                        self.narrator.info(
+                            f"adversarial verifier: demoted {n_ref} non-reproducible "
+                            "finding(s) to leads")
+                except Exception as exc:   # noqa: BLE001 — refutation is best-effort
+                    logger.warning("adversarial verifier failed: %s", exc)
             # Attack-chain correlation: recognize low->critical escalations across
             # the confirmed findings and emit synthetic chain:* findings (each
             # submittable iff all its components are).

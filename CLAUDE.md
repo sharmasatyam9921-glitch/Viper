@@ -257,6 +257,13 @@ swarm worker (candidate) → swarm_validation.py gate (_reconfirm, fail-closed)
   recall. Currently 13 classes at precision 1.00 (0 false positives).
 - `core/confirm_gate.py` — reusable ThreeGateConfirmer (baseline→attack→
   differential + reproducibility re-test).
+- `core/adversarial_verifier.py` — a REFUTATION pass after the gate: independently
+  re-runs the gate's confirmation on each submittable finding and DEMOTES any that
+  does not reproduce (transient/flaky — a timing blip, an intermittent 5xx). Only
+  ever demotes, so it improves precision on noisy targets but never costs recall on
+  a deterministic true positive (a test iterates every scorecard vuln scenario and
+  asserts none are demoted). Wired into the hunt; opt out with
+  `profile.adversarial_verify = False`.
 
 ### Out-of-band (blind-vuln) confirmation — `core/oob/`
 
