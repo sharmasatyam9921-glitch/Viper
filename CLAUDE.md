@@ -310,6 +310,9 @@ core/attack_priors.py      Closes the evograph write->read loop: records each
                            so attacks that historically worked on the target's stack
                            run first. Best-effort; never touches the gate (exploration
                            ORDER only). Disable via profile.learn_priors = False.
+                           (react_engine has the sibling loop: evograph.get_reasoning_
+                           recall seeds Deep Think with prior high-reward reasoning for
+                           the same stack, so the react loop no longer reasons from zero.)
 core/gate_mutations.py     Mutation/regression harness: re-runs every SAFE benchmark
                            scenario across confidence thresholds + benign perturbations
                            so precision 1.00 is a guarded invariant (python -m

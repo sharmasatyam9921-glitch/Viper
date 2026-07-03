@@ -456,6 +456,30 @@ class EvoGraph:
 
         return [row["attack_type"] for row in rows]
 
+    def get_reasoning_recall(self, target_tech: List[str], top_n: int = 5,
+                             min_reward: float = 0.5) -> List[Dict[str, Any]]:
+        """Recall prior HIGH-REWARD Deep-Think reasoning steps from earlier hunts of a
+        similar tech stack, so a new hunt starts with what worked before instead of
+        from zero. Joins reasoning_traces to their session's tech_stack, keeps steps
+        with reward >= ``min_reward`` and a non-empty action, and returns the best
+        (highest reward, then most recent) as {thought, action, observation, reward,
+        timestamp}. Empty when there is no matching prior reasoning."""
+        tech_parts = [t.strip().lower() for t in target_tech if t and t.strip()]
+        if not tech_parts:
+            return []
+        where = " OR ".join(["s.tech_stack LIKE ?"] * len(tech_parts))
+        params = [f"%{t}%" for t in tech_parts]
+        rows = self.conn.execute(
+            f"SELECT r.thought, r.action, r.observation, r.reward, r.timestamp "
+            f"FROM reasoning_traces r JOIN sessions s ON r.session_id = s.id "
+            f"WHERE ({where}) AND r.reward >= ? AND TRIM(r.action) != '' "
+            f"ORDER BY r.reward DESC, r.timestamp DESC LIMIT ?",
+            params + [float(min_reward), int(top_n)],
+        ).fetchall()
+        return [{"thought": row["thought"], "action": row["action"],
+                 "observation": row["observation"], "reward": row["reward"],
+                 "timestamp": row["timestamp"]} for row in rows]
+
     # ── Q-table persistence ──
 
     def save_q_table(self, session_id: int, q_table: Dict):

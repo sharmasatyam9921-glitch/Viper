@@ -134,6 +134,29 @@ class ReACTEngine:
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] [ReACT] [{level}] {msg}")
 
+    def _reasoning_recall(self, technologies) -> str:
+        """Compact hint of prior HIGH-REWARD reasoning for this tech stack, pulled
+        from evograph (best-effort). Closes the write->read loop: react_engine already
+        RECORDS reasoning steps but never read them back, so every hunt reasoned from
+        zero. Returns a short bulleted string (or '' when there is no evograph / no
+        matching history). Shapes EXPLORATION only — never confirmation, so the gate
+        and precision 1.00 are untouched."""
+        if not self.evograph:
+            return ""
+        try:
+            techs = [str(t).strip() for t in (technologies or []) if str(t).strip()]
+            recalled = self.evograph.get_reasoning_recall(techs, top_n=4)
+        except Exception as exc:   # noqa: BLE001 — recall is never load-bearing
+            logger.debug(f"reasoning recall failed: {exc}")
+            return ""
+        lines = []
+        for r in recalled:
+            act = (r.get("action") or "").strip()
+            obs = (r.get("observation") or "").strip().replace("\n", " ")[:120]
+            if act:
+                lines.append(f"  - {act}: {obs}" if obs else f"  - {act}")
+        return "\n".join(lines)
+
     async def reason_and_act(
         self,
         target: str,
@@ -158,6 +181,15 @@ class ReACTEngine:
 
         self.log(f"Starting ReACT loop for {target} (max {self.max_steps} steps)")
 
+        # Cross-hunt reasoning recall: seed the strategy with what worked on similar
+        # tech stacks in past hunts (best-effort; '' when there is no history). Fed
+        # into the Deep Think objective below, so it shapes exploration, not the gate.
+        recall_hint = self._reasoning_recall(context.get("technologies") or [])
+        if recall_hint:
+            self.log(
+                f"Recalled {recall_hint.count(chr(10)) + 1} prior successful "
+                "approach(es) for this stack", "STRATEGY")
+
         for step_num in range(1, self.max_steps + 1):
             # ── DEEP THINK TRIGGER CHECK ──────────────────────────────
             deep_think_fired = False
@@ -168,12 +200,18 @@ class ReACTEngine:
                 if should_dt:
                     deep_think_fired = True
                     self.log(f"Step {step_num} | DEEP THINK triggered: {dt_reason}", "STRATEGY")
+                    _objective = f"Security test {target}"
+                    if recall_hint:
+                        _objective += (
+                            "\n\nPRIOR SUCCESSFUL APPROACHES on similar tech stacks "
+                            "(from past hunts — prioritise these early, but VERIFY each "
+                            "independently; history is a hint, not proof):\n" + recall_hint)
                     dt_state = {
                         "target": target,
                         "current_phase": current_context.get("phase", "informational"),
                         "current_iteration": step_num,
                         "max_iterations": self.max_steps,
-                        "original_objective": f"Security test {target}",
+                        "original_objective": _objective,
                         "execution_trace": [
                             {
                                 "tool_name": s.action,
