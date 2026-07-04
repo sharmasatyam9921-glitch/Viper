@@ -293,8 +293,14 @@ operator body does; an $eq-to-bogus control proves it's operator-driven), and **
 weak-key forgery** (`jwt.py` `:weak_key` — a cracked key stays a LEAD until an
 operator-supplied `jwt_probe_endpoint` proves a forged token is accepted where a
 bad-signature control is rejected; opt-in, GET-only, no privilege escalation).
+**Response-based SSRF** (`ssrf.py` `ssrf:<param>` — re-runs the read-only metadata
+differential: an internal payload must return the service's own body with an AKIA/ASIA
+credential or >=2 cloud-metadata markers absent from a benign baseline, payload stripped
++ WAF-denial vetoed; blind SSRF stays on the OOB path), and **CSRF** (`csrf.py`
+`csrf_missing_token` — re-parses the page for a state-changing POST form with no
+anti-CSRF token AND a SameSite-less session cookie).
 `viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
-finding was demoted. The scorecard is at 20 classes / precision 1.00 / 0 FP, and
+finding was demoted. The scorecard is at 22 classes / precision 1.00 / 0 FP, and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.

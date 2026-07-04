@@ -736,6 +736,88 @@ async def _recheck_jwt(finding, fetch, timeout):
                         "forgery unconfirmed at this endpoint (lead)")
 
 
+async def _recheck_csrf(finding, fetch, timeout):
+    """Independently re-parse the page for the exact condition the CSRF worker flagged:
+    a state-changing POST form with NO anti-CSRF token field, AND a freshly-minted
+    session cookie whose Set-Cookie lacks SameSite=Lax/Strict (so a browser attaches it
+    on a cross-site POST). Both are deterministic booleans (canonical token-field names,
+    the SameSite attribute) — no heuristic scoring. Read-only GET + HTML parse; the form
+    is never submitted. Only the strong ``csrf_missing_token`` sub-class is confirmable;
+    the weaker OPTIONS-preflight JSON-API signal stays a lead."""
+    vt = (finding.get("vuln_type") or "").lower()
+    if "missing_token" not in vt:
+        return False, 0.3, ("CSRF candidate other than a missing-token form (a JSON-API "
+                            "preflight signal) — no safe independent re-test; manual review (lead)")
+    from core.swarm_workers.vuln.csrf import (
+        _has_token_name, _parse_forms, _session_cookie_lacks_samesite)
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    r = await fetch("GET", url, timeout=timeout, use_session_auth=False)
+    if r is None or not (200 <= getattr(r, "status", 0) < 400):
+        return False, 0.2, "form url no longer serves a 2xx page (lead)"
+    if "html" not in _ctype(r):
+        return False, 0.2, "response is not an HTML page carrying a form (lead)"
+    weak_cookie = _session_cookie_lacks_samesite((r.headers or {}).get("set-cookie", "") or "")
+    if not weak_cookie:
+        return False, 0.2, ("no session cookie lacking SameSite=Lax/Strict on re-fetch — the "
+                            "browser would not attach it cross-site (lead)")
+    for form in _parse_forms(getattr(r, "body", "") or ""):
+        if form.get("method") == "post" and not any(
+                _has_token_name(n) for n in form.get("inputs", [])):
+            return True, 0.75, (f"reproduced: a state-changing POST form with no anti-CSRF "
+                                f"token, and session cookie '{weak_cookie}' lacks "
+                                "SameSite=Lax/Strict — forgeable cross-site (CWE-352)")
+    return False, 0.2, "no tokenless POST form on re-parse (a token was present) (lead)"
+
+
+async def _recheck_ssrf(finding, fetch, timeout):
+    """Independently reproduce the RESPONSE-BASED SSRF differential (read-only GETs).
+
+    Re-runs the worker's own gate-3 logic from a fresh context: a benign baseline
+    (example.com) must NOT carry cloud-metadata markers, while the finding's internal
+    metadata payload MUST return the service's own 2xx/3xx body carrying either an
+    unforgeable AKIA/ASIA credential VALUE or >=2 distinct metadata markers absent
+    from the baseline — with the reflected payload stripped (kills pure-reflection
+    open-redirect-validator FPs) and denial/WAF prose vetoed (kills defending-guard
+    FPs). Blind SSRF is confirmed earlier via its OOB token, so only in-band
+    ``ssrf:<param>`` findings reach here; a blind one that slipped through stays a lead."""
+    vt = (finding.get("vuln_type") or "").lower()
+    if ":blind:" in vt:
+        return False, 0.3, ("blind SSRF candidate — only an out-of-band callback confirms "
+                            "it; run with an OOB listener (--oob) (lead)")
+    from core.swarm_workers.vuln._http import add_query
+    from core.swarm_workers.vuln.ssrf import (
+        _BENIGN_PAYLOAD, _CREDENTIAL_VALUE, _DENIAL_LANGUAGE, _markers)
+    url = finding.get("url") or ""
+    param = finding.get("parameter")
+    payload = finding.get("payload") or ""
+    if not (url and param and payload):
+        return False, 0.0, "ssrf finding missing url/parameter/payload to re-test (lead)"
+    baseline = await fetch("GET", add_query(url, param, _BENIGN_PAYLOAD), timeout=timeout)
+    base_markers = _markers(baseline, _BENIGN_PAYLOAD)
+    probe = await fetch("GET", add_query(url, param, payload), timeout=timeout)
+    if probe is None:
+        return False, 0.0, "re-fetch failed"
+    if not (200 <= getattr(probe, "status", 0) < 400):
+        return False, 0.2, ("internal payload no longer returns 2xx/3xx — a guard refused it, "
+                            "not a proxied fetch (lead)")
+    stripped = (getattr(probe, "body", "") or "").replace(payload, "")
+    if _DENIAL_LANGUAGE.search(stripped):
+        return False, 0.2, ("response reads as a security refusal (WAF/blocked/denied), not "
+                            "the metadata service's output (lead)")
+    found = _markers(probe, payload) - base_markers
+    if _CREDENTIAL_VALUE.search(stripped):
+        return True, 0.85, ("SSRF reproduced: the internal payload returned a real cloud "
+                            "credential (AKIA/ASIA/SecretAccessKey) absent from the benign "
+                            "baseline — the server proxied the metadata service (CWE-918)")
+    if len(found) >= 2:
+        return True, 0.8, (f"SSRF reproduced: {sorted(found)} cloud-metadata markers returned "
+                           "for the internal payload, absent from the benign baseline (CWE-918)")
+    return False, 0.3, ("not enough independent metadata evidence on re-test (a single "
+                        "name-marker is describable prose) — manual review (lead)")
+
+
 async def _recheck_nosql(finding, fetch, timeout):
     """Independently reproduce the NoSQL operator-injection AUTH BYPASS differential.
 
@@ -963,6 +1045,10 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_graphql(finding, fetch, timeout)
     if head == "nosql_injection":
         return await _recheck_nosql(finding, fetch, timeout)
+    if head == "ssrf":
+        return await _recheck_ssrf(finding, fetch, timeout)
+    if head.startswith("csrf"):
+        return await _recheck_csrf(finding, fetch, timeout)
     if head == "jwt":
         return await _recheck_jwt(finding, fetch, timeout)
     # Mass assignment can only be PROVEN by a write (PATCH an extra/privileged field,

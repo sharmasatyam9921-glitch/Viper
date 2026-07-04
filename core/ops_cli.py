@@ -18,7 +18,7 @@ _GATE_CONFIRMED = {
     "bola", "bola_multi", "bfla", "bfla_multi", "host_header",
     "subdomain_takeover", "access_control", "ssrf", "crlf",
     "web_cache_deception", "xxe", "clickjacking", "cloud_exposure",
-    "open_redirect", "graphql", "nosql_injection", "jwt",
+    "open_redirect", "graphql", "nosql_injection", "jwt", "csrf",
 }
 _OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header"}
 

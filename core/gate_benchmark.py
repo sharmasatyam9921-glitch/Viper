@@ -263,6 +263,59 @@ def _s3_private(m, url, h):
                     '</Code></Error>', url)
 
 
+def _csrf_vuln(m, url, h):
+    # POST form, no anti-CSRF token, session cookie without SameSite -> forgeable.
+    return HttpResp(200, {"content-type": "text/html",
+                          "set-cookie": "sessionid=abc123; Path=/"},
+                    "<form method='post' action=''><input name='amount'>"
+                    "<button>Send</button></form>", url)
+
+
+def _csrf_token(m, url, h):
+    # Same form but WITH an anti-CSRF token field -> defended.
+    return HttpResp(200, {"content-type": "text/html",
+                          "set-cookie": "sessionid=abc123; Path=/"},
+                    "<form method='post'><input name='csrf_token' value='x'>"
+                    "<input name='amount'></form>", url)
+
+
+def _csrf_samesite(m, url, h):
+    # Tokenless form but the session cookie is SameSite=Strict -> not attached cross-site.
+    return HttpResp(200, {"content-type": "text/html",
+                          "set-cookie": "sessionid=abc123; SameSite=Strict; Path=/"},
+                    "<form method='post'><input name='amount'></form>", url)
+
+
+def _ssrf_meta(v: str) -> bool:
+    return "169.254.169.254" in v or "metadata.google" in v or "127.0.0.1" in v
+
+
+def _ssrf_imds(m, url, h):
+    # The internal payload returns the metadata service's own body (a real AKIA
+    # credential + service markers); the benign baseline returns a plain page.
+    if _ssrf_meta(_injected(url)):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","instance-id":"i-0abc123"}', url)
+    return HttpResp(200, {"content-type": "text/html"}, "<html>Example Domain</html>", url)
+
+
+def _ssrf_echo(m, url, h):
+    # Open-redirect / URL-validator that merely REFLECTS the submitted url on both
+    # baseline and probe — pure reflection, the payload-strip must kill it.
+    return HttpResp(200, {"content-type": "text/html"},
+                    f"<p>Could not reach {_injected(url)}</p>", url)
+
+
+def _ssrf_waf(m, url, h):
+    # A defending guard that 200s a JSON "blocked" envelope naming the metadata
+    # service — the denial-language veto must reject it.
+    if _ssrf_meta(_injected(url)):
+        return HttpResp(200, {"content-type": "application/json"},
+                        '{"error":"request to the cloud metadata service was blocked by '
+                        'the WAF for your security"}', url)
+    return HttpResp(200, {"content-type": "text/html"}, "ok", url)
+
+
 def _oredir_vuln(m, url, h):
     # Parameter-driven: bounces (302 Location) to whatever host the param names —
     # so injecting the gate's FRESH random host makes it the redirect target.
@@ -701,6 +754,33 @@ BENCHMARK = [
     Scenario("nosql", "safe", "query-divergence candidate stays a lead",
              {"vuln_type": "nosql_injection:query", "url": "http://t/search?q=x",
               "parameter": "q", "payload": "[$ne]="}, _ok),
+
+    # csrf — a state-changing POST form with no anti-CSRF token AND a SameSite-less
+    # session cookie is forgeable; a token field or SameSite=Strict defends it.
+    Scenario("csrf", "vuln", "tokenless POST form + session cookie without SameSite",
+             {"vuln_type": "csrf_missing_token", "url": "http://t/account"}, _csrf_vuln),
+    Scenario("csrf", "safe", "POST form carries an anti-CSRF token field",
+             {"vuln_type": "csrf_missing_token", "url": "http://t/account"}, _csrf_token),
+    Scenario("csrf", "safe", "session cookie is SameSite=Strict (not sent cross-site)",
+             {"vuln_type": "csrf_missing_token", "url": "http://t/account"}, _csrf_samesite),
+
+    # ssrf (response-based) — the internal metadata payload must return the service's
+    # own body (credential / >=2 markers) absent from a benign baseline, read-only.
+    Scenario("ssrf", "vuln", "IMDS credential body on the metadata payload, plain baseline",
+             {"vuln_type": "ssrf:url",
+              "url": "http://t/fetch?url=http://169.254.169.254/latest/meta-data/",
+              "parameter": "url", "payload": "http://169.254.169.254/latest/meta-data/"},
+             _ssrf_imds),
+    Scenario("ssrf", "safe", "URL validator merely reflects the payload (pure reflection)",
+             {"vuln_type": "ssrf:url",
+              "url": "http://t/fetch?url=http://169.254.169.254/latest/meta-data/",
+              "parameter": "url", "payload": "http://169.254.169.254/latest/meta-data/"},
+             _ssrf_echo),
+    Scenario("ssrf", "safe", "WAF 200 'blocked ... metadata service' envelope",
+             {"vuln_type": "ssrf:url",
+              "url": "http://t/fetch?url=http://169.254.169.254/latest/meta-data/",
+              "parameter": "url", "payload": "http://169.254.169.254/latest/meta-data/"},
+             _ssrf_waf),
 
     # jwt weak-key forge-probe — a cracked key is only submittable when an operator
     # supplies an authed endpoint AND a forged token is accepted where a bad-sig

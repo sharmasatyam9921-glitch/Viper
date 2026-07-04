@@ -707,6 +707,61 @@ def test_graphql_ide_prose_only_is_lead():
 
 # --- cmdi timing-only structural veto (defense-in-depth) ---
 
+def test_ssrf_blind_candidate_stays_lead():
+    # Blind SSRF is confirmed only by an OOB callback, never by the in-band recheck.
+    def resp(m, url, h):
+        return HttpResp(200, {}, "x", url)
+    f = _run1({"vuln_type": "ssrf:blind:url", "url": "http://t/f?url=x",
+               "parameter": "url", "payload": "x"}, resp)
+    assert not f["submittable"] and "out-of-band" in f["validation_reason"]
+
+
+def test_ssrf_two_markers_absent_from_baseline_is_submittable():
+    def resp(m, url, h):
+        v = _injected(url)
+        if "169.254" in v:
+            return HttpResp(200, {}, "instance-id: i-1; computeMetadata/v1/project/", url)
+        return HttpResp(200, {}, "a benign remote homepage", url)   # baseline
+    f = _run1({"vuln_type": "ssrf:url",
+               "url": "http://t/f?url=http://169.254.169.254/latest/meta-data/",
+               "parameter": "url", "payload": "http://169.254.169.254/latest/meta-data/"}, resp)
+    assert f["submittable"] and f["validation_confidence"] >= 0.8
+
+
+def test_ssrf_single_marker_or_missing_fields_is_lead():
+    def one_marker(m, url, h):
+        v = _injected(url)
+        return HttpResp(200, {}, "instance-id: i-1" if "169.254" in v else "homepage", url)
+    f = _run1({"vuln_type": "ssrf:url",
+               "url": "http://t/f?url=http://169.254.169.254/latest/meta-data/",
+               "parameter": "url", "payload": "http://169.254.169.254/latest/meta-data/"},
+              one_marker)
+    assert not f["submittable"]                       # one name-marker is describable prose
+    g = _run1({"vuln_type": "ssrf:url", "url": "http://t/f", "parameter": "url"},
+              lambda m, u, h: HttpResp(200, {}, "x", u))
+    assert not g["submittable"]                       # no payload to replay
+
+
+def test_csrf_json_api_signal_stays_lead():
+    # The weaker OPTIONS-preflight JSON-API CSRF signal has no safe re-parse -> lead.
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html",
+                              "set-cookie": "sessionid=a; Path=/"},
+                        "<form method='post'><input name='x'></form>", url)
+    f = _run1({"vuln_type": "csrf_json_api", "url": "http://t/api"}, resp)
+    assert not f["submittable"] and "no safe independent re-test" in f["validation_reason"]
+
+
+def test_csrf_token_present_on_reparse_is_lead():
+    def resp(m, url, h):
+        return HttpResp(200, {"content-type": "text/html",
+                              "set-cookie": "sessionid=abc; Path=/"},
+                        "<form method='post'><input name='_token' value='x'>"
+                        "<input name='amount'></form>", url)
+    f = _run1({"vuln_type": "csrf_missing_token", "url": "http://t/account"}, resp)
+    assert not f["submittable"]
+
+
 def test_mass_assignment_is_an_actionable_lead():
     # The gate never auto-confirms mass assignment (it needs a WRITE, which violates
     # the read-only-PoC rule) — but the lead reason must be actionable, not generic.
