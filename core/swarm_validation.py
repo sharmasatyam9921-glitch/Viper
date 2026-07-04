@@ -986,6 +986,23 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
                             "prototype-reaching sink in the page's JS). Confirming needs a "
                             "browser/DOM probe the read-only gate does not run — verify "
                             "manually (lead)")
+    # Read-only surface detections whose CONFIRMATION would be destructive (an RCE
+    # gadget for deserialization, poisoning a shared cache) or is inherently a config
+    # observation (OAuth metadata) — all stay actionable manual-review leads.
+    if head == "insecure_deserialization":
+        return False, 0.3, ("insecure-deserialization SURFACE: serialized-object data "
+                            "crosses the trust boundary. Confirming RCE needs a gadget-"
+                            "chain payload (destructive) the gate never sends — verify "
+                            "manually in a controlled test (lead)")
+    if head == "web_cache_poisoning":
+        return False, 0.3, ("web-cache-poisoning RISK: an unkeyed header reflected into a "
+                            "cacheable response (probed safely with a cache buster + benign "
+                            "marker). Confirming real impact means poisoning a SHARED cache "
+                            "key, which affects other users — verify manually (lead)")
+    if head == "oauth_misconfig":
+        return False, 0.3, ("OAuth/OIDC config weakness observed in the discovery document "
+                            "(metadata only). Whether the deployed client is actually "
+                            "exploitable depends on the live flow — verify manually (lead)")
 
     # Classes with no SAFE read-only confirmation -> stay a LEAD (fail-closed):
     #   single-session idor  -> needs two accounts (use the two-account BOLA flow)

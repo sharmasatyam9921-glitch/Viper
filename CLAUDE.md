@@ -299,13 +299,18 @@ finding was demoted. The scorecard is at 20 classes / precision 1.00 / 0 FP, and
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.
 
-Lead-only (read-only) detectors stay leads by design: **client-side prototype
-pollution** (`proto_pollution.py`, CWE-1321) statically flags a user-input source
-reaching a prototype-touching sink in the page's JS (or a versioned vulnerable merge
-lib) — confirming it needs a browser/DOM probe, and polluting server-side would be
-destructive, so it is never auto-submitted. Same principle blocks a gate write-back
-for **mass assignment** (needs a PATCH) — both surface an actionable `viper.py leads`
-reason instead of a false claim.
+Lead-only (read-only) detectors stay leads by design — confirming them would need a
+destructive action (an RCE gadget, a server-side write, poisoning a shared cache) or
+a browser, so they surface an actionable `viper.py leads` reason instead of a false
+auto-submission: **client-side prototype pollution** (`proto_pollution.py`, CWE-1321
+— user-input source reaching a prototype-touching JS sink, or a versioned vulnerable
+merge lib), **insecure-deserialization surface** (`deser_surface.py`, CWE-502 —
+observes serialized-object magic in cookies/params/body, never sends a gadget),
+**OAuth/OIDC config** (`oauth_config.py` — reads the `.well-known` discovery doc for
+no-PKCE / implicit-flow / `none`-auth), **web-cache-poisoning risk** (`cache_poisoning.py`,
+CWE-524 — unkeyed-header reflection into a cacheable response, probed SAFELY with a
+per-request cache buster + a benign marker so no shared key is poisoned), and **mass
+assignment** (needs a PATCH write). None mutates target state destructively.
 
 ### New core modules (since v5.0)
 

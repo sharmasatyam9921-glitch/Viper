@@ -33,12 +33,15 @@ from . import (  # noqa: F401
     bola,
     bola_multi,
     broken_access_control,
+    cache_poisoning,
     clickjacking,
     command_injection,
     cors,
     crlf,
     csrf,
+    deser_surface,
     graphql,
+    oauth_config,
     idor,
     jwt,
     lfi,
@@ -60,5 +63,5 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "ai_hunter", "bola", "bola_multi", "broken_access_control", "clickjacking", "command_injection", "cors", "crlf", "csrf", "graphql", "idor", "jwt", "lfi", "login_sqli", "mass_assignment", "nosql_injection", "nuclei", "open_redirect", "path_bypass", "proto_pollution", "race_condition", "request_smuggling", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe", "xxe",
+    "ai_hunter", "bola", "bola_multi", "broken_access_control", "cache_poisoning", "clickjacking", "command_injection", "cors", "crlf", "csrf", "deser_surface", "graphql", "idor", "jwt", "lfi", "login_sqli", "mass_assignment", "nosql_injection", "nuclei", "oauth_config", "open_redirect", "path_bypass", "proto_pollution", "race_condition", "request_smuggling", "secrets", "sqli_probe", "ssrf", "ssti_probe", "xss_probe", "xxe",
 ]
