@@ -22,6 +22,13 @@ logger = logging.getLogger("viper.chain_of_custody")
 CUSTODY_DIR = Path(__file__).parent.parent / "reports"
 
 
+def hash_finding(finding_data: dict) -> str:
+    """Canonical SHA-256 of a finding (sorted keys, compact separators) — the single
+    source of truth for recording AND re-verifying a finding's integrity."""
+    canonical = json.dumps(finding_data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 class ChainOfCustody:
     """Evidence integrity tracking for vulnerability findings.
 
@@ -61,17 +68,16 @@ class ChainOfCustody:
         Returns:
             Dict with finding_id, hash, and timestamp.
         """
-        # Canonical JSON serialization for reproducible hashing
-        canonical = json.dumps(finding_data, sort_keys=True, separators=(",", ":"))
-        finding_hash = hashlib.sha256(canonical.encode()).hexdigest()
-
+        # Canonical hashing via the shared helper (single source of truth).
+        finding_hash = hash_finding(finding_data)
         entry = {
             "finding_id": finding_id,
             "hash": finding_hash,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent_id": agent_id,
             "target": target,
-            "data_size": len(canonical),
+            "data_size": len(json.dumps(finding_data, sort_keys=True,
+                                        separators=(",", ":"))),
         }
 
         self._entries.append(entry)

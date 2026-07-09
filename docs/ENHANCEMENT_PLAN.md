@@ -33,12 +33,11 @@ proto-pollution, deser-surface, oauth-config, cache-poisoning, mass-assignment, 
 discovered-but-untested surface in one bounded vuln round; new findings still flow through
 the gate. Opt out with `profile.coverage_followup = False`. FP-safe (exploration only).
 
-### 1.2 `viper.py evidence verify <manifest> [findings.json]`
-The hunt now writes a signed `<hunt_id>_manifest.json`, but there's no CLI to **verify** it.
-Add a command that (a) checks the HMAC signature and (b) re-hashes each finding (incl. its
-`proof_requests`) and reports any mismatch — making the chain-of-custody actionable for a
-triager. Pure read-only. **Files:** `core/verify_cli.py` or `core/ops_cli.py`, `viper.py`.
-Effort: small.
+### 1.2 `viper.py evidence verify <manifest> [findings.json] [--key K]` ✅ DONE
+`core/evidence_cli.py` re-hashes each finding (incl. its `proof_requests`) against the
+manifest's recorded hashes (tamper check, no key needed) and, with `--key`, verifies the
+HMAC signature. `core/chain_of_custody.py` gained a shared `hash_finding` (one source of
+truth for recording + verifying). Read-only; exit 0 iff integrity is confirmed.
 
 ### 1.3 Calibrated confidence surface
 Map the gate's per-class `validation_confidence` to the scorecard's *observed* precision so

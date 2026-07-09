@@ -166,6 +166,12 @@ def main():
         from core.verify_cli import run_verify_cli
         sys.exit(run_verify_cli(sys.argv[2:]))
 
+    # `viper.py evidence verify <manifest> [findings.json] [--key K]` — verify a hunt's
+    # tamper-evident chain-of-custody manifest (per-finding hashes + optional HMAC).
+    if len(sys.argv) > 1 and sys.argv[1] == "evidence":
+        from core.evidence_cli import run_evidence_cli
+        sys.exit(run_evidence_cli(sys.argv[2:]))
+
     # `viper.py xbow <benchmarks_dir>` — run VIPER against XBOW validation
     # benchmarks (needs Docker). Scores detection + flag-capture per challenge.
     if len(sys.argv) > 1 and sys.argv[1] == "xbow":

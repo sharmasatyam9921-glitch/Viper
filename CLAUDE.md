@@ -22,6 +22,7 @@ python viper.py scope import <csv|burp>   #   (offline) load an exported scope C
 python viper.py classes                  # vuln classes VIPER tests; flags gate-confirmed + OOB-capable
 python viper.py scorecard [--strict]     # per-class validation-gate precision/recall benchmark
 python viper.py verify <findings.json>   # re-confirm saved findings via the gate (no full hunt)
+python viper.py evidence verify <manifest> [findings.json] [--key K]   # verify a hunt's tamper-evident custody manifest
 python viper.py leads [findings.json]    # group non-submittable leads by why the gate demoted them
 python viper.py submissions [hunt_id]    # review gate-confirmed submission drafts
 python viper.py ledger [list|clear]      # cross-hunt duplicate-suppression ledger
