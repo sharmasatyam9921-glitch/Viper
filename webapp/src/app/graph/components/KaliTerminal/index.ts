@@ -1,1 +1,0 @@
-export { KaliTerminal } from './KaliTerminal'

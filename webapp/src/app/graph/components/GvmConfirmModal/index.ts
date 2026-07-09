@@ -1,1 +1,0 @@
-export { GvmConfirmModal } from './GvmConfirmModal'

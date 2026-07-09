@@ -64,7 +64,7 @@ SKIP_DIRS = {
     # Vendored / quarantined source trees — not part of VIPER itself.
     # Any underscore-prefixed dir is treated as scratch/vendored (see
     # iter_python_files), so they need not be listed by name here.
-    "programs", "pentest", "scripts", "webapp",
+    "programs", "pentest", "scripts",
     # Skill helpers (markdown-driven, not part of the Python graph)
     ".claude", "knowledge", "credentials", "scopes", "wordlists",
 }
