@@ -1,0 +1,57 @@
+name: gate-invariant
+
+# Enforce the validation gate's precision-1.00 / 0-FP invariant on every change that could
+# affect it. The gate is what makes VIPER's autonomous confirmations safe to act on, so a
+# regression here must block the merge — not be discovered later on the scorecard.
+on:
+  push:
+    paths:
+      - 'core/**'
+      - 'tests/**'
+      - '.github/workflows/gate.yml'
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'tests/**'
+      - '.github/workflows/gate.yml'
+  workflow_dispatch: {}
+
+jobs:
+  gate-invariant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Gate invariant (scorecard + mutation harness, strict)
+        run: python -m core.gate_ci
+
+      - name: Gate + confirmation test suite
+        # The offline gate/precision tests — the adversarial-refutation and per-class
+        # confirmation paths — run without network or external binaries.
+        run: >
+          pytest -q
+          tests/test_gate_benchmark.py
+          tests/test_gate_mutations.py
+          tests/test_swarm_validation.py
+          tests/test_query_injection_gate.py
+          tests/test_jwt_gate.py
+          tests/test_nosql_gate.py
+          tests/test_ssrf.py
+          tests/test_ssrf_fp.py
+          tests/test_xxe_gate.py
+          tests/test_crlf_gate.py
+          tests/test_clickjacking_gate.py
+          tests/test_resume_state.py

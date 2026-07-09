@@ -115,8 +115,11 @@ out on a stack rank first next time. Ordering only — never touches the gate.
   and dual-flow reproducibility before it could be more than a lead.
 - **Web-cache *poisoning*** (vs. the confirmed *deception*) — only safe if confirmed with an
   ephemeral, per-request cache-buster that never poisons a shared key; currently a lead.
-- **Adversarial review in CI** — run `gate_mutations --strict` + a scheduled refutation pass on
-  every gate change so precision 1.00 is enforced pre-merge, not just measured.
+- **Adversarial review in CI** ✅ DONE — `python -m core.gate_ci` runs the scorecard +
+  mutation harness as one strict check; `gate_benchmark --strict` was hardened to fail on a
+  recall regression (a confirmed class dropping to a lead) as well as a false positive.
+  `.github/workflows/gate.yml` runs it plus the offline gate/confirmation tests on every push/PR
+  touching `core/` or `tests/`, so precision 1.00 is an ENFORCED merge-gate, not just measured.
 
 ---
 

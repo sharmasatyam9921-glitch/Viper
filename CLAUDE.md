@@ -334,6 +334,10 @@ those workers' module `fetch`, since their gate recheck re-runs the worker), and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.
+`python -m core.gate_ci` runs the scorecard (strict on BOTH precision AND recall —
+a confirmed class silently dropping to a lead also fails) + the mutation harness as
+one check; `.github/workflows/gate.yml` enforces it on every push/PR that touches
+`core/` or `tests/`, so the invariant is a merge-gate, not just measured.
 
 Lead-only (read-only) detectors stay leads by design — confirming them would need a
 destructive action (an RCE gadget, a server-side write, poisoning a shared cache) or

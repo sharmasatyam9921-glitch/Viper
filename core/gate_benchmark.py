@@ -1082,8 +1082,19 @@ def main(argv=None) -> int:
     strict = "--strict" in argv
     scores = run_benchmark()
     print(format_scorecard(scores))
-    if strict and overall(scores).fp:
-        return 1
+    if strict:
+        tot = overall(scores)
+        # A merge-gate must catch BOTH failure directions: a false positive (precision
+        # regression — a safe responder became submittable) AND a false negative (recall
+        # regression — a previously-confirmed class silently dropped to a lead).
+        if tot.fp:
+            print(f"\nSTRICT FAIL: {tot.fp} false positive(s) - precision regressed.")
+            return 1
+        if tot.fn:
+            fn_classes = [c for c, cs in scores.items() if cs.fn]
+            print(f"\nSTRICT FAIL: {tot.fn} false negative(s) in {sorted(fn_classes)} - "
+                  "a confirmed class stopped confirming (recall regressed).")
+            return 1
     return 0
 
 
