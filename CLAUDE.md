@@ -25,6 +25,7 @@ python viper.py verify <findings.json>   # re-confirm saved findings via the gat
 python viper.py evidence verify <manifest> [findings.json] [--key K]   # verify a hunt's tamper-evident custody manifest
 python viper.py leads [findings.json]    # group non-submittable leads by why the gate demoted them
 python viper.py submissions [hunt_id]    # review gate-confirmed submission drafts
+python viper.py outcome <disposition> <findings.json> [--tech t1,t2]   # feed accepted/paid/rejected back into priors (outer learning loop)
 python viper.py ledger [list|clear]      # cross-hunt duplicate-suppression ledger
 python viper.py bola <target> ...        # focused two-account BOLA/IDOR check
 python viper.py skills [stats|search|show|select]   # lazy skill catalog (~1,600 skills)

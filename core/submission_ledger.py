@@ -80,6 +80,19 @@ class SubmissionLedger:
             "count": int(prev.get("count") or 0) + 1,
         }
 
+    def set_disposition(self, finding: dict, disposition: str) -> None:
+        """Record a submitted finding's real DISPOSITION (accepted/paid/duplicate/
+        rejected/...). Creates the entry if absent so a disposition can be logged even
+        for a finding drafted in a prior run."""
+        sig = signature(finding)
+        entry = self._seen.get(sig) or {
+            "vuln_type": finding.get("vuln_type"), "url": finding.get("url"),
+            "first_seen": _now(), "count": 0,
+        }
+        entry["status"] = str(disposition)
+        entry["disposition_at"] = _now()
+        self._seen[sig] = entry
+
     def partition_new(self, findings: List[dict]) -> Tuple[List[dict], List[dict]]:
         """Split into (new, duplicates) WITHOUT recording — caller decides."""
         new, dups = [], []

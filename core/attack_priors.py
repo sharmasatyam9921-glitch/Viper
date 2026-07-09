@@ -105,15 +105,41 @@ class AttackPriors:
         return out
 
     def record(self, technique: str, tech_stack: Optional[List[str]], success: bool,
-               confidence: float = 0.0) -> None:
+               confidence: float = 0.0, reward: Optional[float] = None) -> None:
         """Record one technique's outcome for this hunt's tech stack. No-op if no
-        session was opened or the evograph is unavailable."""
+        session was opened or the evograph is unavailable. ``reward`` overrides the
+        default (1.0 on success, 0.0 otherwise) — used by the outer loop to weight a
+        real submission disposition higher than a mere in-hunt hit."""
         if not self._eg or self._session is None or not technique:
             return
         try:
             self._eg.record_attack(
                 self._session, technique, list(tech_stack or []),
                 bool(success), confidence=float(confidence),
-                reward=1.0 if success else 0.0)
+                reward=(reward if reward is not None else (1.0 if success else 0.0)))
         except Exception as e:  # noqa: BLE001
             logger.debug("attack priors record_attack failed: %s", e)
+
+    # The OUTER learning loop: a real submission DISPOSITION is a far stronger signal
+    # than an in-hunt hit. Weight the reward so classes that actually get accepted/paid
+    # on a stack rank higher next time; a rejection records a failure. Ordering only —
+    # never touches the gate.
+    _DISPOSITION_REWARD = {
+        "paid": 3.0, "resolved": 2.5, "accepted": 2.0, "triaged": 1.5,
+        "informative": 0.5, "duplicate": 0.5, "rejected": 0.0, "n/a": 0.0,
+    }
+
+    def record_outcome(self, technique: str, tech_stack: Optional[List[str]],
+                       disposition: str) -> bool:
+        """Feed a submitted finding's disposition back into the priors. Opens a session
+        on demand. Returns True if recorded. No-op on an unknown disposition."""
+        if not self._eg:
+            return False
+        reward = self._DISPOSITION_REWARD.get(str(disposition).strip().lower())
+        if reward is None:
+            return False
+        if self._session is None:
+            self.start("submission-outcome", tech_stack)
+        self.record(technique, tech_stack, success=reward > 0, confidence=1.0,
+                    reward=reward)
+        return self._session is not None

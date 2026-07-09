@@ -172,6 +172,12 @@ def main():
         from core.evidence_cli import run_evidence_cli
         sys.exit(run_evidence_cli(sys.argv[2:]))
 
+    # `viper.py outcome <disposition> <findings.json> [--tech t1,t2]` — feed a submitted
+    # finding's disposition back into the cross-hunt attack priors (outer learning loop).
+    if len(sys.argv) > 1 and sys.argv[1] == "outcome":
+        from core.outcome_cli import run_outcome_cli
+        sys.exit(run_outcome_cli(sys.argv[2:]))
+
     # `viper.py xbow <benchmarks_dir>` — run VIPER against XBOW validation
     # benchmarks (needs Docker). Scores detection + flag-capture per challenge.
     if len(sys.argv) > 1 and sys.argv[1] == "xbow":

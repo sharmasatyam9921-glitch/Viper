@@ -66,12 +66,12 @@ Error/boolean differential on `*`/`)(` (LDAP) and `' or '1'='1` (XPath) with a b
 mirroring the sqli recheck shape. Read-only. Ships as a lead until the differential is proven.
 Effort: medium.
 
-### 2.4 Outer learning loop — feed submission outcomes back to priors
-Today evograph records per-hunt *technique* outcomes (inner loop). There's **no** loop from
-**submitted → accepted/paid/duplicate** back into the priors. When the operator marks a draft's
-disposition (via `viper.py submissions` / the ledger), reweight `attack_priors` so classes that
-actually *pay out* on a stack rank higher. Closes the outermost feedback loop. FP-safe (ordering
-only). **Files:** `core/submission_ledger.py`, `core/attack_priors.py`. Effort: medium.
+### 2.4 Outer learning loop — feed submission outcomes back to priors ✅ DONE
+`viper.py outcome <disposition> <findings.json> [--tech t1,t2]` (`core/outcome_cli.py`)
+logs the disposition in the ledger (`SubmissionLedger.set_disposition`) and feeds a
+reward-weighted signal into the priors (`AttackPriors.record_outcome`: paid 3.0 > accepted
+2.0 > triaged 1.5 > duplicate/informative 0.5 > rejected 0.0), so classes that actually pay
+out on a stack rank first next time. Ordering only — never touches the gate.
 
 ---
 
