@@ -27,13 +27,11 @@ proto-pollution, deser-surface, oauth-config, cache-poisoning, mass-assignment, 
 
 ## Phase 1 — Now (small, self-contained, high-leverage, FP-safe)
 
-### 1.1 Wire `coverage_critic` to drive a follow-up round
-`core/coverage_critic.py` computes what a hunt *missed* (untested params, unrun techniques,
-unverified claims) — but **nothing consumes its output** (verified: no non-test importer).
-Feed `critique(findings, ran_techniques)` into the HackMode iteration loop so a gap it names
-becomes the next round's targeted dispatch (bounded by the depth budget). Turns a dead
-analysis into an autonomy multiplier. FP-safe (drives *exploration*, never the gate).
-**Files:** `core/hack_mode.py` (iteration loop), `core/coverage_critic.py`. Effort: small.
+### 1.1 Wire `coverage_critic` to drive a follow-up round ✅ DONE
+`core/coverage_critic.py` computed what a hunt *missed* but nothing consumed it.
+`HackMode._run_coverage_round` (teardown, before the gate) now re-probes the critic's
+discovered-but-untested surface in one bounded vuln round; new findings still flow through
+the gate. Opt out with `profile.coverage_followup = False`. FP-safe (exploration only).
 
 ### 1.2 `viper.py evidence verify <manifest> [findings.json]`
 The hunt now writes a signed `<hunt_id>_manifest.json`, but there's no CLI to **verify** it.

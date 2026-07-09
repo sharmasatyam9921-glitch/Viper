@@ -560,6 +560,11 @@ class TestPhase2Pipeline:
             profile = LabProfile()
             profile.phases = ["recon", "vuln", "report"]
             profile.workers = {"recon": ["_test_recon"], "vuln": ["_test_vuln"]}
+            # This test asserts exact per-phase dispatch counts to prove resume skips
+            # completed phases; the orthogonal coverage-critic follow-up round (which
+            # would dispatch an extra vuln phase against the url-less test findings)
+            # must not confound that.
+            profile.coverage_followup = False
 
             # Round 1 — fresh hunt, ts=100 so hunt_id is deterministic
             audit_1 = AuditLogger.for_hunt(

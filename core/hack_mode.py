@@ -495,6 +495,12 @@ class HackMode:
             return
         self._stopped = True
         result.elapsed_s = time.time() - started_at
+        # Coverage-critic follow-up: the "what did I miss?" pass. Probe surface that was
+        # discovered but never tested (unswept hosts, parameter-bearing endpoints with no
+        # finding) in ONE bounded round — BEFORE the gate, so any new findings are
+        # independently confirmed too. Skipped if the hunt already timed out.
+        if not result.timed_out:
+            await self._run_coverage_round(result)
         # Independent validation gate BEFORE scope/auth/proxy are torn down, so
         # re-tests stay in scope and authenticated. Tags validated/submittable.
         await self._run_validation_gate(result)
@@ -1000,6 +1006,45 @@ class HackMode:
     # ------------------------------------------------------------------
     # Phase dispatch
     # ------------------------------------------------------------------
+
+    def _coverage_targets(self) -> list[str]:
+        """URLs the coverage critic flags as discovered-but-never-probed (unswept hosts
+        + parameter-bearing endpoints with no finding), capped. Pure/best-effort."""
+        try:
+            from core.coverage_critic import critique, gaps_to_targets
+            gaps = critique(self._state.get("findings", []))
+            return gaps_to_targets(gaps)[:20]
+        except Exception as exc:   # noqa: BLE001 — the critic must never block teardown
+            logger.debug("coverage critic failed: %s", exc)
+            return []
+
+    async def _run_coverage_round(self, result: HackResult) -> int:
+        """Run ONE vuln round scoped to the coverage critic's unprobed targets, folding
+        any results into the hunt so they flow through the gate. Exploration only — the
+        gate still decides submittable. Opt out with profile.coverage_followup = False."""
+        if not getattr(self.profile, "coverage_followup", True):
+            return 0
+        targets = self._coverage_targets()
+        if not targets:
+            return 0
+        self.narrator.info(
+            f"coverage critic: {len(targets)} discovered-but-unprobed target(s) — "
+            "one follow-up vuln round")
+        self.audit.event("coverage.followup", target=self.target,
+                         payload={"targets": len(targets)})
+        try:
+            phase_res = await self._run_phase("vuln", assets=targets)
+        except Exception as exc:   # noqa: BLE001 — a follow-up round never blocks teardown
+            logger.debug("coverage follow-up round failed: %s", exc)
+            return 0
+        for f in phase_res.findings:
+            (result.surface if _is_surface(f) else result.findings).append(f)
+            self._state.setdefault("findings", []).append(f)
+            try:
+                self.world_model.observe_finding(f)
+            except Exception:
+                pass
+        return phase_res.findings_count
 
     def _write_evidence_manifest(self, result: HackResult) -> None:
         """Write a signed chain-of-custody manifest for the SUBMITTABLE findings — each
