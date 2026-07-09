@@ -890,6 +890,11 @@ class HackMode:
         # roles — never blocks the hunt.
         await self._run_authenticated_crawl()
 
+        # Fold an operator-supplied HAR / Postman export (profile.import_file) into the
+        # attack surface — the richest endpoint+param map for an authed API. Scoped to the
+        # target host; auth header/cookie VALUES are never imported. No-op if unset.
+        await self._run_import_surface()
+
         # On resume: skip phases that already completed in the prior run.
         # Applies only to the FIRST iteration after a resume; subsequent
         # iterations re-run the full pipeline.
@@ -1115,6 +1120,40 @@ class HackMode:
                              "roles": len(sc.roles)})
         except Exception as exc:   # noqa: BLE001 — discovery is best-effort
             logger.debug("authenticated crawl failed: %s", exc)
+
+    async def _run_import_surface(self) -> None:
+        """Fold an operator-supplied HAR / Postman export into the attack surface
+        (endpoints + param names), scoped to the target host. Header/cookie VALUES are
+        never imported — auth stays with the operator's session config. Opt in via
+        ``profile.import_file``; best-effort no-op otherwise."""
+        path = getattr(self.profile, "import_file", None)
+        if not path:
+            return
+        from urllib.parse import urlsplit
+        try:
+            from core.har_import import load_surface_file
+            kind, surf = load_surface_file(path)
+            host = urlsplit(self.target).netloc or self.target
+            surf = surf.scoped(host)
+            if surf.params:
+                from core.payload_library import add_discovered_params
+                add_discovered_params(surf.params)
+            for u in surf.endpoints:
+                self._state.setdefault("findings", []).append({
+                    "type": "endpoint", "vuln_type": f"endpoint:{u}", "title": u,
+                    "asset": urlsplit(u).netloc, "url": u, "severity": "info",
+                    "evidence": f"imported from an operator {kind} export",
+                })
+            if surf.endpoints or surf.params:
+                self.narrator.info(
+                    f"{kind} import: {len(surf.endpoints)} in-scope endpoint(s), "
+                    f"{len(surf.params)} param(s)")
+                self.audit.event(
+                    "recon.import_surface", target=self.target,
+                    payload={"kind": kind, "endpoints": len(surf.endpoints),
+                             "params": len(surf.params)})
+        except Exception as exc:   # noqa: BLE001 — import is best-effort
+            logger.debug("surface import failed: %s", exc)
 
     def _check_named_stop(self) -> tuple[bool, Optional[str]]:
         """Check ONLY the profile.stop_conditions (skip the max_iterations

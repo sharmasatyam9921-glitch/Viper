@@ -86,8 +86,11 @@ out on a stack rank first next time. Ordering only — never touches the gate.
   the inline-secret scan runs on every bundle (`secrets:jsbundle`, routed through the
   unchanged secrets gate). Zero extra fetches; endpoints are `info` surface for the vuln
   workers, so no gate-precision risk.
-- **Postman collection / HAR import** — turn an operator-exported HAR/Postman file into endpoint
-  + param + header targets (read-only, operator-supplied). High signal for authed APIs.
+- **Postman collection / HAR import** ✅ DONE — `core/har_import.py` parses an operator-exported
+  HAR or Postman v2.1 collection into endpoints + query/body param NAMES (auth header/cookie
+  VALUES are NEVER read or persisted — secret-handling boundary). `viper.py import <file> [--host H]`
+  inspects it read-only; `HackMode(profile.import_file=…)` folds the host-scoped surface into a
+  hunt at recon time, exactly like the authenticated-crawl surface.
 - **Resumable-state completeness** — persist findings + `proof_requests` + the evidence manifest
   across `--resume` so a resumed hunt keeps its confirmed set and custody chain.
 - **Calibrated per-host concurrency** — extend the adaptive rate limiter to also learn a safe

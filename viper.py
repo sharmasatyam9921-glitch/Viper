@@ -178,6 +178,12 @@ def main():
         from core.outcome_cli import run_outcome_cli
         sys.exit(run_outcome_cli(sys.argv[2:]))
 
+    # `viper.py import <file.har|collection.json> [--host H]` — inspect an operator's HAR /
+    # Postman export (endpoints/params it would add to a hunt; auth values never read).
+    if len(sys.argv) > 1 and sys.argv[1] == "import":
+        from core.import_cli import run_import_cli
+        sys.exit(run_import_cli(sys.argv[2:]))
+
     # `viper.py xbow <benchmarks_dir>` — run VIPER against XBOW validation
     # benchmarks (needs Docker). Scores detection + flag-capture per challenge.
     if len(sys.argv) > 1 and sys.argv[1] == "xbow":
