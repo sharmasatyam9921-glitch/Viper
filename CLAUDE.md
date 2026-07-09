@@ -329,6 +329,12 @@ assignment** (needs a PATCH write). None mutates target state destructively.
 
 ```
 core/session_context.py    Per-hunt roles + (role,url)->status reachability matrix
+core/authenticated_crawl.py crawl_roles: shallow crawl per operator-supplied role,
+                           records per-role reachability (feeds BOLA/BFLA) + surfaces
+                           authed-only endpoints/params. HackMode auto-seeds roles from
+                           the two-account BOLA config; read-only, discovery only.
+                           (GraphQL introspection + the OpenAPI worker likewise seed
+                           the injection workers with the API's real field/param names.)
 core/browser/              proxy_pipeline (dedup) + session_capture (role-diff) +
                            viper_browser (optional Playwright, graceful degradation)
 core/skill_registry.py     Lazy skill catalog (flat token cost) + skill_catalog.py

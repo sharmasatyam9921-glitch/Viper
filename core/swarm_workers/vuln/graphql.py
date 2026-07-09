@@ -34,6 +34,58 @@ _INTROSPECTION_Q = (
     '{"query":"{ __schema { types { name } } }"}'
 )
 
+# Once introspection is CONFIRMED, a richer read-only query harvests the schema's
+# field + argument + input-field NAMES — the identifiers an attacker injects into.
+# Fed to the injection workers via add_discovered_params so they probe the API's real
+# fields/args instead of a guess list. (The detection query above is left untouched.)
+_SCHEMA_Q = (
+    '{"query":"{ __schema { types { name fields { name args { name } } '
+    'inputFields { name } } } }"}'
+)
+_SEED_CAP = 200
+
+
+def _schema_param_names(data) -> set:
+    """Field + argument + input-field names from a GraphQL introspection result,
+    skipping GraphQL's own ``__``-prefixed introspection meta-types. Never raises."""
+    out: set = set()
+    try:
+        types = (((data or {}).get("data") or {}).get("__schema") or {}).get("types") or []
+    except AttributeError:
+        return out
+    for t in types:
+        if not isinstance(t, dict) or str(t.get("name") or "").startswith("__"):
+            continue
+        for f in t.get("fields") or []:
+            if isinstance(f, dict) and f.get("name"):
+                out.add(str(f["name"]))
+                for a in f.get("args") or []:
+                    if isinstance(a, dict) and a.get("name"):
+                        out.add(str(a["name"]))
+        for inp in t.get("inputFields") or []:
+            if isinstance(inp, dict) and inp.get("name"):
+                out.add(str(inp["name"]))
+        if len(out) >= _SEED_CAP:
+            break
+    return set(list(out)[:_SEED_CAP])
+
+
+async def _seed_schema_params(url: str, timeout: float) -> None:
+    """Fire the richer introspection query and register the schema's field/arg names
+    for the injection workers. Best-effort: any failure is a silent no-op."""
+    try:
+        r = await fetch("POST", url, headers={"Content-Type": "application/json"},
+                        body=_SCHEMA_Q.encode("utf-8"), timeout=timeout,
+                        follow_redirects=False)
+        if not r or not getattr(r, "body", None):
+            return
+        names = _schema_param_names(json.loads(r.body))
+        if names:
+            from core.payload_library import add_discovered_params
+            add_discovered_params(names)
+    except Exception as e:  # noqa: BLE001 — seeding is best-effort
+        logger.debug("graphql param seeding failed: %s", e)
+
 # Structural signatures of a LIVE GraphQL IDE — bootstrap markup / renderer
 # calls / asset references — NOT the product name appearing in human prose.
 # A benign docs/marketing page that merely says "we offered a GraphiQL
@@ -177,6 +229,9 @@ async def _probe_path(base: str, path: str, timeout: float) -> List[dict]:
             "evidence": f"__schema returned {len(types)} types",
             "schema_type_count": len(types),
         })
+        # Introspection is open → harvest the schema's field/arg names to feed the
+        # injection workers (read-only; discovery only, never a finding).
+        await _seed_schema_params(url, timeout)
         return findings
 
     # Introspection blocked but endpoint LIVE — informational

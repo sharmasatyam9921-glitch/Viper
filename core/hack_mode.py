@@ -875,6 +875,13 @@ class HackMode:
             except Exception:   # noqa: BLE001 — learning must never block a hunt
                 self._priors = None
 
+        # Authenticated per-role crawl: if the operator supplied identities (session
+        # roles, or the two-account BOLA config), crawl the target as each so admin/
+        # user-only surface enters the attack surface and per-role reachability is
+        # recorded for the BOLA/BFLA engine. Read-only, discovery only, no-op without
+        # roles — never blocks the hunt.
+        await self._run_authenticated_crawl()
+
         # On resume: skip phases that already completed in the prior run.
         # Applies only to the FIRST iteration after a resume; subsequent
         # iterations re-run the full pipeline.
@@ -991,6 +998,44 @@ class HackMode:
     # ------------------------------------------------------------------
     # Phase dispatch
     # ------------------------------------------------------------------
+
+    async def _run_authenticated_crawl(self) -> None:
+        """Crawl the target once per authenticated role (operator-supplied), recording
+        per-role reachability for the BOLA/BFLA engine and folding the authed-only
+        endpoints + params into the attack surface. Seeds roles from the two-account
+        BOLA config when none were captured. Best-effort; no-op without roles."""
+        from urllib.parse import urlsplit
+        sc = self._session_context
+        try:
+            if sc is not None and not sc.roles and self._bola_config:
+                b = self._bola_config
+                sc.add_role(b.get("owner_name", "A"), b.get("owner_headers", {}),
+                            b.get("owner_markers", []))
+                sc.add_role(b.get("attacker_name", "B"), b.get("attacker_headers", {}),
+                            b.get("attacker_markers", []))
+            if sc is None or not sc.roles:
+                return
+            from core.authenticated_crawl import crawl_roles
+            endpoints, params = await crawl_roles(sc, self.target)
+            if params:
+                from core.payload_library import add_discovered_params
+                add_discovered_params(params)
+            for u in endpoints:
+                self._state.setdefault("findings", []).append({
+                    "type": "endpoint", "vuln_type": f"endpoint:{u}", "title": u,
+                    "asset": urlsplit(u).netloc, "url": u, "severity": "info",
+                    "evidence": "reachable under an authenticated role (per-role crawl)",
+                })
+            if endpoints or params:
+                self.narrator.info(
+                    f"authenticated crawl: {len(endpoints)} authed endpoint(s), "
+                    f"{len(params)} param(s) across {len(sc.roles)} role(s)")
+                self.audit.event(
+                    "recon.authenticated_crawl", target=self.target,
+                    payload={"endpoints": len(endpoints), "params": len(params),
+                             "roles": len(sc.roles)})
+        except Exception as exc:   # noqa: BLE001 — discovery is best-effort
+            logger.debug("authenticated crawl failed: %s", exc)
 
     def _check_named_stop(self) -> tuple[bool, Optional[str]]:
         """Check ONLY the profile.stop_conditions (skip the max_iterations
