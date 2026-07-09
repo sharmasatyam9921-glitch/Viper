@@ -18,7 +18,7 @@ dir-listing/cors), BOLA/BFLA/IDOR, host-header, subdomain-takeover, web-cache-de
 CRLF, clickjacking, cloud-exposure, open-redirect, graphql, nosql-login, jwt (weak-key +
 RS256→HS256 alg-confusion), response-based SSRF, LDAP/XPath injection. • Mutation/regression harness •
 reproducibility refuter • evograph inner learning loop + reasoning recall • OpenAPI /
-GraphQL-schema / authenticated-per-role / source-map discovery • per-host adaptive rate
+GraphQL-schema / authenticated-per-role / source-map + minified-bundle discovery • per-host adaptive rate
 backoff • late-OOB-callback rescue • proof-requests + accurate CVSS + signed
 chain-of-custody manifest + `viper.py leads`. Lead-only read-only detectors:
 proto-pollution, deser-surface, oauth-config, cache-poisoning, mass-assignment, csrf.
@@ -80,8 +80,12 @@ out on a stack rank first next time. Ordering only — never touches the gate.
 
 ## Phase 3 — Discovery depth & reliability
 
-- **JS-bundle deep mining** — beyond source maps: parse minified bundles for `fetch('/api/…')`
-  / route tables / inline secrets when no `.map` is served. (`core/swarm_workers/recon/`.)
+- **JS-bundle deep mining** ✅ DONE — `sourcemap.py` now falls back to mining the MINIFIED
+  bundle it already fetched when no `.map` is served: `mine_bundle()` parses `fetch(...)` /
+  `axios.get(...)` / `xhr.open(...)` call sites + quoted API paths for same-host routes, and
+  the inline-secret scan runs on every bundle (`secrets:jsbundle`, routed through the
+  unchanged secrets gate). Zero extra fetches; endpoints are `info` surface for the vuln
+  workers, so no gate-precision risk.
 - **Postman collection / HAR import** — turn an operator-exported HAR/Postman file into endpoint
   + param + header targets (read-only, operator-supplied). High signal for authed APIs.
 - **Resumable-state completeness** — persist findings + `proof_requests` + the evidence manifest

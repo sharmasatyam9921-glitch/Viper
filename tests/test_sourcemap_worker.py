@@ -14,7 +14,7 @@ import core.swarm_workers  # noqa: F401,E402
 from core.swarm_engine import SwarmAgent  # noqa: E402
 from core.swarm_workers import get_worker_runner, list_workers  # noqa: E402
 from core.swarm_workers.recon.sourcemap import (  # noqa: E402
-    _secrets_in, _sourcemap_url, mine_sourcemap,
+    _secrets_in, _sourcemap_url, mine_bundle, mine_sourcemap,
 )
 from core.swarm_workers.vuln._http import HttpResp  # noqa: E402
 from core.swarm_validation import validate_findings  # noqa: E402
@@ -110,6 +110,71 @@ def test_sourcemap_secret_confirms_through_the_existing_secrets_gate():
     async def fetch(method, url, *, headers=None, timeout=10.0, **kw):
         return responder(method, url, headers or {})
     out = asyncio.run(validate_findings([secret], fetch=fetch))[0]
+    assert out["submittable"] and out["validation_confidence"] >= 0.5
+
+
+# --- Minified-bundle mining (no source map served) ---------------------------------
+_BUNDLE = (
+    "!function(){var a='" + _LIVE + "';"
+    "fetch('/api/orders?status=open');"
+    "axios.get('/v2/profile?uid=7');"
+    "n.open('GET','https://cdn.other-host.example/x');"     # cross-host -> dropped
+    "}();"
+)
+
+
+def test_mine_bundle_extracts_fetch_and_axios_call_sites():
+    eps, params = mine_bundle(_BUNDLE, "http://t/")
+    assert "http://t/api/orders?status=open" in eps
+    assert "http://t/v2/profile?uid=7" in eps
+    assert not any("other-host" in u for u in eps)          # cross-host dropped
+    assert {"status", "uid"} <= params
+
+
+def test_mine_bundle_failclosed_on_empty():
+    assert mine_bundle("", "http://t/") == ([], set())
+    assert mine_bundle(None, "http://t/") == ([], set())
+
+
+async def _fake_nomap(method, url, **kw):
+    if url.endswith(".js.map"):
+        return HttpResp(404, {}, "not found", url)        # no map served
+    if url.endswith(".js"):
+        return HttpResp(200, {"content-type": "application/javascript"}, _BUNDLE, url)
+    return HttpResp(200, {"content-type": "text/html"},
+                    '<script src="/app.js"></script>', url)
+
+
+def test_worker_mines_minified_bundle_when_no_map():
+    from core.payload_library import clear_discovered_params, get_discovered_params
+    clear_discovered_params()
+    try:
+        async def go():
+            with patch("core.swarm_workers.recon.sourcemap.fetch", side_effect=_fake_nomap):
+                return await get_worker_runner("recon", "sourcemap")(_agent())
+        findings = asyncio.run(go())
+        secrets = [f for f in findings if f["type"] == "secrets"]
+        eps = [f for f in findings if f["type"] == "endpoint"]
+        # Inline bundle secret is emitted against the .js URL (jsbundle, not sourcemap).
+        assert secrets and secrets[0]["vuln_type"] == "secrets:jsbundle"
+        assert secrets[0]["url"].endswith("/app.js")
+        assert any("/api/orders" in f["url"] for f in eps)
+        assert {"status", "uid"} <= set(get_discovered_params())
+    finally:
+        clear_discovered_params()
+
+
+def test_bundle_secret_confirms_through_the_existing_secrets_gate():
+    # secrets:jsbundle (url = .js bundle) routes through _recheck_secrets exactly like
+    # the sourcemap secret: re-fetch the bundle, re-run the shape regex -> submittable.
+    def responder(m, url, h):
+        return HttpResp(200, {"content-type": "application/javascript"}, _BUNDLE, url)
+
+    async def fetch(method, url, *, headers=None, timeout=10.0, **kw):
+        return responder(method, url, headers or {})
+    finding = {"type": "secrets", "vuln_type": "secrets:jsbundle",
+               "url": "http://t/app.js", "severity": "high"}
+    out = asyncio.run(validate_findings([finding], fetch=fetch))[0]
     assert out["submittable"] and out["validation_confidence"] >= 0.5
 
 
