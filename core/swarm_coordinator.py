@@ -453,16 +453,20 @@ class SwarmCoordinator:
             agent_id=self.coordinator_id,
         )
         if self.audit:
+            from core.resume_state import finding_to_resume_payload
+            # Persist the fields a --resume needs to RE-CONFIRM this candidate (vuln_type,
+            # parameter, payload, oob_token, ...), not just title/url — otherwise a
+            # carried-forward true positive can't be re-verified by the gate and its
+            # custody hash won't match. `technique` is kept for telemetry/back-compat.
+            payload = finding_to_resume_payload(f)
+            payload.setdefault("title", f.get("title") or f.get("type") or technique)
+            payload["technique"] = technique
             self.audit.event(
                 "finding.published",
                 phase=self.PHASE,
                 target=target,
                 severity=str(f.get("severity", "info")),
-                payload={
-                    "title": f.get("title") or f.get("type") or technique,
-                    "technique": technique,
-                    "url": f.get("url"),
-                },
+                payload=payload,
             )
 
     # ------------------------------------------------------------------

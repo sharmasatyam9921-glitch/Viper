@@ -365,17 +365,17 @@ class HackMode:
                     (ev.payload or {}).get("iteration") or 0
                 ))
             elif ev.action == "finding.published":
-                # Carry forward the published findings so the next iteration
-                # can re-use them as asset inputs without re-running recon.
-                p = ev.payload or {}
-                prior_findings.append({
-                    "type": (p.get("title") or "").split(":")[0] or "finding",
-                    "vuln_type": (p.get("technique") or "") + ":" + (p.get("title") or ""),
-                    "title": p.get("title"),
-                    "url": p.get("url"),
-                    "severity": ev.severity or "info",
-                    "phase": ev.phase,
-                })
+                # Carry forward the published findings so the next iteration can re-use
+                # them as asset inputs AND the gate can re-confirm them at teardown. The
+                # payload now preserves vuln_type/parameter/payload/oob_token (single
+                # source of truth: resume_state), so a carried-forward true positive keeps
+                # its confirmability and its chain-of-custody hash.
+                from core.resume_state import finding_from_resume_payload
+                f = finding_from_resume_payload(ev.payload or {})
+                if ev.severity:
+                    f.setdefault("severity", ev.severity)
+                f["phase"] = ev.phase
+                prior_findings.append(f)
 
         if not target:
             raise RuntimeError(

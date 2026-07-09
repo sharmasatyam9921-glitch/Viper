@@ -91,8 +91,13 @@ out on a stack rank first next time. Ordering only — never touches the gate.
   VALUES are NEVER read or persisted — secret-handling boundary). `viper.py import <file> [--host H]`
   inspects it read-only; `HackMode(profile.import_file=…)` folds the host-scoped surface into a
   hunt at recon time, exactly like the authenticated-crawl surface.
-- **Resumable-state completeness** — persist findings + `proof_requests` + the evidence manifest
-  across `--resume` so a resumed hunt keeps its confirmed set and custody chain.
+- **Resumable-state completeness** ✅ DONE — `finding.published` used to persist only
+  title/technique/url, so `--resume` reconstructed findings LOSSILY (no vuln_type/parameter/
+  payload/oob_token) and a carried-forward true positive could no longer be re-confirmed by the
+  gate nor keep a stable custody hash. `core/resume_state.py` is now the single source of truth
+  for the (small, non-sensitive) resume field set; swarm_coordinator persists it and
+  `HackMode.resume` reconstructs faithfully (legacy logs still load). proof_requests / auth are
+  deliberately NOT carried — the gate recomputes them in the resumed run.
 - **Calibrated per-host concurrency** — extend the adaptive rate limiter to also learn a safe
   concurrency ceiling per host, not just RPS.
 
