@@ -98,8 +98,13 @@ out on a stack rank first next time. Ordering only — never touches the gate.
   for the (small, non-sensitive) resume field set; swarm_coordinator persists it and
   `HackMode.resume` reconstructs faithfully (legacy logs still load). proof_requests / auth are
   deliberately NOT carried — the gate recomputes them in the resumed run.
-- **Calibrated per-host concurrency** — extend the adaptive rate limiter to also learn a safe
-  concurrency ceiling per host, not just RPS.
+- **Calibrated per-host concurrency** ✅ DONE — `_rate_limit.py` now gates SIMULTANEOUS in-flight
+  requests per host (a ceiling orthogonal to RPS): `acquire_slot`/`release_slot`, wired into
+  `_http.fetch` (finally-released), with the same 429/503 signal halving the concurrency ceiling
+  (floor 1) and +1 recovery on sustained success. A fragile/connection-limited host is throttled
+  on parallelism as well as rate; unthrottled benchmarks bypass it. FP-safe (pacing only).
+
+**Phase 3 is complete.** ✅
 
 ---
 

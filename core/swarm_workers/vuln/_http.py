@@ -250,20 +250,27 @@ async def fetch(
         auth = _auth_var.get()
         if auth:
             headers = {**auth, **(headers or {})}
+    slot_held = False
     if rate_limit and url:
         # Lazy import to keep this module dependency-light at top of file
-        from ._rate_limit import wait_for_token
-        ok = await wait_for_token(url)
+        from ._rate_limit import enter_host, wait_for_token
+        ok = await wait_for_token(url)                 # RPS pacing
         if not ok:
             logger.debug("rate limit blocked %s %s", method, url)
             return None
-    resp = await asyncio.to_thread(
-        _fetch_sync, method, url,
-        headers=headers, body=body, timeout=timeout,
-        follow_redirects=follow_redirects, proxy=_proxy_var.get(),
-    )
-    # Feed the response back so the per-host rate adapts to the target's own overload
-    # signals (429/503 -> back off; sustained success -> recover). Best-effort.
+        slot_held = await enter_host(url)              # per-host concurrency ceiling
+    try:
+        resp = await asyncio.to_thread(
+            _fetch_sync, method, url,
+            headers=headers, body=body, timeout=timeout,
+            follow_redirects=follow_redirects, proxy=_proxy_var.get(),
+        )
+    finally:
+        if slot_held:
+            from ._rate_limit import leave_host
+            await leave_host(url)
+    # Feed the response back so the per-host rate + concurrency adapt to the target's own
+    # overload signals (429/503 -> back off; sustained success -> recover). Best-effort.
     if rate_limit and url and resp is not None:
         from ._rate_limit import record_response
         await record_response(url, getattr(resp, "status", 0))

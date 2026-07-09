@@ -35,6 +35,15 @@ _MIN_RATE_PER_S = 0.5      # never throttle a host below this
 _RECOVER_AFTER = 12        # consecutive healthy responses between recovery steps
 _RECOVER_STEP = 3.0        # additive rate recovery (req/s) per step, up to base_rate
 
+# Per-host CONCURRENCY ceiling — orthogonal to RPS. RPS paces the request RATE; this caps
+# the number of SIMULTANEOUS in-flight requests to one host. A fragile server (or a
+# connection-limited WAF) can accept 30 req/s but choke on many parallel connections, so
+# the same overload signals (429/503) that back off the rate also halve the concurrency
+# ceiling (down to a floor of 1), recovering by +1 on sustained success.
+_BASE_CONCURRENCY = 8      # max simultaneous in-flight per host at full health
+_MIN_CONCURRENCY = 1       # never below fully-serialized
+_SLOT_POLL_S = 0.02        # re-check cadence while a host is at its concurrency ceiling
+
 
 @dataclass
 class _Bucket:
@@ -44,17 +53,29 @@ class _Bucket:
     last_refill: float
     base_rate: float = 0.0      # the configured ceiling to recover back toward
     ok_streak: int = 0          # consecutive non-overload responses observed
+    conc_limit: int = _BASE_CONCURRENCY   # current max simultaneous in-flight
+    conc_base: int = _BASE_CONCURRENCY    # ceiling to recover concurrency back toward
+    in_flight: int = 0                    # requests currently in flight to this host
 
 
 class HostRateLimiter:
     """Token-bucket per host. Shared global instance lives at
     `_DEFAULT`; tests can construct their own."""
 
-    def __init__(self, rate_per_s: float = 30.0, burst: float = 60.0) -> None:
+    def __init__(self, rate_per_s: float = 30.0, burst: float = 60.0,
+                 base_concurrency: int = _BASE_CONCURRENCY) -> None:
         self.rate_per_s = rate_per_s
         self.burst = burst
+        self.base_concurrency = max(_MIN_CONCURRENCY, int(base_concurrency))
         self._buckets: dict[str, _Bucket] = {}
         self._lock = asyncio.Lock()
+
+    def _new_bucket(self, now: float) -> _Bucket:
+        return _Bucket(
+            rate_per_s=self.rate_per_s, burst=self.burst, tokens=self.burst,
+            last_refill=now, base_rate=self.rate_per_s,
+            conc_limit=self.base_concurrency, conc_base=self.base_concurrency,
+        )
 
     @staticmethod
     def _host_of(url_or_host: str) -> str:
@@ -79,13 +100,7 @@ class HostRateLimiter:
                 bucket = self._buckets.get(host)
                 now = time.time()
                 if bucket is None:
-                    bucket = _Bucket(
-                        rate_per_s=self.rate_per_s,
-                        burst=self.burst,
-                        tokens=self.burst,
-                        last_refill=now,
-                        base_rate=self.rate_per_s,
-                    )
+                    bucket = self._new_bucket(now)
                     self._buckets[host] = bucket
                 # Refill
                 elapsed = now - bucket.last_refill
@@ -106,6 +121,40 @@ class HostRateLimiter:
                 return False
             await asyncio.sleep(min(sleep_s, max(deadline - time.time(), 0.001)))
 
+    async def acquire_slot(self, url_or_host: str, *, max_wait_s: float = 30.0) -> bool:
+        """Take a per-host concurrency slot, waiting if the host is already at its adaptive
+        ceiling. Returns True once a slot is held (caller MUST later call `release_slot`),
+        or False if none freed within max_wait_s. Polls without holding the lock so other
+        coroutines can release. Complements `acquire` (RPS): rate AND parallelism are both
+        capped per host."""
+        host = self._host_of(url_or_host)
+        if not host:
+            return True
+        deadline = time.time() + max_wait_s
+        while True:
+            async with self._lock:
+                bucket = self._buckets.get(host)
+                if bucket is None:
+                    bucket = self._new_bucket(time.time())
+                    self._buckets[host] = bucket
+                if bucket.in_flight < bucket.conc_limit:
+                    bucket.in_flight += 1
+                    return True
+            if time.time() >= deadline:
+                logger.debug("concurrency slot timed out for %s", host)
+                return False
+            await asyncio.sleep(_SLOT_POLL_S)
+
+    async def release_slot(self, url_or_host: str) -> None:
+        """Release a concurrency slot previously taken by `acquire_slot`. Never underflows."""
+        host = self._host_of(url_or_host)
+        if not host:
+            return
+        async with self._lock:
+            bucket = self._buckets.get(host)
+            if bucket and bucket.in_flight > 0:
+                bucket.in_flight -= 1
+
     async def record(self, url_or_host: str, status: int) -> None:
         """Feed a response status back so the host's rate adapts to the target's own
         overload signals: multiplicative backoff on 429/503 (down to _MIN_RATE_PER_S),
@@ -123,17 +172,22 @@ class HostRateLimiter:
             base = bucket.base_rate or self.rate_per_s
             if status in _OVERLOAD_STATUSES:
                 new_rate = max(_MIN_RATE_PER_S, bucket.rate_per_s * _BACKOFF_FACTOR)
-                if new_rate < bucket.rate_per_s:
-                    logger.debug("backing off %s: %.2f -> %.2f req/s (HTTP %d)",
-                                 host, bucket.rate_per_s, new_rate, status)
+                new_conc = max(_MIN_CONCURRENCY, bucket.conc_limit // 2)
+                if new_rate < bucket.rate_per_s or new_conc < bucket.conc_limit:
+                    logger.debug("backing off %s: %.2f->%.2f req/s, conc %d->%d (HTTP %d)",
+                                 host, bucket.rate_per_s, new_rate,
+                                 bucket.conc_limit, new_conc, status)
                 bucket.rate_per_s = new_rate
+                bucket.conc_limit = new_conc
                 bucket.ok_streak = 0
                 # Drain to the new rate so the very next request pauses (cool-down).
                 bucket.tokens = min(bucket.tokens, bucket.rate_per_s)
             elif status and 200 <= status < 500:      # a normal, healthy response
                 bucket.ok_streak += 1
-                if bucket.ok_streak >= _RECOVER_AFTER and bucket.rate_per_s < base:
+                if bucket.ok_streak >= _RECOVER_AFTER and (
+                        bucket.rate_per_s < base or bucket.conc_limit < bucket.conc_base):
                     bucket.rate_per_s = min(base, bucket.rate_per_s + _RECOVER_STEP)
+                    bucket.conc_limit = min(bucket.conc_base, bucket.conc_limit + 1)
                     bucket.ok_streak = 0
             else:                                       # 5xx / network failure: pause recovery
                 bucket.ok_streak = 0
@@ -172,6 +226,28 @@ async def record_response(url_or_host: str, status: int) -> None:
     try:
         await _DEFAULT.record(url_or_host, status)
     except Exception:   # noqa: BLE001 — adaptive pacing is never load-bearing
+        pass
+
+
+async def enter_host(url_or_host: str) -> bool:
+    """Take a per-host concurrency slot on the default limiter (see acquire_slot).
+    Returns True if held (caller must `leave_host`), False on timeout. Always True when
+    unthrottled."""
+    if _unthrottled:
+        return True
+    try:
+        return await _DEFAULT.acquire_slot(url_or_host)
+    except Exception:   # noqa: BLE001 — concurrency pacing is never load-bearing
+        return True
+
+
+async def leave_host(url_or_host: str) -> None:
+    """Release a per-host concurrency slot on the default limiter. No-op when unthrottled."""
+    if _unthrottled:
+        return
+    try:
+        await _DEFAULT.release_slot(url_or_host)
+    except Exception:   # noqa: BLE001
         pass
 
 

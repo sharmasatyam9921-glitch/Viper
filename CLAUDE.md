@@ -412,8 +412,10 @@ Terminal security: allowlist-only pentest tools, shell metacharacter blocking, n
 3. Verify every finding before reporting (`finding_validator.py` — 37 vuln-type behavioral checks)
 4. Rate limiting enforced (`rate_limiter.py` — token bucket + human timing). The
    swarm request path (`core/swarm_workers/vuln/_rate_limit.py`) adds per-host
-   ADAPTIVE backoff: a target's own 429/503 signals multiplicatively throttle it
-   down (to a 0.5 req/s floor), recovering gradually on sustained healthy responses
-   — fast on healthy targets, automatically gentle on fragile ones / WAFs.
+   ADAPTIVE backoff on TWO axes: a target's own 429/503 signals multiplicatively
+   throttle its request RATE down (to a 0.5 req/s floor) AND halve its CONCURRENCY
+   ceiling (simultaneous in-flight, floor 1), both recovering gradually on sustained
+   healthy responses — fast on healthy targets, automatically gentle on fragile ones
+   / connection-limited WAFs.
 5. Tool confirmation gate for dangerous operations
 6. Findings redacted — no PII/credentials in reports
