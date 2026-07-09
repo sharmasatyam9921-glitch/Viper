@@ -58,10 +58,16 @@ from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
 from ._http import HttpResp, add_query, fetch, normalize_target_url
+from ._oob import fire_oob
 
 logger = logging.getLogger("viper.swarm_workers.vuln.ssti_probe")
 
 TECHNIQUE = "ssti_probe"
+
+# Blind-SSTI OOB payloads across the common template engines (all fired under one
+# canary; a callback from any confirms). See core/oob/canary.py:payloads_for.
+_SSTI_OOB_KEYS = ("ssti_jinja", "ssti_twig", "ssti_freemarker", "ssti_smarty",
+                  "ssti_erb")
 
 # Default params to fuzz when the target URL carries none of its own.
 _DEFAULT_PARAMS = ["id", "name", "q", "search", "page", "template", "view", "lang"]
@@ -316,14 +322,29 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # params run concurrently (bounded). Order preserved; verdict-identical.
     _sem = asyncio.Semaphore(6)
 
-    async def _bounded(p: str) -> List[dict]:
+    async def _bounded(p: str, do_oob: bool) -> List[dict]:
         async with _sem:
+            out: List[dict] = []
+            # Blind SSTI: fire an OOB canary (no-op without an OOB server). Reflection
+            # detection below catches in-band SSTI; a template engine that evaluates but
+            # doesn't reflect (async/email/log rendering) is only provable out-of-band —
+            # a backend callback flips it to submittable via the existing gate path.
+            if do_oob:
+                try:
+                    out.extend(await fire_oob(
+                        url, p, vuln_type=f"ssti:blind:{p}",
+                        title=f"Blind SSTI candidate via ?{p}= (out-of-band canary)",
+                        cwe="CWE-1336", payload_key=_SSTI_OOB_KEYS,
+                        severity="critical", timeout=timeout))
+                except Exception as e:  # noqa: BLE001 — OOB is best-effort
+                    logger.debug("ssti oob %s?%s failed: %s", url, p, e)
             try:
-                return await _probe_param_ssti(url, p, timeout)
+                out.extend(await _probe_param_ssti(url, p, timeout))
             except Exception as e:  # noqa: BLE001
                 logger.debug("ssti probe %s?%s failed: %s", url, p, e)
-                return []
-    groups = await asyncio.gather(*[_bounded(p) for p in params])
+            return out
+    # Cap the OOB fan-out to the first few params (each fires several engine payloads).
+    groups = await asyncio.gather(*[_bounded(p, i < 6) for i, p in enumerate(params)])
     return [f for g in groups for f in g]
 
 

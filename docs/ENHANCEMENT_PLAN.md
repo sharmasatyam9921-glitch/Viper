@@ -49,14 +49,12 @@ cases), 0 FP — guarded by the mutation harness", quantifying trust beyond a ba
 
 ## Phase 2 — Next (new confirmable coverage, still FP-safe & non-destructive)
 
-### 2.1 Blind SSTI via OOB canary  ★ highest-value new class
-`core/swarm_workers/vuln/ssti_probe.py` is reflection-only — **no `fire_oob`** (verified).
-The whole OOB path already exists end-to-end (canary templates in `core/oob/canary.py`, the
-`fire_oob` pattern used by sqli/xxe/ssrf/cmdi, and the gate's `oob_token` confirmation). Add
-an OOB phase: inject a canary-URL SSTI payload per candidate param and attach `oob_token`; a
-callback flips it to submittable via the *existing* gate path — **zero new gate logic**.
-Blind SSTI (async/email/log template rendering) is currently invisible and is critical-sev.
-FP-safe (per-run canary; a token that never calls back stays a lead). Effort: medium.
+### 2.1 Blind SSTI via OOB canary ✅ DONE
+`ssti_probe.py` now fires an OOB canary (first 6 params) with engine-specific template
+payloads (Jinja/Twig/Freemarker/Smarty/ERB) added to `canary.py`; `fire_oob` was extended
+to fire a LIST of payload keys under one canary. A backend callback flips it to submittable
+via the existing `oob_token` gate path — zero new gate logic, same read-only-`curl`-to-our-
+canary shape as blind cmdi. Confirmed end-to-end in test_oob_workers.
 
 ### 2.2 Email / SMTP header injection (CWE-93 sibling of CRLF)
 A `to`/`subject`/`name` param that splits into an extra email header. Confirm read-only via a

