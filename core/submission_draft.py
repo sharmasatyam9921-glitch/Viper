@@ -124,6 +124,43 @@ _CLASS = {
              "(broken function-level authorization, OWASP API #5).",
              "Enforce role/permission checks server-side on every privileged "
              "endpoint; deny by default; never rely on UI-hidden routes."),
+    "ssrf": ("CWE-918", 8.6, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+             "The server can be coaxed into fetching attacker-chosen internal URLs — "
+             "here it returned cloud-metadata / internal-service content, exposing "
+             "credentials and the internal network.",
+             "Enforce an allow-list of outbound hosts/schemes; block link-local and "
+             "private ranges (169.254/169.254.169.254, 127/8, 10/8, 172.16/12, "
+             "192.168/16); require IMDSv2; never fetch a raw user-supplied URL."),
+    "nosql": ("CWE-943", 9.8, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "A NoSQL query operator injected into the login body authenticates "
+              "without valid credentials — full authentication bypass.",
+              "Reject non-string credential fields; cast/validate types before the "
+              "query; use an ODM that disallows operator objects from user input."),
+    "jwt": ("CWE-347", 8.1, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "The JWT signature can be forged (weak HMAC key, or RS256->HS256 "
+            "algorithm confusion using the public key as the HMAC secret) — an "
+            "attacker mints tokens for any identity, bypassing authentication.",
+            "Use a strong, secret signing key; pin the expected algorithm server-side "
+            "(never trust the token's alg header); reject HS* when an RSA key is "
+            "configured; rotate the key."),
+    "graphql": ("CWE-200", 5.3, "AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+                "GraphQL introspection (or an exposed IDE) leaks the full schema — "
+                "every type, field, and argument — mapping the API's attack surface "
+                "for follow-on injection/IDOR.",
+                "Disable introspection and the GraphiQL/Playground IDE in production; "
+                "enforce query depth/complexity limits and field-level authorization."),
+    "xxe": ("CWE-611", 8.6, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+            "An XML parser resolves external entities, reading local files "
+            "(/etc/passwd here) and enabling SSRF/blind exfiltration.",
+            "Disable DOCTYPE/external-entity resolution in the XML parser "
+            "(FEATURE_SECURE_PROCESSING / disallow-doctype-decl); prefer a "
+            "non-XML format where possible."),
+    "crlf": ("CWE-93", 6.1, "AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+             "Unsanitised CR/LF in a parameter splits into an attacker-controlled "
+             "response header — response splitting, header/cookie injection, and "
+             "cache poisoning.",
+             "Strip/deny CR and LF in any value reflected into a response header; "
+             "use the framework's header API rather than building headers by string."),
     "chain": ("CWE-Other", 9.0, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
               "Multiple findings compose into a higher-severity attack chain.",
               "Remediate each contributing finding; the chain is broken if any "
@@ -142,6 +179,11 @@ _HEAD_ALIAS = {
     "ssti_error": "ssti", "cmdi": "rce", "command_injection": "rce",
     "cors_wildcard": "cors", "cors_origin_reflect": "cors", "cors_null_origin": "cors",
     "actuator_env": "env_exposed", "js_secret": "secret", "github_secret": "secret",
+    "secrets": "secret", "sourcemap": "secret",
+    "nosql_injection": "nosql",
+    "graphql_introspection": "graphql", "graphql_ide": "graphql",
+    "graphql_endpoint": "graphql",
+    "crlf_header_injection": "crlf", "crlf_injection": "crlf",
 }
 
 
