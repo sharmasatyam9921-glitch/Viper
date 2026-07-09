@@ -34,6 +34,7 @@ from . import (  # noqa: F401
     dns,
     endpoints,
     github_secrets,
+    openapi,
     port_scan,
     shodan,
     subdomain,
@@ -42,6 +43,6 @@ from . import (  # noqa: F401
 )
 
 __all__ = [
-    "crtsh", "dns", "endpoints", "github_secrets", "port_scan",
+    "crtsh", "dns", "endpoints", "github_secrets", "openapi", "port_scan",
     "shodan", "subdomain", "wappalyzer", "wayback",
 ]

@@ -188,6 +188,11 @@ viper.py → ViperCore.full_hunt(target)
   Phase 2.0: Port Scanning (naabu, Shodan InternetDB)
   Phase 3.0: HTTP Probing (httpx, Wappalyzer 3920 techs)
   Phase 4.0: Resource Enum (Katana, GAU, Arjun, ParamSpider, FFuf, Kiterunner)
+             + swarm recon `openapi` worker: ingests a published OpenAPI 3.x /
+             Swagger 2.0 spec (read-only) into real endpoint targets (path-templated,
+             query-seeded) + registers every documented param name via
+             add_discovered_params, so the confirmed injection/SSRF/access-control
+             workers probe the API's ACTUAL routes+params instead of guessing.
   Phase 5.0: Vuln Scanning (Nuclei, 28 security checks, WAF bypass)
   Phase 6.0: MITRE Enrichment (CVE→CWE→CAPEC offline)
   Phase 7.0: Manual Attacks (ReACT loop + Q-learning + Deep Think)
