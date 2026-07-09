@@ -193,6 +193,10 @@ viper.py → ViperCore.full_hunt(target)
              query-seeded) + registers every documented param name via
              add_discovered_params, so the confirmed injection/SSRF/access-control
              workers probe the API's ACTUAL routes+params instead of guessing.
+             + swarm recon `sourcemap` worker: fetches served .js.map files (only
+             HEAD-checked before) and mines them — shape-specific credentials
+             (gate-confirmed by the existing _recheck_secrets, reusing its regexes)
+             + routes/params recovered from sourcesContent fed to the vuln workers.
   Phase 5.0: Vuln Scanning (Nuclei, 28 security checks, WAF bypass)
   Phase 6.0: MITRE Enrichment (CVE→CWE→CAPEC offline)
   Phase 7.0: Manual Attacks (ReACT loop + Q-learning + Deep Think)
