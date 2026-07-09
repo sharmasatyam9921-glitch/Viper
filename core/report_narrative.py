@@ -686,7 +686,7 @@ async def generate_ciso_report(
         logger.info("generate_ciso_report: no model_router, using template fallback")
         return _template_ciso_report(condensed)
 
-    # LLM path: single-shot JSON generation (like RedAmon's approach)
+    # LLM path: single-shot JSON generation
     user_prompt = (
         f"Security assessment data:\n```json\n"
         f"{json.dumps(condensed, indent=2, default=str)}\n```\n\n"

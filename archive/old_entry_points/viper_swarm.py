@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VIPER Swarm - PentAGI-inspired parallel specialist agents
+VIPER Swarm - parallel specialist agents
 Instead of one VIPER doing everything serially, split into:
 
   VIPER-RECON    → subdomains, tech fingerprint, endpoint discovery
@@ -131,7 +131,7 @@ def create_swarm_plan(program: str, domain: str, scope: list) -> dict:
 
 def print_swarm_usage():
     print("""
-VIPER Swarm - Parallel specialist agents (PentAGI-inspired)
+VIPER Swarm - Parallel specialist agents
 
 Usage from Clawdbot:
   1. Create plan:

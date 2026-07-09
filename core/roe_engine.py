@@ -1,9 +1,9 @@
 """
 VIPER 4.0 Rules of Engagement Engine (F5)
 
-Machine-enforceable RoE that gates every tool execution and target interaction.
-Inspired by RedAmon's ``build_roe_prompt_section`` but adapted for VIPER's
-standalone architecture (no project_settings dependency).
+Machine-enforceable RoE that gates every tool execution and target interaction,
+and renders a scope/authorization section for LLM system-prompt injection. Built
+for VIPER's standalone architecture (no external project_settings dependency).
 
 Supports loading from JSON / YAML / dict, runtime enforcement, and LLM
 system-prompt injection.
@@ -302,10 +302,8 @@ class RoEEngine:
     # -- LLM prompt injection --------------------------------------------------
 
     def to_prompt_section(self) -> str:
-        """Generate a prompt section for LLM system-prompt injection.
-
-        Mirrors RedAmon's ``build_roe_prompt_section`` but reads directly
-        from the ``RulesOfEngagement`` dataclass instead of project settings.
+        """Generate a prompt section for LLM system-prompt injection, read directly
+        from the ``RulesOfEngagement`` dataclass (not from external project settings).
         """
         roe = self.roe
 

@@ -117,13 +117,13 @@ hackagent/
 └── reports/             # Scan outputs
 ```
 
-## Sources
+## Capabilities
 
-AI techniques integrated from:
-- [PromptXploit](https://github.com/Neural-alchemy/promptxploit) - LLM Pentesting Framework
-- [GhostHacker](https://github.com/itsjwill/ghosthacker) - Adversarial AI Pentester
-- [ProtectAI ai-exploits](https://github.com/protectai/ai-exploits) - ML Infrastructure Exploits
-- [MCP-Penetration-testing](https://github.com/Mr-Infect/MCP-Penetration-testing) - OWASP MCP Top 10
+VIPER integrates techniques across several security domains:
+- LLM / prompt-injection testing for AI-backed applications
+- Adversarial AI pentesting workflows
+- ML-infrastructure exploit checks
+- MCP (Model Context Protocol) security testing aligned to the OWASP MCP Top 10
 
 ## License
 

@@ -6,7 +6,7 @@ Active HTTP parameter discovery using Arjun. Tests common parameter names
 against endpoints to find hidden query/body parameters (debug params, admin
 functionality, hidden API inputs).
 
-Inspired by RedAmon's arjun_helpers.py. Runs arjun as a subprocess with:
+Runs arjun as a subprocess with:
   - GET, POST, JSON body parameter discovery
   - Rate limiting & proxy (Tor/SOCKS) support
   - Timeout handling with partial result recovery
@@ -149,7 +149,7 @@ def arjun_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Truncated JSON recovery (from RedAmon)
+# Truncated JSON recovery
 # ---------------------------------------------------------------------------
 
 def _recover_truncated_json(content: str):
