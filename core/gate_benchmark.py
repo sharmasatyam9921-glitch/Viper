@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
+import re as _re
 from dataclasses import dataclass, field
-from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from core.swarm_validation import validate_findings
 from core.swarm_workers.vuln._http import HttpResp
@@ -482,6 +484,58 @@ def _jwt_accept_all(m, url, h):
     return HttpResp(200, {}, '{"ok":true}', url)
 
 
+# --- xxe / crlf: model the worker the gate re-runs (patched via patch_workers) ---
+def _xxe_vuln(m, url, h, body):
+    # A parser that resolves the external entity: the XXE payload (file:///etc/passwd)
+    # returns passwd content; the benign control XML does not -> file-read confirmed.
+    b = body.decode() if isinstance(body, (bytes, bytearray)) else (body or "")
+    if "file:///etc/passwd" in b:
+        return HttpResp(200, {}, "<r>root:x:0:0:root:/root:/bin/bash</r>", url)
+    return HttpResp(200, {}, "<r>viper-xxe-control</r>", url)
+
+
+_xxe_vuln.wants_body = True
+
+
+def _xxe_reflect_safe(m, url, h, body):
+    # A hardened endpoint that merely ECHOES the request body (no parsing): the worker
+    # strips the payload echo, so our own DOCTYPE/ENTITY text can't fake a signal.
+    b = body.decode() if isinstance(body, (bytes, bytearray)) else (body or "")
+    return HttpResp(200, {}, f"<echo>{b}</echo>", url)
+
+
+_xxe_reflect_safe.wants_body = True
+
+
+def _xxe_inert_safe(m, url, h, body):
+    # Accepts XML but never resolves entities and emits no parser error -> no signal.
+    return HttpResp(200, {}, "<r>ok</r>", url)
+
+
+_xxe_inert_safe.wants_body = True
+
+
+def _crlf_vuln(m, url, h):
+    # A server that splits on our CRLF and emits the injected header carrying the
+    # worker's unique per-run token (viper<hex>) — genuine response-header injection.
+    q = parse_qs(urlsplit(url).query)
+    raw_q = urlsplit(url).query.lower()
+    for vals in q.values():
+        v = vals[0]
+        mk = _re.search(r"viper[0-9a-f]{16}", v)
+        if mk and ("\r" in v or "\n" in v or "%0d%0a" in raw_q or "%0a" in raw_q):
+            return HttpResp(200, {"x-crlf-test": mk.group(0)}, "ok", url)
+    return HttpResp(200, {}, "ok", url)
+
+
+def _crlf_reflect_safe(m, url, h):
+    # Reflects the payload into the BODY (that's reflection/XSS, not header injection)
+    # but never emits the attacker header — the worker must NOT flag it.
+    q = parse_qs(urlsplit(url).query)
+    v = next((vals[0] for vals in q.values() if vals), "")
+    return HttpResp(200, {}, f"you searched for {unquote(v)}", url)
+
+
 # RS256->HS256 algorithm confusion: reconstruct a public-key PEM from a JWK and model a
 # verifier that (vulnerably) HMAC-checks HS256 with that public key.
 from core.swarm_workers.vuln.jwt import (  # noqa: E402
@@ -558,6 +612,9 @@ class Scenario:
     bola_config: dict = None
     min_confidence: float = 0.5   # gate threshold; lowered in scenarios that prove
                                   # a low threshold still can't leak a class
+    patch_workers: tuple = ()     # worker modules whose module-level `fetch` the gate's
+                                  # recheck re-runs (xxe/crlf) — patched to this
+                                  # scenario's responder so it can be modeled offline
 
 
 BENCHMARK = [
@@ -823,6 +880,27 @@ BENCHMARK = [
              {"vuln_type": "jwt:weak_key", "url": "http://t/api/me",
               "jwt_token": _JWT_TOKEN, "jwt_key": _JWT_KEY, "jwt_alg": "HS256",
               "jwt_probe_endpoint": "http://t/api/me"}, _jwt_accept_all),
+
+    # xxe — the gate re-runs the worker (patched offline via patch_workers): confirm a
+    # local file read; reject a body-reflecting or inert (no-entity) endpoint.
+    Scenario("xxe", "vuln", "external entity resolves file:///etc/passwd (file read)",
+             {"vuln_type": "xxe:file_read", "url": "http://t/"}, _xxe_vuln,
+             patch_workers=("core.swarm_workers.vuln.xxe",)),
+    Scenario("xxe", "safe", "endpoint echoes the request body (reflection, not parsing)",
+             {"vuln_type": "xxe:file_read", "url": "http://t/"}, _xxe_reflect_safe,
+             patch_workers=("core.swarm_workers.vuln.xxe",)),
+    Scenario("xxe", "safe", "accepts XML but resolves no entity and emits no parser error",
+             {"vuln_type": "xxe:file_read", "url": "http://t/"}, _xxe_inert_safe,
+             patch_workers=("core.swarm_workers.vuln.xxe",)),
+
+    # crlf — confirm an injected response header carrying the worker's unique token;
+    # reject reflection into the body only (that's XSS/reflection, not header injection).
+    Scenario("crlf", "vuln", "CRLF splits into an attacker-controlled response header",
+             {"vuln_type": "crlf_header_injection", "url": "http://t/?q=x", "parameter": "q"},
+             _crlf_vuln, patch_workers=("core.swarm_workers.vuln.crlf",)),
+    Scenario("crlf", "safe", "payload reflected into the body only (not a header)",
+             {"vuln_type": "crlf_header_injection", "url": "http://t/?q=x", "parameter": "q"},
+             _crlf_reflect_safe, patch_workers=("core.swarm_workers.vuln.crlf",)),
 ]
 
 
@@ -853,9 +931,19 @@ class ClassScore:
 
 
 def _evaluate(sc: Scenario) -> bool:
-    out = asyncio.run(validate_findings(
-        [dict(sc.finding)], fetch=_fetch(sc.responder), bola_config=sc.bola_config,
-        min_confidence=sc.min_confidence))
+    fake = _fetch(sc.responder)
+    # The xxe/crlf rechecks re-RUN the worker, which uses its OWN module-level fetch —
+    # patch it to this scenario's responder so the whole path stays offline + fast.
+    patchers = [patch(f"{mod}.fetch", fake) for mod in sc.patch_workers]
+    for p in patchers:
+        p.start()
+    try:
+        out = asyncio.run(validate_findings(
+            [dict(sc.finding)], fetch=fake, bola_config=sc.bola_config,
+            min_confidence=sc.min_confidence))
+    finally:
+        for p in patchers:
+            p.stop()
     return bool(out[0].get("submittable"))
 
 

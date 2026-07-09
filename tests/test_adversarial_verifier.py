@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import html
 import sys
+from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -34,15 +36,20 @@ def test_refuter_never_demotes_a_benchmark_true_positive():
         if sc.label != "vuln":
             continue
         fetch = _fetch(sc.responder)
-        annotated = asyncio.run(validate_findings(
-            [dict(sc.finding)], fetch=fetch, bola_config=sc.bola_config,
-            min_confidence=sc.min_confidence))
-        assert annotated[0]["submittable"], f"{sc.cls}:{sc.name} not submittable pre-refute"
-        n = asyncio.run(refute_unreproducible(
-            annotated, fetch=fetch, bola_config=sc.bola_config,
-            min_confidence=sc.min_confidence))
-        assert n == 0 and annotated[0]["submittable"], \
-            f"refuter WRONGLY demoted a true positive: {sc.cls}:{sc.name}"
+        # xxe/crlf rechecks (and the refuter's re-run of them) re-invoke the worker via
+        # its module-level fetch — patch it to the scenario responder, as _evaluate does.
+        with ExitStack() as stack:
+            for mod in getattr(sc, "patch_workers", ()):
+                stack.enter_context(patch(f"{mod}.fetch", fetch))
+            annotated = asyncio.run(validate_findings(
+                [dict(sc.finding)], fetch=fetch, bola_config=sc.bola_config,
+                min_confidence=sc.min_confidence))
+            assert annotated[0]["submittable"], f"{sc.cls}:{sc.name} not submittable pre-refute"
+            n = asyncio.run(refute_unreproducible(
+                annotated, fetch=fetch, bola_config=sc.bola_config,
+                min_confidence=sc.min_confidence))
+            assert n == 0 and annotated[0]["submittable"], \
+                f"refuter WRONGLY demoted a true positive: {sc.cls}:{sc.name}"
 
 
 def test_refuter_demotes_a_non_reproducing_confirmation():

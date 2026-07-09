@@ -316,8 +316,9 @@ is only forgeable if the server also lacks an Origin/Referer or double-submit de
 which is invisible read-only, so it stays an actionable lead (adversarially confirmed
 FP vector; same rationale as mass-assignment).
 `viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
-finding was demoted. The scorecard is at 21 classes / 22 confirmed scenarios /
-precision 1.00 / 0 FP, and
+finding was demoted. The scorecard measures 23 classes / 24 confirmed scenarios /
+precision 1.00 / 0 FP (xxe + crlf are now scored offline too — the benchmark patches
+those workers' module `fetch`, since their gate recheck re-runs the worker), and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.

@@ -27,11 +27,12 @@ def test_no_safe_responder_is_ever_submittable():
         assert cs.precision == 1.0, f"{cls} precision {cs.precision} (FPs: {cs.fps})"
 
 
-# Classes whose gate branch RE-RUNS the real worker (which needs a live target), so
-# their vulnerable direction can't be reproduced offline in the benchmark — only the
-# safe/non-reproducible direction is modeled here (their TP path is covered by their
-# own worker+gate tests: test_cmdi_*, test_xxe_gate, test_crlf_gate).
-_WORKER_RERUN_CLASSES = {"cmdi", "xxe", "crlf"}
+# cmdi's gate branch re-runs the real worker AND its timing path can't be modeled by a
+# static responder offline, so only its safe/non-reproducible direction is benchmarked
+# (its TP path is covered by test_cmdi_*). xxe/crlf ALSO re-run their worker, but the
+# benchmark now patches those worker modules' fetch (Scenario.patch_workers) so both
+# their vuln and safe directions ARE measured here.
+_WORKER_RERUN_CLASSES = {"cmdi"}
 
 
 def test_every_vuln_class_has_a_confirmed_true_positive():
