@@ -254,6 +254,8 @@ swarm worker (candidate) → swarm_validation.py gate (_reconfirm, fail-closed)
    → validated / submittable / validation_confidence / validation_reason
    → proof_requests (the EXACT confirming request(s), auth-redacted, for repro)
    → chain_recipes.correlate_chains → prioritization → submission_draft (+INDEX.md)
+   → chain_of_custody: submittable set SHA-256-hashed (incl. proof_requests) +
+     HMAC-signed into a per-hunt <hunt_id>_manifest.json (tamper-evident evidence)
    → submission_ledger (cross-hunt dedup) → human reviews & submits
 ```
 

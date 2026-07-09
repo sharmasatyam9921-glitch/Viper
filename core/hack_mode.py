@@ -498,6 +498,8 @@ class HackMode:
         # Independent validation gate BEFORE scope/auth/proxy are torn down, so
         # re-tests stay in scope and authenticated. Tags validated/submittable.
         await self._run_validation_gate(result)
+        # Tamper-evident chain of custody for the submittable set.
+        self._write_evidence_manifest(result)
         # Capture the compact, secret-free session-context summary AFTER the gate
         # so it reflects the final state of the hunt.
         try:
@@ -998,6 +1000,38 @@ class HackMode:
     # ------------------------------------------------------------------
     # Phase dispatch
     # ------------------------------------------------------------------
+
+    def _write_evidence_manifest(self, result: HackResult) -> None:
+        """Write a signed chain-of-custody manifest for the SUBMITTABLE findings — each
+        SHA-256 hashed over its full content (INCLUDING the gate's proof_requests), then
+        the manifest HMAC-signed. So the exact confirming evidence the human submits is
+        tamper-evident: re-hashing a finding later must match the recorded hash.
+        Best-effort; a failure never blocks teardown."""
+        try:
+            submittable = [f for f in result.findings
+                           if isinstance(f, dict) and f.get("submittable")]
+            if not submittable:
+                return
+            from pathlib import Path as _Path
+
+            from core.chain_of_custody import ChainOfCustody
+            hunt_dir = _Path(self.audit.jsonl_path).parent
+            coc = ChainOfCustody(custody_dir=hunt_dir)
+            for i, f in enumerate(submittable):
+                fid = f"{(f.get('vuln_type') or f.get('type') or 'finding')}#{i}"
+                coc.record_finding(fid, f, agent_id="swarm", target=self.target)
+            coc.generate_evidence_manifest(session_id=self.audit.hunt_id)
+            proof_backed = sum(1 for f in submittable if f.get("proof_requests"))
+            self.audit.event(
+                "evidence.manifest", target=self.target,
+                payload={"path": str(hunt_dir / f"{self.audit.hunt_id}_manifest.json"),
+                         "findings": len(submittable), "proof_backed": proof_backed})
+            self.narrator.info(
+                f"evidence manifest: {len(submittable)} submittable finding(s) "
+                f"SHA-256 hashed + HMAC-signed ({proof_backed} with a captured proof "
+                "request) — tamper-evident chain of custody")
+        except Exception as exc:   # noqa: BLE001 — evidence manifest is best-effort
+            logger.debug("evidence manifest failed: %s", exc)
 
     async def _run_authenticated_crawl(self) -> None:
         """Crawl the target once per authenticated role (operator-supplied), recording
