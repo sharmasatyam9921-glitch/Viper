@@ -1,8 +1,6 @@
 """Embedded prompt-injection arsenal — comprehensive catalog of static
-attack templates organized by technique class.
-
-Originally derived from the standalone ``prompt-injection-toolkit/``
-(JB/PAP/TECH/GCG/POISON/GPT/MULTI). Extended here with:
+attack templates organized by technique class (JB/PAP/TECH/GCG/POISON/GPT/MULTI),
+plus:
 
   - encoding mutations (b64, url, hex, rot13, zwsp, unicode confusables,
     leetspeak, ASCII smuggling)
