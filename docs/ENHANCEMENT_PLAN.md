@@ -1,6 +1,6 @@
 # VIPER Enhancement Plan
 
-Grounded in the current codebase (gate at **22 confirmed classes / precision 1.00 / 0 FP**,
+Grounded in the current codebase (gate at **25 confirmed classes / precision 1.00 / 0 FP**,
 measured on the scorecard, guarded by the mutation harness + reproducibility refuter).
 Every item below is checked against the code so we don't re-propose what's already built.
 
@@ -16,7 +16,7 @@ live third-party scan; (3) confirmation is read-only, out-of-band, or operator-s
 Gate confirms: injection family (sqli/xss/ssti/lfi/cmdi), exposures (secrets/env/git/
 dir-listing/cors), BOLA/BFLA/IDOR, host-header, subdomain-takeover, web-cache-deception,
 CRLF, clickjacking, cloud-exposure, open-redirect, graphql, nosql-login, jwt (weak-key +
-RS256→HS256 alg-confusion), response-based SSRF. • Mutation/regression harness •
+RS256→HS256 alg-confusion), response-based SSRF, LDAP/XPath injection. • Mutation/regression harness •
 reproducibility refuter • evograph inner learning loop + reasoning recall • OpenAPI /
 GraphQL-schema / authenticated-per-role / source-map discovery • per-host adaptive rate
 backoff • late-OOB-callback rescue • proof-requests + accurate CVSS + signed
@@ -61,10 +61,13 @@ A `to`/`subject`/`name` param that splits into an extra email header. Confirm re
 response-reflected header differential (like CRLF) **or** OOB when a mail-callback canary is
 configured; otherwise a lead. Effort: medium.
 
-### 2.3 LDAP / XPath injection (in-band differential)
-Error/boolean differential on `*`/`)(` (LDAP) and `' or '1'='1` (XPath) with a benign control,
-mirroring the sqli recheck shape. Read-only. Ships as a lead until the differential is proven.
-Effort: medium.
+### 2.3 LDAP / XPath injection (in-band differential) ✅ DONE
+`core/swarm_workers/vuln/query_injection.py` injects a grammar-breaker (`*)(uid=*` LDAP,
+`'`/`']` XPath) and flags a param only when the response carries an ENGINE-SPECIFIC error
+(`javax.naming`/`LDAPException` — CWE-90; `XPathException`/`xmlXPathEval` — CWE-643) that a
+benign control value does not. The gate's `_recheck_query_injection` re-runs that exact
+differential (reusing the worker's own error signatures) and vetoes a control that already
+errors as noise. Read-only, no side effects; scored at precision 1.00 (5 scenarios).
 
 ### 2.4 Outer learning loop — feed submission outcomes back to priors ✅ DONE
 `viper.py outcome <disposition> <findings.json> [--tech t1,t2]` (`core/outcome_cli.py`)

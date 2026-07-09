@@ -268,7 +268,7 @@ swarm worker (candidate) → swarm_validation.py gate (_reconfirm, fail-closed)
   findings can NEVER use a trust short-circuit), and OOB-token confirmation. A
   malformed/un-reproducible finding fails closed to a lead.
 - `core/gate_benchmark.py` — `viper.py scorecard`: labeled per-class precision/
-  recall. Currently 13 classes at precision 1.00 (0 false positives).
+  recall. Currently 25 classes at precision 1.00 (0 false positives).
 - `core/confirm_gate.py` — reusable ThreeGateConfirmer (baseline→attack→
   differential + reproducibility re-test).
 - `core/adversarial_verifier.py` — a REFUTATION pass after the gate: independently
@@ -317,13 +317,18 @@ and **Response-based SSRF** (`ssrf.py` `ssrf:<param>` — re-runs the read-only 
 differential: an internal payload must return the service's own body with a credential
 VALUE co-occurring with >=1 cloud-metadata marker, or >=2 distinct markers, absent from
 a benign baseline; reflected payload stripped + WAF-denial vetoed; blind SSRF stays on
-the OOB path). CSRF is deliberately NOT gate-confirmed — a tokenless SameSite-less form
-is only forgeable if the server also lacks an Origin/Referer or double-submit defence,
-which is invisible read-only, so it stays an actionable lead (adversarially confirmed
-FP vector; same rationale as mass-assignment).
+the OOB path), and **LDAP / XPath injection** (`query_injection.py`
+`{ldap,xpath}_injection:<param>` — the gate re-runs an in-band engine-error differential:
+a grammar-breaker (`*)(uid=*` for LDAP, `'` for XPath) must emit an ENGINE-SPECIFIC error
+(`javax.naming`/`LDAPException` — CWE-90; `XPathException`/`xmlXPathEval` — CWE-643) that a
+benign control value does NOT, and a control that already errors vetoes it as noise;
+read-only, mirrors the sqli error-signature discipline). CSRF is deliberately NOT
+gate-confirmed — a tokenless SameSite-less form is only forgeable if the server also lacks
+an Origin/Referer or double-submit defence, which is invisible read-only, so it stays an
+actionable lead (adversarially confirmed FP vector; same rationale as mass-assignment).
 `viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
-finding was demoted. The scorecard measures 23 classes / 24 confirmed scenarios /
-precision 1.00 / 0 FP (xxe + crlf are now scored offline too — the benchmark patches
+finding was demoted. The scorecard measures 25 classes / 26 confirmed scenarios /
+precision 1.00 / 0 FP (xxe + crlf are scored offline too — the benchmark patches
 those workers' module `fetch`, since their gate recheck re-runs the worker), and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
 re-runs every SAFE scenario across confidence thresholds + benign response

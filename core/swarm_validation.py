@@ -774,6 +774,54 @@ async def _recheck_jwt(finding, fetch, timeout):
         "weak-key")
 
 
+async def _recheck_query_injection(finding, fetch, timeout):
+    """Independently reproduce the LDAP/XPath injection error differential (read-only).
+
+    Mirrors the SSRF recheck discipline: a benign control value must NOT emit the
+    ENGINE-SPECIFIC error (the worker's own library/stack-trace signatures — so what we
+    confirm is exactly what it detected), while the finding's breaker payload MUST. Three
+    guards close the adversarial FP vectors an in-band error differential otherwise carries:
+      * the reflected control token / breaker payload is stripped from each body before
+        matching, so a pure-reflection or search-echo endpoint can't supply a hit;
+      * a control that already errors is vetoed as noise (a search-over-docs index or a
+        canned error page, not an injection); and
+      * a WAF/denial body on the probe is vetoed (a defending guard, not a backend error).
+    The signatures being library tokens (javax.naming / XPathException / SimpleXMLElement::
+    xpath / ...) rather than prose is itself the primary guard: ordinary indexed content
+    doesn't carry stack-trace tokens, so the docs-search FP can't beat the differential."""
+    vt = (finding.get("vuln_type") or "").lower()
+    kind = "ldap" if "ldap" in vt else "xpath"
+    from core.swarm_workers.vuln._http import add_query
+    from core.swarm_workers.vuln.query_injection import LDAP_ERR, XPATH_ERR, _BENIGN
+    from core.swarm_workers.vuln.ssrf import _DENIAL_LANGUAGE
+    err_re = LDAP_ERR if kind == "ldap" else XPATH_ERR
+    url = finding.get("url") or ""
+    param = finding.get("parameter")
+    payload = finding.get("payload") or ""
+    if not (url and param and payload):
+        return False, 0.0, "query-injection finding missing url/parameter/payload (lead)"
+    control = await fetch("GET", add_query(url, param, _BENIGN), timeout=timeout)
+    cbody = ((getattr(control, "body", "") if control else "") or "").replace(_BENIGN, "")
+    if err_re.search(cbody):
+        return False, 0.2, ("a benign value already triggers the engine error — the endpoint "
+                            "is noisy (search index / canned page), not injectable (lead)")
+    probe = await fetch("GET", add_query(url, param, payload), timeout=timeout)
+    if probe is None:
+        return False, 0.0, "re-fetch failed"
+    pbody = (getattr(probe, "body", "") or "").replace(payload, "")
+    if _DENIAL_LANGUAGE.search(pbody):
+        return False, 0.2, ("response reads as a WAF/blocked refusal, not a backend engine "
+                            "error (lead)")
+    m = err_re.search(pbody)
+    if m:
+        label = "LDAP" if kind == "ldap" else "XPath"
+        return True, 0.8, (f"{label} injection reproduced: the breaker payload emitted an "
+                           f"engine error ({m.group(0)[:60]!r}) absent for a benign control "
+                           f"— the value is concatenated into a {label} query "
+                           f"({'CWE-90' if kind == 'ldap' else 'CWE-643'})")
+    return False, 0.3, "engine error not reproduced on re-test (lead)"
+
+
 async def _recheck_ssrf(finding, fetch, timeout):
     """Independently reproduce the RESPONSE-BASED SSRF differential (read-only GETs).
 
@@ -1056,6 +1104,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_nosql(finding, fetch, timeout)
     if head == "ssrf":
         return await _recheck_ssrf(finding, fetch, timeout)
+    if head in ("ldap_injection", "xpath_injection"):
+        return await _recheck_query_injection(finding, fetch, timeout)
     # CSRF cannot be gate-CONFIRMED read-only: a tokenless POST form with a
     # SameSite-less session cookie is only forgeable if the server ALSO lacks an
     # Origin/Referer check or a double-submit-cookie defence — neither is visible in

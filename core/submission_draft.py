@@ -161,6 +161,19 @@ _CLASS = {
              "cache poisoning.",
              "Strip/deny CR and LF in any value reflected into a response header; "
              "use the framework's header API rather than building headers by string."),
+    "ldap": ("CWE-90", 8.6, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+             "User input is concatenated into an LDAP search filter — a grammar-breaker "
+             "produces an engine error a benign value never triggers, proving injection; "
+             "an attacker can subvert the filter to bypass auth or read directory data.",
+             "Escape LDAP special characters per RFC 4515 (\\28 \\29 \\2a \\5c \\00); use "
+             "parameterised filter APIs; validate/allow-list the input; least-privilege "
+             "bind account."),
+    "xpath": ("CWE-643", 8.6, "AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+              "User input is concatenated into an XPath expression — a quote-breaker "
+              "produces an XPath engine error a benign value never triggers, proving "
+              "injection; an attacker can rewrite the query to read arbitrary XML nodes.",
+              "Use parameterised/precompiled XPath with variable binding; never build "
+              "expressions by string concatenation; validate and escape user input."),
     "chain": ("CWE-Other", 9.0, "AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
               "Multiple findings compose into a higher-severity attack chain.",
               "Remediate each contributing finding; the chain is broken if any "
@@ -181,6 +194,7 @@ _HEAD_ALIAS = {
     "actuator_env": "env_exposed", "js_secret": "secret", "github_secret": "secret",
     "secrets": "secret", "sourcemap": "secret",
     "nosql_injection": "nosql",
+    "ldap_injection": "ldap", "xpath_injection": "xpath",
     "graphql_introspection": "graphql", "graphql_ide": "graphql",
     "graphql_endpoint": "graphql",
     "crlf_header_injection": "crlf", "crlf_injection": "crlf",

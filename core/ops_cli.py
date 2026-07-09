@@ -19,6 +19,7 @@ _GATE_CONFIRMED = {
     "subdomain_takeover", "access_control", "ssrf", "crlf",
     "web_cache_deception", "xxe", "clickjacking", "cloud_exposure",
     "open_redirect", "graphql", "nosql_injection", "jwt",
+    "ldap_injection", "xpath_injection",
 }
 _OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header"}
 

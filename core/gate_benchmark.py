@@ -536,6 +536,34 @@ def _crlf_reflect_safe(m, url, h):
     return HttpResp(200, {}, f"you searched for {unquote(v)}", url)
 
 
+def _ldap_vuln(m, url, h):
+    # A breaker snaps the LDAP filter -> engine error; a benign value returns cleanly.
+    v = _injected(url)
+    if ("viperbenign" not in v) and (")(" in v or "*)(" in v or "\\" in v):
+        return HttpResp(500, {}, "javax.naming.NamingException: [LDAP: error code 53 - "
+                                 "Bad search filter]", url)
+    return HttpResp(200, {}, "no results", url)
+
+
+def _xpath_vuln(m, url, h):
+    v = _injected(url)
+    if ("viperbenign" not in v) and ("'" in v or "']" in v):
+        return HttpResp(500, {}, "Warning: SimpleXMLElement::xpath(): Invalid XPath "
+                                 "expression (XPathException)", url)
+    return HttpResp(200, {}, "ok", url)
+
+
+def _query_reflect_safe(m, url, h):
+    # Reflects the payload into the body but emits NO engine error -> not injectable.
+    return HttpResp(200, {}, f"you searched for {_injected(url)}", url)
+
+
+def _query_noisy_safe(m, url, h):
+    # Emits the LDAP engine error for EVERYTHING incl. the benign control -> the
+    # control veto must reject it (the endpoint is noisy, not injectable).
+    return HttpResp(500, {}, "javax.naming.NamingException: LDAP: error code 1", url)
+
+
 # RS256->HS256 algorithm confusion: reconstruct a public-key PEM from a JWK and model a
 # verifier that (vulnerably) HMAC-checks HS256 with that public key.
 from core.swarm_workers.vuln.jwt import (  # noqa: E402
@@ -901,6 +929,28 @@ BENCHMARK = [
     Scenario("crlf", "safe", "payload reflected into the body only (not a header)",
              {"vuln_type": "crlf_header_injection", "url": "http://t/?q=x", "parameter": "q"},
              _crlf_reflect_safe, patch_workers=("core.swarm_workers.vuln.crlf",)),
+
+    # --- LDAP / XPath injection (in-band engine-error differential) ---------------
+    Scenario("ldap_injection", "vuln", "LDAP breaker snaps the filter -> javax.naming error",
+             {"vuln_type": "ldap_injection:cn", "url": "http://t/search?cn=*)(uid=*",
+              "parameter": "cn", "payload": "*)(uid=*"},
+             _ldap_vuln),
+    Scenario("ldap_injection", "safe", "payload reflected into the body, no engine error",
+             {"vuln_type": "ldap_injection:cn", "url": "http://t/search?cn=*)(uid=*",
+              "parameter": "cn", "payload": "*)(uid=*"},
+             _query_reflect_safe),
+    Scenario("ldap_injection", "safe", "endpoint emits the LDAP error for the benign control too",
+             {"vuln_type": "ldap_injection:cn", "url": "http://t/search?cn=*)(uid=*",
+              "parameter": "cn", "payload": "*)(uid=*"},
+             _query_noisy_safe),
+    Scenario("xpath_injection", "vuln", "XPath quote breaks the expression -> XPathException",
+             {"vuln_type": "xpath_injection:q", "url": "http://t/find?q='",
+              "parameter": "q", "payload": "'"},
+             _xpath_vuln),
+    Scenario("xpath_injection", "safe", "payload reflected into the body, no engine error",
+             {"vuln_type": "xpath_injection:q", "url": "http://t/find?q='",
+              "parameter": "q", "payload": "'"},
+             _query_reflect_safe),
 ]
 
 
