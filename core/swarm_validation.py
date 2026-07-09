@@ -736,41 +736,6 @@ async def _recheck_jwt(finding, fetch, timeout):
                         "forgery unconfirmed at this endpoint (lead)")
 
 
-async def _recheck_csrf(finding, fetch, timeout):
-    """Independently re-parse the page for the exact condition the CSRF worker flagged:
-    a state-changing POST form with NO anti-CSRF token field, AND a freshly-minted
-    session cookie whose Set-Cookie lacks SameSite=Lax/Strict (so a browser attaches it
-    on a cross-site POST). Both are deterministic booleans (canonical token-field names,
-    the SameSite attribute) — no heuristic scoring. Read-only GET + HTML parse; the form
-    is never submitted. Only the strong ``csrf_missing_token`` sub-class is confirmable;
-    the weaker OPTIONS-preflight JSON-API signal stays a lead."""
-    vt = (finding.get("vuln_type") or "").lower()
-    if "missing_token" not in vt:
-        return False, 0.3, ("CSRF candidate other than a missing-token form (a JSON-API "
-                            "preflight signal) — no safe independent re-test; manual review (lead)")
-    from core.swarm_workers.vuln.csrf import (
-        _has_token_name, _parse_forms, _session_cookie_lacks_samesite)
-    url = finding.get("url") or ""
-    if not url:
-        return False, 0.0, "no url to re-test"
-    r = await fetch("GET", url, timeout=timeout, use_session_auth=False)
-    if r is None or not (200 <= getattr(r, "status", 0) < 400):
-        return False, 0.2, "form url no longer serves a 2xx page (lead)"
-    if "html" not in _ctype(r):
-        return False, 0.2, "response is not an HTML page carrying a form (lead)"
-    weak_cookie = _session_cookie_lacks_samesite((r.headers or {}).get("set-cookie", "") or "")
-    if not weak_cookie:
-        return False, 0.2, ("no session cookie lacking SameSite=Lax/Strict on re-fetch — the "
-                            "browser would not attach it cross-site (lead)")
-    for form in _parse_forms(getattr(r, "body", "") or ""):
-        if form.get("method") == "post" and not any(
-                _has_token_name(n) for n in form.get("inputs", [])):
-            return True, 0.75, (f"reproduced: a state-changing POST form with no anti-CSRF "
-                                f"token, and session cookie '{weak_cookie}' lacks "
-                                "SameSite=Lax/Strict — forgeable cross-site (CWE-352)")
-    return False, 0.2, "no tokenless POST form on re-parse (a token was present) (lead)"
-
-
 async def _recheck_ssrf(finding, fetch, timeout):
     """Independently reproduce the RESPONSE-BASED SSRF differential (read-only GETs).
 
@@ -807,15 +772,21 @@ async def _recheck_ssrf(finding, fetch, timeout):
         return False, 0.2, ("response reads as a security refusal (WAF/blocked/denied), not "
                             "the metadata service's output (lead)")
     found = _markers(probe, payload) - base_markers
-    if _CREDENTIAL_VALUE.search(stripped):
-        return True, 0.85, ("SSRF reproduced: the internal payload returned a real cloud "
-                            "credential (AKIA/ASIA/SecretAccessKey) absent from the benign "
+    has_cred = bool(_CREDENTIAL_VALUE.search(stripped))
+    # Mirror the worker's gate-3 (ssrf.py): confirm on (a credential VALUE co-occurring
+    # with >=1 metadata marker) OR (>=2 distinct markers). A bare AKIA/ASIA-shaped
+    # string with NO metadata marker is a coincidental benign vendor token — not proof
+    # the server proxied the metadata service (a real IMDS credential body always also
+    # carries the AccessKeyId marker, so recall is unaffected).
+    if found and (has_cred or len(found) >= 2):
+        conf = 0.85 if has_cred else 0.8
+        lead = "a real cloud credential alongside " if has_cred else ""
+        return True, conf, (f"SSRF reproduced: {lead}{sorted(found)} cloud-metadata markers "
+                            "returned for the internal payload, absent from the benign "
                             "baseline — the server proxied the metadata service (CWE-918)")
-    if len(found) >= 2:
-        return True, 0.8, (f"SSRF reproduced: {sorted(found)} cloud-metadata markers returned "
-                           "for the internal payload, absent from the benign baseline (CWE-918)")
-    return False, 0.3, ("not enough independent metadata evidence on re-test (a single "
-                        "name-marker is describable prose) — manual review (lead)")
+    return False, 0.3, ("not enough independent metadata evidence on re-test (a bare "
+                        "credential-shaped string, or a single name-marker, is coincidental) "
+                        "— manual review (lead)")
 
 
 async def _recheck_nosql(finding, fetch, timeout):
@@ -1047,8 +1018,18 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_nosql(finding, fetch, timeout)
     if head == "ssrf":
         return await _recheck_ssrf(finding, fetch, timeout)
+    # CSRF cannot be gate-CONFIRMED read-only: a tokenless POST form with a
+    # SameSite-less session cookie is only forgeable if the server ALSO lacks an
+    # Origin/Referer check or a double-submit-cookie defence — neither is visible in
+    # the HTML, and proving their absence would require sending a forged cross-site
+    # POST (a state-changing write the gate never performs). So it stays an actionable
+    # lead. (Adversarially confirmed FP vector — kept out of the precision-1.00 set.)
     if head.startswith("csrf"):
-        return await _recheck_csrf(finding, fetch, timeout)
+        return False, 0.3, ("CSRF candidate: a state-changing form with no recognised "
+                            "anti-CSRF token (and, for the form case, a SameSite-less "
+                            "session cookie). Confirming means ruling out an Origin/Referer "
+                            "or double-submit-cookie defence — not visible read-only — so "
+                            "verify manually (lead)")
     if head == "jwt":
         return await _recheck_jwt(finding, fetch, timeout)
     # Mass assignment can only be PROVEN by a write (PATCH an extra/privileged field,

@@ -742,24 +742,33 @@ def test_ssrf_single_marker_or_missing_fields_is_lead():
     assert not g["submittable"]                       # no payload to replay
 
 
-def test_csrf_json_api_signal_stays_lead():
-    # The weaker OPTIONS-preflight JSON-API CSRF signal has no safe re-parse -> lead.
+def test_ssrf_bare_credential_without_marker_is_lead():
+    # Adversarial review: a benign endpoint that returns an AKIA-shaped vendor token
+    # (no metadata marker) only under the metadata payload. A bare credential-shaped
+    # string without a co-occurring metadata marker must NOT confirm (it mirrors the
+    # worker: found must be non-empty).
+    def resp(m, url, h):
+        v = _injected(url)
+        key = "AKIA2E0K8Z9QXVB7N3RT" if "169.254" in v else "EXAMPLEKEY1234567890"
+        return HttpResp(200, {}, '{"status":"ok","api_key":"' + key + '"}', url)
+    f = _run1({"vuln_type": "ssrf:url",
+               "url": "http://t/license?url=http://169.254.169.254/latest/meta-data/",
+               "parameter": "url", "payload": "http://169.254.169.254/latest/meta-data/"}, resp)
+    assert not f["submittable"]
+
+
+def test_csrf_is_lead_only_with_actionable_reason():
+    # CSRF cannot be gate-confirmed read-only (an Origin/Referer or double-submit
+    # defence is invisible in HTML), so every csrf-headed finding stays an actionable
+    # lead — never submittable — regardless of the observable form/cookie state.
     def resp(m, url, h):
         return HttpResp(200, {"content-type": "text/html",
                               "set-cookie": "sessionid=a; Path=/"},
-                        "<form method='post'><input name='x'></form>", url)
-    f = _run1({"vuln_type": "csrf_json_api", "url": "http://t/api"}, resp)
-    assert not f["submittable"] and "no safe independent re-test" in f["validation_reason"]
-
-
-def test_csrf_token_present_on_reparse_is_lead():
-    def resp(m, url, h):
-        return HttpResp(200, {"content-type": "text/html",
-                              "set-cookie": "sessionid=abc; Path=/"},
-                        "<form method='post'><input name='_token' value='x'>"
-                        "<input name='amount'></form>", url)
-    f = _run1({"vuln_type": "csrf_missing_token", "url": "http://t/account"}, resp)
-    assert not f["submittable"]
+                        "<form method='post'><input name='amount'></form>", url)
+    for vt in ("csrf_missing_token", "csrf_json_api"):
+        f = _run1({"vuln_type": vt, "url": "http://t/account"}, resp)
+        assert not f["submittable"]
+        assert "Origin/Referer" in f["validation_reason"]
 
 
 def test_mass_assignment_is_an_actionable_lead():
