@@ -1142,6 +1142,54 @@ class FetchHTTP:
         return await self.request("POST", url, headers=headers, data=data)
 
 
+# Header names whose VALUE is a secret and must be redacted before a request is
+# persisted with a finding — a proof artifact must never carry a live token to disk.
+_SENSITIVE_HEADERS = frozenset({
+    "cookie", "authorization", "x-api-key", "x-auth-token", "api-key",
+    "x-csrf-token", "x-xsrf-token", "proxy-authorization", "set-cookie",
+})
+
+
+def _redact_headers(headers) -> dict:
+    return {k: ("<redacted>" if str(k).lower() in _SENSITIVE_HEADERS else v)
+            for k, v in (headers or {}).items()}
+
+
+def _clip_body(body):
+    if body is None:
+        return None
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = body.decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            return None
+    return str(body)[:512]
+
+
+class _RequestRecorder:
+    """Wraps the gate's fetch to capture each (method, url, headers, body, status),
+    so the EXACT request that independently confirmed a finding can be persisted as
+    copyable repro. Auth header values are redacted — no live token ever hits disk."""
+
+    def __init__(self, fetch):
+        self._fetch = fetch
+        self.calls: List[dict] = []
+
+    async def __call__(self, method, url, **kw):
+        resp = await self._fetch(method, url, **kw)
+        try:
+            self.calls.append({
+                "method": method,
+                "url": url,
+                "headers": _redact_headers(kw.get("headers") or {}),
+                "body": _clip_body(kw.get("body")),
+                "status": getattr(resp, "status", None),
+            })
+        except Exception:  # noqa: BLE001 — recording must never affect the verdict
+            pass
+        return resp
+
+
 async def validate_findings(
     findings: List[dict],
     *,
@@ -1179,6 +1227,7 @@ async def validate_findings(
     async def _validate_one(f: dict) -> dict:
         g = dict(f)
         vt = g.get("vuln_type", g.get("type", ""))
+        rec = None
         async with sem:
             try:
                 if validator is not None:
@@ -1189,7 +1238,8 @@ async def validate_findings(
                     probe["attack"] = norm
                     ok, conf, reason = await validator.validate(probe, target)
                 else:
-                    ok, conf, reason = await _reconfirm(g, fetch, timeout, bola_config,
+                    rec = _RequestRecorder(fetch)   # capture the confirming request(s)
+                    ok, conf, reason = await _reconfirm(g, rec, timeout, bola_config,
                                                         oob_store=oob_store)
             except Exception as e:  # noqa: BLE001 — fail closed on any error
                 ok, conf, reason = False, 0.0, f"validation error: {e}"
@@ -1209,6 +1259,12 @@ async def validate_findings(
             g["validation_reason"] = (reason + " | blocked: a timing-only signal is "
                                       "not submittable for this class (needs executed "
                                       "output or an out-of-band callback)")
+        # Persist the EXACT request(s) the gate used to confirm this finding, for
+        # copyable operator repro (auth redacted). The confirming probe is typically
+        # the last request; keep the final few so a differential (baseline+attack) is
+        # visible. Only for submittable findings, and only the native re-test path.
+        if g["submittable"] and rec is not None and rec.calls:
+            g["proof_requests"] = rec.calls[-4:]
         logger.debug("validate %s -> validated=%s conf=%.2f submittable=%s",
                      vt, g["validated"], g["validation_confidence"], g["submittable"])
         return g

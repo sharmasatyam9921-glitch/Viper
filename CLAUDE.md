@@ -248,6 +248,7 @@ makes autonomous runs safe to act on.
 ```
 swarm worker (candidate) → swarm_validation.py gate (_reconfirm, fail-closed)
    → validated / submittable / validation_confidence / validation_reason
+   → proof_requests (the EXACT confirming request(s), auth-redacted, for repro)
    → chain_recipes.correlate_chains → prioritization → submission_draft (+INDEX.md)
    → submission_ledger (cross-hunt dedup) → human reviews & submits
 ```

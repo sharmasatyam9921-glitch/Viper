@@ -206,7 +206,42 @@ def _curl(finding: dict) -> str:
     return f"curl -i '{url}'"
 
 
+def _proof_curl(finding: dict) -> str:
+    """Render the EXACT request(s) the validation gate used to confirm this finding as
+    copyable cURL. Auth values were already redacted at capture, so no live token is
+    printed. Empty string when the gate captured no request (e.g. a trust/OOB path)."""
+    reqs = finding.get("proof_requests") or []
+    lines: List[str] = []
+    for i, r in enumerate(reqs, 1):
+        if not isinstance(r, dict) or not r.get("url"):
+            continue
+        parts = ["curl -i"]
+        method = str(r.get("method") or "GET").upper()
+        if method != "GET":
+            parts.append(f"-X {method}")
+        for k, v in (r.get("headers") or {}).items():
+            parts.append(f"-H '{k}: {v}'")
+        if r.get("body"):
+            parts.append(f"--data '{r['body']}'")
+        parts.append(f"'{r['url']}'")
+        status = r.get("status")
+        suffix = f"   # -> HTTP {status}" if status is not None else ""
+        lines.append(f"{i}. `{' '.join(parts)}`{suffix}")
+    return "\n".join(lines)
+
+
 def _repro(finding: dict, vuln_type: str) -> str:
+    """Exact captured request(s) if the gate recorded them, else a per-class template."""
+    template = _repro_template(finding, vuln_type)
+    proof = _proof_curl(finding)
+    if proof:
+        return ("**Exact request(s) the validation gate sent to independently confirm "
+                "this finding** (auth redacted — substitute your session; run to "
+                f"reproduce):\n{proof}\n\nWhy it confirms:\n{template}")
+    return template
+
+
+def _repro_template(finding: dict, vuln_type: str) -> str:
     head = _norm_head(vuln_type)
     url = finding.get("url") or ""
     param = finding.get("parameter") or "<param>"
