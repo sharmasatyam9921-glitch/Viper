@@ -482,6 +482,39 @@ def _jwt_accept_all(m, url, h):
     return HttpResp(200, {}, '{"ok":true}', url)
 
 
+# RS256->HS256 algorithm confusion: reconstruct a public-key PEM from a JWK and model a
+# verifier that (vulnerably) HMAC-checks HS256 with that public key.
+from core.swarm_workers.vuln.jwt import (  # noqa: E402
+    _b64url_encode as _b64u, jwk_rsa_to_pem as _jwk_pem)
+
+
+def _bjson_dumps(o):
+    import json as _j
+    return _j.dumps(o, separators=(",", ":")).encode()
+
+
+_AC_PEM = _jwk_pem(_b64u(((1 << 1023) | 0x9F13).to_bytes(128, "big")),
+                   _b64u((65537).to_bytes(3, "big")))
+_AC_TOKEN = f'{_b64u(_bjson_dumps({"alg": "RS256", "kid": "k1"}))}.' \
+            f'{_b64u(_bjson_dumps({"sub": "user1"}))}.AAAA'
+
+
+def _jwt_alg_confusion_accept(m, url, h):
+    # Vulnerably HMAC-verifies HS256 using the RSA public-key PEM as the secret: a
+    # forged token signed with the public key is accepted, a bad-sig control rejected.
+    import hashlib as _hl
+    import hmac as _hm
+    auth = (h or {}).get("Authorization", "")
+    tok = auth[7:] if auth.startswith("Bearer ") else ""
+    p = tok.split(".")
+    if len(p) == 3:
+        want = _b64u(_hm.new(_AC_PEM.encode(), (p[0] + "." + p[1]).encode(),
+                             _hl.sha256).digest())
+        if p[2] == want:
+            return HttpResp(200, {}, '{"ok":true}', url)
+    return HttpResp(401, {}, "unauthorized", url)
+
+
 def _nosql_object_session(m, url, h, body):
     # Adversarial review: hands a token to ANY object-typed credential (e.g. a guest
     # session created for object bodies), regardless of operator matching semantics —
@@ -779,6 +812,13 @@ BENCHMARK = [
     Scenario("jwt", "safe", "weak key cracked but no probe endpoint (stays lead)",
              {"vuln_type": "jwt:weak_key", "url": "http://t/", "jwt_token": _JWT_TOKEN,
               "jwt_key": _JWT_KEY, "jwt_alg": "HS256"}, _ok),
+    Scenario("jwt", "vuln", "RS256->HS256 confusion: forged HS256 (public-key HMAC) accepted",
+             {"vuln_type": "jwt:alg_confusion", "url": "http://t/",
+              "jwt_token": _AC_TOKEN, "jwt_pubkey_pem": _AC_PEM,
+              "jwt_probe_endpoint": "http://t/api/me"}, _jwt_alg_confusion_accept),
+    Scenario("jwt", "safe", "alg-confusion candidate but no probe endpoint (stays lead)",
+             {"vuln_type": "jwt:alg_confusion", "url": "http://t/",
+              "jwt_token": _AC_TOKEN, "jwt_pubkey_pem": _AC_PEM}, _ok),
     Scenario("jwt", "safe", "endpoint accepts any token (no signature verification)",
              {"vuln_type": "jwt:weak_key", "url": "http://t/api/me",
               "jwt_token": _JWT_TOKEN, "jwt_key": _JWT_KEY, "jwt_alg": "HS256",

@@ -100,6 +100,93 @@ def _b64url_encode(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
 
 
+# --- RS256->HS256 algorithm confusion: JWK -> PEM (hand-rolled DER, no crypto dep) ---
+#
+# A verifier that trusts the token's `alg` header can be tricked: the RSA PUBLIC key is
+# public (published at jwks.json), so an attacker forges an HS256 token whose HMAC
+# secret IS the server's public key in its usual byte form — the SubjectPublicKeyInfo
+# PEM. If the server HMAC-verifies with that key, the forgery is accepted (CWE-347).
+# We reconstruct that exact PEM from the JWK so the gate can attempt the forge.
+
+def _der_len(n: int) -> bytes:
+    if n < 0x80:
+        return bytes([n])
+    out = bytearray()
+    while n:
+        out.insert(0, n & 0xFF)
+        n >>= 8
+    return bytes([0x80 | len(out)]) + bytes(out)
+
+
+def _der_uint(x: int) -> bytes:
+    """DER INTEGER (non-negative): a leading 0x00 is prepended when the high bit is set
+    so the value stays positive."""
+    b = x.to_bytes((x.bit_length() + 7) // 8 or 1, "big")
+    if b[0] & 0x80:
+        b = b"\x00" + b
+    return b"\x02" + _der_len(len(b)) + b
+
+
+def _der_seq(*parts: bytes) -> bytes:
+    body = b"".join(parts)
+    return b"\x30" + _der_len(len(body)) + body
+
+
+def jwk_rsa_to_pem(n_b64url: str, e_b64url: str) -> str:
+    """Convert an RSA JWK (n, e as base64url) to a canonical SubjectPublicKeyInfo PEM —
+    the byte form a JWT library loads as the verification key, hence the exact HMAC
+    secret for an RS256->HS256 forgery. DER is deterministic, so this matches OpenSSL's
+    output. Raises on malformed input (callers guard)."""
+    n = int.from_bytes(_b64url_decode(n_b64url), "big")
+    e = int.from_bytes(_b64url_decode(e_b64url), "big")
+    rsa_pub = _der_seq(_der_uint(n), _der_uint(e))
+    alg_id = _der_seq(bytes.fromhex("06092A864886F70D010101"), b"\x05\x00")  # rsaEncryption, NULL
+    bit_string = b"\x03" + _der_len(len(rsa_pub) + 1) + b"\x00" + rsa_pub
+    spki = _der_seq(alg_id, bit_string)
+    b64 = base64.b64encode(spki).decode("ascii")
+    body = "\n".join(b64[i:i + 64] for i in range(0, len(b64), 64))
+    return f"-----BEGIN PUBLIC KEY-----\n{body}\n-----END PUBLIC KEY-----\n"
+
+
+_JWKS_PATHS = ("/.well-known/jwks.json", "/jwks.json", "/jwks",
+               "/.well-known/openid-configuration")
+
+
+async def _fetch_pubkey_pem(root: str, kid: Optional[str], timeout: float) -> Optional[str]:
+    """Fetch jwks.json (read-only) and return the RSA public key (matching `kid` if the
+    token carried one) as a SubjectPublicKeyInfo PEM, or None. Follows an
+    openid-configuration ``jwks_uri`` one hop, same host only."""
+    for path in _JWKS_PATHS:
+        r = await fetch("GET", root + path, timeout=timeout)
+        if not r or not getattr(r, "body", None):
+            continue
+        try:
+            data = json.loads(r.body)
+        except (ValueError, TypeError):
+            continue
+        keys = data.get("keys") if isinstance(data, dict) else None
+        if keys is None and isinstance(data, dict) and data.get("jwks_uri"):
+            juri = str(data["jwks_uri"])
+            if juri.startswith(root):        # same host only — never chase off-scope
+                jr = await fetch("GET", juri, timeout=timeout)
+                try:
+                    keys = (json.loads(jr.body) or {}).get("keys") if jr and jr.body else None
+                except (ValueError, TypeError):
+                    keys = None
+        for k in keys or []:
+            if not isinstance(k, dict) or k.get("kty") != "RSA":
+                continue
+            if kid and k.get("kid") and k.get("kid") != kid:
+                continue
+            n, e = k.get("n"), k.get("e")
+            if n and e:
+                try:
+                    return jwk_rsa_to_pem(str(n), str(e))
+                except Exception:  # noqa: BLE001 — malformed JWK, try the next key
+                    continue
+    return None
+
+
 def _parse_jwt(token: str) -> Optional[tuple[dict, dict, str]]:
     parts = token.split(".")
     if len(parts) != 3:
@@ -297,6 +384,48 @@ async def run(agent: SwarmAgent) -> List[dict]:
             "confidence": 1.0,
             "evidence": f"token payload keys: {list(payload.keys())[:10]}",
         })
+
+    # Detection 4: RS256->HS256 algorithm confusion. A server that issues an
+    # RSA-signed identity token verifies with an RSA PUBLIC key it publishes at
+    # jwks.json. If its verifier trusts the token's `alg` header, an attacker can
+    # forge an HS256 token whose HMAC secret is that public key. We emit an opt-in
+    # LEAD carrying the token + reconstructed public-key PEM; the gate confirms it
+    # only when an operator supplies jwt_probe_endpoint (never auto-submitted).
+    from urllib.parse import urlsplit as _urlsplit
+    _p = _urlsplit(url)
+    root = f"{_p.scheme}://{_p.netloc}"
+    rs_tok = next(
+        (t for t, cred in candidates.items()
+         if cred and _parse_jwt(t)
+         and (_parse_jwt(t)[0].get("alg") or "").upper().startswith("RS")
+         and _authorizes_identity(_parse_jwt(t)[1], cookie_names.get(t, ""))),
+        None)
+    if rs_tok:
+        hdr = _parse_jwt(rs_tok)[0]
+        try:
+            pem = await _fetch_pubkey_pem(root, hdr.get("kid"), timeout)
+        except Exception as e:  # noqa: BLE001 — jwks fetch is best-effort
+            logger.debug("jwks fetch failed: %s", e)
+            pem = None
+        if pem:
+            findings.append({
+                "type": "jwt_alg_confusion",
+                "vuln_type": "jwt:alg_confusion",
+                "title": "JWT RS256->HS256 algorithm-confusion candidate",
+                "severity": "high",
+                "url": url,
+                "cwe": "CWE-347",
+                "confidence": 0.5,
+                "jwt_token": rs_tok,
+                "jwt_pubkey_pem": pem,
+                "jwt_source": cookie_names.get(rs_tok, "") or "authorization",
+                "evidence": (
+                    "server issues an RS-signed identity token and publishes its RSA "
+                    "public key at jwks.json; a verifier that trusts the alg header would "
+                    "accept an HS256 token signed with that public key. Supply "
+                    "jwt_probe_endpoint to confirm the forged token is accepted."
+                ),
+            })
 
     return findings
 

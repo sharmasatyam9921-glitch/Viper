@@ -302,7 +302,11 @@ canonical __TypeKind), **NoSQL operator-injection auth bypass** (`nosql_injectio
 operator body does; an $eq-to-bogus control proves it's operator-driven), and **JWT
 weak-key forgery** (`jwt.py` `:weak_key` — a cracked key stays a LEAD until an
 operator-supplied `jwt_probe_endpoint` proves a forged token is accepted where a
-bad-signature control is rejected; opt-in, GET-only, no privilege escalation).
+bad-signature control is rejected; opt-in, GET-only, no privilege escalation) and
+**JWT RS256->HS256 algorithm confusion** (`jwt.py` `:alg_confusion` — reconstructs the
+RSA public key from jwks.json into a PEM via a hand-rolled DER encoder, dependency-free;
+forges an HS256 token with that public key as the HMAC secret and confirms via the SAME
+opt-in forge-accept probe as weak-key).
 and **Response-based SSRF** (`ssrf.py` `ssrf:<param>` — re-runs the read-only metadata
 differential: an internal payload must return the service's own body with a credential
 VALUE co-occurring with >=1 cloud-metadata marker, or >=2 distinct markers, absent from
@@ -312,7 +316,8 @@ is only forgeable if the server also lacks an Origin/Referer or double-submit de
 which is invisible read-only, so it stays an actionable lead (adversarially confirmed
 FP vector; same rationale as mass-assignment).
 `viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
-finding was demoted. The scorecard is at 21 classes / precision 1.00 / 0 FP, and
+finding was demoted. The scorecard is at 21 classes / 22 confirmed scenarios /
+precision 1.00 / 0 FP, and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)
 re-runs every SAFE scenario across confidence thresholds + benign response
 perturbations so precision 1.00 is a guarded invariant, not a snapshot.
