@@ -39,11 +39,11 @@ manifest's recorded hashes (tamper check, no key needed) and, with `--key`, veri
 HMAC signature. `core/chain_of_custody.py` gained a shared `hash_finding` (one source of
 truth for recording + verifying). Read-only; exit 0 iff integrity is confirmed.
 
-### 1.3 Calibrated confidence surface
-Map the gate's per-class `validation_confidence` to the scorecard's *observed* precision so
-a report can say "this class has been 1.00 across N labeled scenarios" instead of a bare
-number. Read-only reporting; no gate behavior change. **Files:** `core/gate_benchmark.py`
-(export per-class stats), `core/report_narrative.py` / `submission_draft.py`. Effort: small.
+### 1.3 Calibrated confidence surface ✅ DONE
+`core/gate_benchmark.py:class_scenario_counts()` tallies each class's labeled scorecard
+scenarios (cheap — no execution). `submission_draft._gate_assurance` renders a "Gate
+assurance" line citing "precision 1.00 across N labeled scenarios (M adversarial safe
+cases), 0 FP — guarded by the mutation harness", quantifying trust beyond a bare number.
 
 ---
 

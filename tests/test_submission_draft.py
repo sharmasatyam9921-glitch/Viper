@@ -32,6 +32,18 @@ def test_ssrf_draft_renders_accurate_vector():
     assert "CWE-918" in md and "CVSS:3.1/AV:N" in md and "CWE-Other" not in md
 
 
+def test_draft_cites_scorecard_calibration():
+    # The gate-assurance line quantifies trust with the class's observed scorecard
+    # coverage (labeled scenarios + adversarial safe cases), not a bare number.
+    from core.gate_benchmark import class_scenario_counts
+    md = build_submission({"vuln_type": "ssrf:url", "url": "http://t/f", "submittable": True,
+                           "validation_reason": "SSRF reproduced", "validation_confidence": 0.85},
+                          "http://t")
+    total = class_scenario_counts()["ssrf"]["total"]
+    assert "Gate assurance" in md and "precision 1.00" in md
+    assert f"across {total} labeled scorecard scenarios" in md
+
+
 def test_sqli_draft_has_required_sections():
     f = {"vuln_type": "sqli:q", "url": "http://t/s?q=1", "parameter": "q",
          "evidence": "DB error under quote", "validation_reason": "DB error under ' and \"",

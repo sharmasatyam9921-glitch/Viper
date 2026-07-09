@@ -904,6 +904,25 @@ BENCHMARK = [
 ]
 
 
+_SCENARIO_COUNTS = None
+
+
+def class_scenario_counts() -> dict:
+    """Per-class labeled-scenario counts from the benchmark, WITHOUT running it (cheap:
+    just tallies the BENCHMARK list). {cls: {vuln, safe, total}}. The precision invariant
+    (1.00 / 0 FP) is enforced separately by the scorecard + mutation harness, so a report
+    can cite '<total> labeled scenarios, <safe> adversarial safe cases' as calibration."""
+    global _SCENARIO_COUNTS
+    if _SCENARIO_COUNTS is None:
+        counts: dict = {}
+        for sc in BENCHMARK:
+            c = counts.setdefault(sc.cls, {"vuln": 0, "safe": 0})
+            c[sc.label] = c.get(sc.label, 0) + 1
+        _SCENARIO_COUNTS = {k: {**v, "total": v["vuln"] + v["safe"]}
+                            for k, v in counts.items()}
+    return {k: dict(v) for k, v in _SCENARIO_COUNTS.items()}
+
+
 # --- scoring ---------------------------------------------------------------
 
 @dataclass
