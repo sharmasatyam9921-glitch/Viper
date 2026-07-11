@@ -706,12 +706,16 @@ async def classify_attack(
 
     for attempt in range(3):
         try:
-            response = await model_router.generate(
+            response = await model_router.complete(
                 prompt=prompt,
-                system_prompt="You are a penetration testing request classifier. Output only valid JSON.",
+                system="You are a penetration testing request classifier. Output only valid JSON.",
                 max_tokens=512,
                 temperature=0.0,
+                json_mode=True,
             )
+            if response is None:            # all providers failed / timed out
+                logger.warning("Classification attempt %d: no LLM response", attempt + 1)
+                continue
 
             text = response.text if hasattr(response, "text") else str(response)
             parsed = _extract_json(text)

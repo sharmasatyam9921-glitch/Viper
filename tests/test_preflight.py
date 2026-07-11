@@ -52,13 +52,37 @@ class TestAIProvider:
             assert result.passed is True
 
     def test_no_provider(self):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("VIPER_USE_CLI", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OLLAMA_HOST")}
+        _drop = ("VIPER_USE_CLI", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OLLAMA_HOST",
+                 "DEEPSEEK_API_KEY", "VIPER_API_KEY", "VIPER_API_BASE", "VIPER_MODEL")
+        env = {k: v for k, v in os.environ.items() if k not in _drop}
         with patch.dict(os.environ, env, clear=True), \
              patch("core.preflight.shutil.which", return_value=None), \
              patch("pathlib.Path.exists", return_value=False):
             result = check_ai_provider()
             assert result.passed is False
+
+    def test_ollama_model_is_a_provider(self):
+        _drop = ("VIPER_USE_CLI", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                 "DEEPSEEK_API_KEY", "VIPER_API_KEY", "VIPER_API_BASE")
+        env = {k: v for k, v in os.environ.items() if k not in _drop}
+        env["VIPER_MODEL"] = "ollama/deepseek-r1:14b"
+        with patch.dict(os.environ, env, clear=True), \
+             patch("core.preflight.shutil.which", return_value=None), \
+             patch("pathlib.Path.exists", return_value=False):
+            result = check_ai_provider()
+            assert result.passed is True
+            assert "Ollama" in result.message
+
+    def test_custom_endpoint_is_a_provider(self):
+        _drop = ("VIPER_USE_CLI", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                 "DEEPSEEK_API_KEY", "VIPER_API_KEY", "VIPER_MODEL")
+        env = {k: v for k, v in os.environ.items() if k not in _drop}
+        env["VIPER_API_BASE"] = "http://localhost:8000/v1"
+        with patch.dict(os.environ, env, clear=True), \
+             patch("core.preflight.shutil.which", return_value=None), \
+             patch("pathlib.Path.exists", return_value=False):
+            result = check_ai_provider()
+            assert result.passed is True
 
 
 class TestEnvVar:

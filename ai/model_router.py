@@ -173,7 +173,22 @@ class ModelRouter:
         # Claude CLI OAuth backend
         self._claude_cli = None
         self._cli_available = None  # None = not checked yet
-        self.use_cli = os.environ.get("VIPER_USE_CLI", "true").lower() in ("true", "1", "yes")
+        # `use_cli` honours an explicit VIPER_USE_CLI; otherwise it AUTO-DETECTS: prefer the
+        # free Claude CLI by default, but stand down when the user has clearly pointed VIPER
+        # at another backend (a custom VIPER_API_BASE, or a non-Anthropic VIPER_MODEL such as
+        # ollama/* or openai/*). Without this, a stray `claude` binary on PATH would hijack
+        # priority-1 and answer requests the user meant for their local/other model.
+        _cli_env = os.environ.get("VIPER_USE_CLI")
+        if _cli_env is not None:
+            self.use_cli = _cli_env.strip().lower() in ("true", "1", "yes")
+        else:
+            _provider = (self.default_model.split("/", 1)[0].lower()
+                         if "/" in self.default_model else "")
+            _explicit_other = bool(self.api_base) or _provider in (
+                "ollama", "openai", "deepseek", "gemini", "groq",
+                "mistral", "together", "openrouter", "azure",
+            )
+            self.use_cli = not _explicit_other
 
     def _get_limiter(self, provider: str) -> _RateLimiter:
         if provider not in self._rate_limiters:
@@ -186,6 +201,25 @@ class ModelRouter:
         if "/" in model:
             return model.split("/", 1)[0]
         return "unknown"
+
+    def _has_credentials(self, model: str) -> bool:
+        """Best-effort: does this LiteLLM model have a usable credential? Used only to SKIP a
+        provider call that would certainly fail (well-known provider, no key, no api_base) so
+        the chain falls through to the next fallback QUIETLY instead of emitting a scary auth
+        error for the default ``anthropic/*`` model on a machine that only has Ollama. Very
+        conservative: a custom api_base or an unknown provider is always assumed usable, so we
+        never skip something that might actually work."""
+        if self.api_base:
+            return True
+        provider = model.split("/", 1)[0].lower() if "/" in model else ""
+        key_env = {
+            "anthropic": "ANTHROPIC_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+        }.get(provider)
+        if key_env is None:        # ollama (no key) or unknown provider — don't second-guess
+            return True
+        return bool(os.environ.get(key_env) or os.environ.get("VIPER_API_KEY"))
 
     def _ensure_litellm(self):
         """Lazy-load litellm to avoid import cost when not needed."""
@@ -494,7 +528,12 @@ class ModelRouter:
                     return result
                 continue
 
-            # Priority 3: LiteLLM (paid API)
+            # Priority 3: LiteLLM (paid API). Skip a well-known provider that plainly has no
+            # credential so we fall through to the next fallback (e.g. an Ollama model) without
+            # a doomed call + misleading auth error.
+            if not self._has_credentials(m):
+                logger.debug("Skipping %s (no credential configured) — trying next fallback", m)
+                continue
             result = await self._try_model(
                 model=m,
                 prompt=prompt,

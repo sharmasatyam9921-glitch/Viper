@@ -245,6 +245,15 @@ ReACTEngine.reason_and_act(target)
 ```
 Claude CLI OAuth (free) → LiteLLM API (paid fallback) → Ollama local (free fallback)
 ```
+`ai/model_router.py` is provider-agnostic and runs WITHOUT Claude: set
+`VIPER_MODEL=ollama/<model>` (+ `OLLAMA_HOST`) for a local LLM, or `VIPER_MODEL` +
+`VIPER_API_BASE` for any OpenAI-compatible endpoint. `VIPER_USE_CLI` auto-detects — it
+prefers the free Claude CLI by default but stands down when you point `VIPER_MODEL`/
+`VIPER_API_BASE` at another backend (so a stray `claude` binary can't hijack it); set it
+explicitly to force either way. The LLM only powers reasoning / report narrative / skill
+classification — recon, the swarm workers, and the validation gate call NO LLM, so a hunt
+(`viper.py hack`) fully confirms findings even with no LLM configured. `ai/llm_analyzer.py`
+routes through the same router (Anthropic-direct only as a last-resort fallback).
 
 ## Confirmation & Trust (the core differentiator)
 

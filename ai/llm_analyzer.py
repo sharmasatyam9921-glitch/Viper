@@ -354,8 +354,41 @@ class LLMAnalyzer:
     # Direct Analysis (if API available)
     # =====================
 
+    def _get_router(self):
+        """Lazily build a provider-agnostic ModelRouter (cached). None if unimportable or no
+        backend is configured — in which case we fall back to the direct Anthropic path."""
+        if getattr(self, "_router_cached", "unset") == "unset":
+            try:
+                from ai.model_router import ModelRouter
+                r = ModelRouter()
+                self._router_cached = r if r.is_available else None
+            except Exception as e:  # noqa: BLE001
+                self.log(f"ModelRouter unavailable: {e}", "WARN")
+                self._router_cached = None
+        return self._router_cached
+
+    async def _call_via_router(self, system: str, user: str, max_tokens: int = 1024) -> Optional[str]:
+        """Run one completion through the ModelRouter (Claude CLI / Ollama / LiteLLM)."""
+        router = self._get_router()
+        if router is None:
+            return None
+        try:
+            resp = await router.complete(prompt=user, system=system, max_tokens=max_tokens)
+            return resp.text if resp is not None else None
+        except Exception as e:  # noqa: BLE001
+            self.log(f"router complete error: {e}", "ERROR")
+            return None
+
     async def _call_claude(self, system: str, user: str, max_tokens: int = 1024) -> Optional[str]:
-        """Direct Claude API call via urllib (no external deps)."""
+        """Return one LLM completion's text.
+
+        Prefers the provider-agnostic ModelRouter (Claude CLI / Ollama / any LiteLLM
+        provider — so a non-Anthropic user works too), and falls back to a direct Anthropic
+        API call via urllib when the router is unavailable or yields nothing. Kept named
+        `_call_claude` for its many call sites; it is no longer Anthropic-only."""
+        via_router = await self._call_via_router(system, user, max_tokens)
+        if via_router:
+            return via_router
         key = self.anthropic_key or self._find_api_key()
         if not key:
             return None

@@ -88,12 +88,17 @@ def check_tool(tool: str, install_hint: str = "", required: bool = True) -> Chec
 
 
 def check_ai_provider() -> CheckResult:
-    """Check that at least one AI provider is configured."""
-    import pathlib
-    has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    use_cli = os.environ.get("VIPER_USE_CLI", "").lower() in ("true", "1", "yes")
+    """Check that at least one AI provider is configured.
 
-    # Auto-detect Claude CLI in PATH or common npm location (Windows/Linux)
+    Mirrors ``ModelRouter.is_available`` so the message matches what the router actually
+    accepts: Claude CLI (free OAuth), an Anthropic/OpenAI/DeepSeek/custom API key, a custom
+    OpenAI-compatible endpoint (VIPER_API_BASE), or an Ollama model. VIPER runs LLM-free
+    besides (recon + swarm + gate), so this is a warning, not a hard requirement."""
+    import pathlib
+
+    # Claude CLI (OAuth, free) — only relevant when not explicitly disabled.
+    use_cli = os.environ.get("VIPER_USE_CLI", "").lower() in ("true", "1", "yes")
+    cli_disabled = os.environ.get("VIPER_USE_CLI", "").lower() in ("false", "0", "no")
     claude_path = shutil.which("claude") or shutil.which("claude.CMD")
     if not claude_path:
         _npm_win = pathlib.Path.home() / "AppData" / "Roaming" / "npm" / "claude.CMD"
@@ -102,15 +107,32 @@ def check_ai_provider() -> CheckResult:
             claude_path = str(_npm_win)
         elif _npm_lin.exists():
             claude_path = str(_npm_lin)
-
-    if use_cli or claude_path:
+    if use_cli or (claude_path and not cli_disabled):
         loc = claude_path or "claude (in PATH)"
         return CheckResult("AI Provider", True, f"Claude CLI detected: {loc}", required=False)
-    if has_api_key:
-        return CheckResult("AI Provider", True, "Anthropic API key set")
+
+    # API keys / custom endpoints handled by LiteLLM.
+    key_labels = {
+        "ANTHROPIC_API_KEY": "Anthropic API key",
+        "OPENAI_API_KEY": "OpenAI API key",
+        "DEEPSEEK_API_KEY": "DeepSeek API key",
+        "VIPER_API_KEY": "custom API key",
+        "VIPER_API_BASE": "custom OpenAI-compatible endpoint (VIPER_API_BASE)",
+    }
+    for env, label in key_labels.items():
+        if os.environ.get(env):
+            return CheckResult("AI Provider", True, f"{label} configured", required=False)
+
+    # Ollama / any local model selected via VIPER_MODEL (no key needed).
+    model = (os.environ.get("VIPER_MODEL", "") or "").lower()
+    if "ollama" in model:
+        host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        return CheckResult("AI Provider", True, f"Ollama model configured ({host})", required=False)
+
     return CheckResult(
         "AI Provider", False,
-        "No ANTHROPIC_API_KEY or Claude CLI found — LLM features disabled",
+        "No LLM backend found (Claude CLI, an API key, VIPER_API_BASE, or an ollama/* "
+        "VIPER_MODEL) — LLM reasoning/reporting disabled; recon+swarm+gate still run",
         required=False,
     )
 
