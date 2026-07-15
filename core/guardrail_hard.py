@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-VIPER 4.0 Hard Guardrail -- Deterministic, Non-Disableable Target Blocklist
+VIPER 4.0 Hard Guardrail -- Deterministic Target Blocklist with an Authorized Override
 
 Pure regex/string matching. NO LLM calls. NO network calls. NO external deps.
-Blocks government, military, education, international orgs, and major tech domains
-regardless of any project settings.
+By default blocks government, military, education, international orgs, and major tech
+domains — this protects against typos and un-scoped runs (a bare ``google.com`` with no
+authorization stays refused).
+
+It is NOT a prohibition on legitimate work: an authorized operator running against a
+target they are enrolled to test (e.g. a HackerOne program) can OVERRIDE the blocklist
+for that specific host by supplying proof of authorization — either
+  * a loaded, in-scope program scope (pass the ScopeReasoner / scope object as
+    ``authorized``; a target its ``decide()`` marks in-scope is allowed), or
+  * the ``VIPER_AUTHORIZED_TARGETS`` env var (comma/semicolon list of hosts / ``*.wildcards``;
+    ``*`` authorizes everything).
+The override is target-specific and requires a deliberate, auditable operator signal, so
+the safety net still catches an un-authorized major domain.
 """
 
 import ipaddress
+import os
 import re
-from typing import Tuple
+from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # TLD suffix patterns (case-insensitive)
@@ -157,13 +169,18 @@ _SAFE_HOSTNAME_KEYWORDS = (
 
 
 def _normalize(raw: str) -> str:
-    """Lowercase, strip protocol/path/port/whitespace."""
+    """Lowercase; reduce a URL/host to its authority host (the thing an HTTP client connects
+    to), so blocklist matching can't be dodged by scheme/userinfo/backslash/IPv6/port tricks."""
     d = raw.strip().lower()
-    for prefix in ("https://", "http://"):
-        if d.startswith(prefix):
-            d = d[len(prefix):]
-    d = d.split("/")[0]
-    d = d.split(":")[0]
+    d = d.replace("\\", "/")                       # some clients treat '\' as '/'; fold first
+    d = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", d)   # strip ANY scheme (http, https, ftp, ...)
+    d = d.split("/")[0]                             # authority only (drop path/query/fragment)
+    if "@" in d:                                    # drop userinfo — user@google.com -> google.com
+        d = d.rsplit("@", 1)[1]
+    if d.startswith("[") and "]" in d:             # bracketed IPv6 literal: [::1]:8080 -> ::1
+        d = d[1:d.index("]")]
+    else:
+        d = d.split(":")[0]                        # drop port
     d = d.rstrip(".")
     return d
 
@@ -172,8 +189,101 @@ def _normalize(raw: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def is_blocked(target: str) -> Tuple[bool, str]:
+def _env_authorized_hosts() -> list:
+    """Hosts/wildcards the operator authorized via ``VIPER_AUTHORIZED_TARGETS`` (comma or
+    semicolon separated). Always consulted, so an operator can authorize without threading
+    a scope object through every call site."""
+    raw = os.environ.get("VIPER_AUTHORIZED_TARGETS", "") or ""
+    return [h.strip().lower() for h in raw.replace(";", ",").split(",") if h.strip()]
+
+
+def _host_covered(host: str, entry: str) -> bool:
+    """True if ``host`` is covered by an authorization entry: ``*``/``all``/``any`` (blanket),
+    an exact host, a bare domain (covers its subdomains), or a ``*.domain`` wildcard."""
+    e = (entry or "").strip().lower()
+    if not e:
+        return False
+    if e in ("*", "all", "any"):
+        return True
+    e = e.lstrip("*").lstrip(".")          # "*.x.com" / ".x.com" -> "x.com"
+    if not e:
+        return False
+    return host == e or host.endswith("." + e)
+
+
+def _is_authorized(host: str, authorized) -> bool:
+    """Does the operator have proof of authorization for ``host``? Sources:
+      * the ``VIPER_AUTHORIZED_TARGETS`` env allowlist (always consulted);
+      * ``authorized=True`` (explicit blanket operator assertion);
+      * ``authorized`` a list/tuple/set of host/wildcard strings (an explicit allowlist);
+      * a ScopeReasoner/scope object — but ONLY if it is explicitly flagged
+        ``viper_authoritative = True`` (an operator-loaded ``--scope`` program file). An
+        auto-derived scope built from the target itself is NEVER authoritative, so a target
+        can't authorize itself and defeat the blocklist.
+    Fail-closed: anything else, or a scope backend that errors, does not authorize."""
+    for entry in _env_authorized_hosts():
+        if _host_covered(host, entry):
+            return True
+    if authorized is True:
+        return True
+    if isinstance(authorized, (list, tuple, set, frozenset)):
+        for entry in authorized:
+            if isinstance(entry, str) and _host_covered(host, entry):
+                return True
+        return False
+    # Scope object: honored only when the operator explicitly marked it authoritative.
+    if getattr(authorized, "viper_authoritative", False) is True:
+        decide = getattr(authorized, "decide", None)
+        if callable(decide):
+            try:
+                if getattr(decide(host), "allowed", None) is True:
+                    return True
+            except Exception:  # noqa: BLE001 — never let a scope error weaken the block
+                pass
+        isc = getattr(authorized, "is_in_scope", None)
+        if callable(isc):
+            try:
+                res = isc(host)
+                if isinstance(res, tuple):        # ScopeManager.is_in_scope -> (bool, reason)
+                    res = res[0] if res else False
+                if res is True:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+    return False
+
+
+def _blocklist_reason(host: str) -> Optional[str]:
+    """The raw blocklist verdict for a normalized host, IGNORING safe/authorized overrides.
+    Returns a short reason string if the host is on the protected blocklist, else None."""
+    if _COMPILED_TLD_RE.search(host):
+        return (f"'{host}' belongs to a government, military, educational, or international "
+                "organization TLD.")
+    if host in _BLOCKED_DOMAINS:
+        return f"'{host}' is a protected major domain."
+    for blocked in _BLOCKED_DOMAINS:
+        if host.endswith("." + blocked):
+            return f"'{host}' is a subdomain of protected domain '{blocked}'."
+    return None
+
+
+def on_blocklist(target: str) -> bool:
+    """True if ``target`` is on the raw protected blocklist, ignoring any authorization,
+    env allowlist, or safe-target override. Useful for auditing an authorized override
+    ("a protected host was allowed because it is authorized")."""
+    d = _normalize(target)
+    return bool(d) and _blocklist_reason(d) is not None
+
+
+def is_blocked(target: str, authorized=None) -> Tuple[bool, str]:
     """Deterministic check: is this target a blocked domain?
+
+    Args:
+        target: the host/URL to check.
+        authorized: optional proof of authorization that OVERRIDES the blocklist for this
+            specific host — a ScopeReasoner/scope object (in-scope ``decide()`` allows), an
+            iterable of authorized host/wildcard strings, or ``True`` for a blanket operator
+            assertion. ``VIPER_AUTHORIZED_TARGETS`` is always consulted in addition.
 
     Returns:
         (blocked: bool, reason: str). If not blocked, reason is empty.
@@ -185,30 +295,24 @@ def is_blocked(target: str) -> Tuple[bool, str]:
     if not d:
         return False, ""
 
-    # Safe targets override everything
-    if is_safe_target(d):
+    # The protected blocklist is evaluated FIRST — before any safe-target heuristic — so a
+    # protected host can never be rescued by a coincidental safe keyword (e.g. 'ctf.army.gov'
+    # or 'dvwa.google.com'). A host that is NOT on the blocklist is allowed (labs, RFC1918,
+    # loopback, arbitrary in-scope program hosts all land here).
+    reason = _blocklist_reason(d)
+    if reason is None:
         return False, ""
 
-    # TLD suffix match (gov/mil/edu/int)
-    if _COMPILED_TLD_RE.search(d):
-        return True, (
-            f"'{d}' belongs to a government, military, educational, or international "
-            "organization TLD. Scanning is permanently blocked."
-        )
+    # Authorized-engagement override: an operator-loaded --scope, the VIPER_AUTHORIZED_TARGETS
+    # allowlist, or an explicit authorized= signal permits an otherwise-protected host, for
+    # legitimate authorized testing (e.g. a HackerOne program you are enrolled in).
+    if _is_authorized(d, authorized):
+        return False, ""
 
-    # Exact domain match
-    if d in _BLOCKED_DOMAINS:
-        return True, f"'{d}' is a protected major domain. Scanning is permanently blocked."
-
-    # Subdomain of blocked domain
-    for blocked in _BLOCKED_DOMAINS:
-        if d.endswith("." + blocked):
-            return True, (
-                f"'{d}' is a subdomain of protected domain '{blocked}'. "
-                "Scanning is permanently blocked."
-            )
-
-    return False, ""
+    return True, (
+        reason + " Scanning is blocked unless the target is authorized — load its program "
+        "scope with --scope (in-scope targets are allowed) or add it to VIPER_AUTHORIZED_TARGETS."
+    )
 
 
 def is_safe_target(target: str) -> bool:
@@ -234,8 +338,9 @@ def is_safe_target(target: str) -> bool:
         if d.endswith("." + safe):
             return True
 
-    # Safe hostname keywords
-    if any(kw in d for kw in _SAFE_HOSTNAME_KEYWORDS):
+    # Safe hostname keywords — whole DNS-label match, NOT substring: 'ctf' authorizes a host
+    # with a literal 'ctf' label, but must NOT rescue 'ctf.paypal.com' (a protected subdomain).
+    if set(d.split(".")) & set(_SAFE_HOSTNAME_KEYWORDS):
         return True
 
     # Private/loopback IP check
@@ -278,12 +383,13 @@ BLOCKED_TLDS = {'.gov', '.mil', '.edu', '.int', '.govt'}
 BLOCKED_DOMAINS = set(_BLOCKED_DOMAINS)
 
 
-def validate_target(target: str) -> Tuple[bool, str]:
+def validate_target(target: str, authorized=None) -> Tuple[bool, str]:
     """Convenience wrapper: returns (valid, reason).
 
     ``valid=True`` means the target is NOT blocked (i.e. scanning is allowed).
+    ``authorized`` is forwarded to :func:`is_blocked` (see its docstring).
     """
-    blocked, reason = is_blocked(target)
+    blocked, reason = is_blocked(target, authorized=authorized)
     if blocked:
         return False, reason
     return True, ""

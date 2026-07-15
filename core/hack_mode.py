@@ -35,7 +35,7 @@ from typing import Any, Awaitable, Callable, Optional
 from .agent_bus import AgentBus, Priority
 from .audit_logger import AuditLogger
 from .chain_planner import CHAIN_REQUIRED, ChainPlanner
-from .guardrail_hard import is_blocked
+from .guardrail_hard import is_blocked, on_blocklist
 from .hack_profile import (
     BugBountyProfile,
     CTFProfile,
@@ -450,9 +450,13 @@ class HackMode:
         )
 
         # Hard guardrail — deterministic blocklist (gov/mil/edu/intl TLDs +
-        # protected major domains). Applies to EVERY profile; a blocked domain
-        # is never a legitimate target. Fails the run closed before any work.
-        blocked, reason = is_blocked(self.target)
+        # protected major domains). Applies to EVERY profile and fails the run closed
+        # before any work — UNLESS the operator has proof of authorization: a loaded,
+        # in-scope program scope (the ScopeReasoner) or the VIPER_AUTHORIZED_TARGETS
+        # allowlist. That lets an authorized engagement (e.g. a HackerOne program you
+        # are enrolled in) run against an otherwise-protected host, while a bare typo
+        # with no authorization stays refused.
+        blocked, reason = is_blocked(self.target, authorized=self.scope_reasoner)
         if blocked:
             result.stop_reason = "guardrail_blocked"
             result.elapsed_s = time.time() - t0
@@ -467,6 +471,14 @@ class HackMode:
             )
             self._stopped = True  # nothing to tear down; bus never started
             return result
+        if on_blocklist(self.target):
+            # A protected host allowed via authorization — record the override for the trail.
+            self.narrator.info(f"protected target allowed by authorization: {self.target}")
+            self.audit.event(
+                "guardrail.authorized_override", target=self.target,
+                outcome="allowed",
+                payload={"source": "scope_reasoner_or_VIPER_AUTHORIZED_TARGETS"},
+            )
 
         await self.bus.start()
         # Install the per-hunt scope gate so every worker HTTP request is

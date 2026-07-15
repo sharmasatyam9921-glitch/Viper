@@ -420,7 +420,17 @@ Terminal security: allowlist-only pentest tools, shell metacharacter blocking, n
 
 ## Ethical Rules
 
-1. Only test authorized targets (scope enforced by `roe_engine.py` + `guardrails.py`)
+1. Only test authorized targets (scope enforced by `roe_engine.py` + `guardrails.py`).
+   `core/guardrail_hard.py` is a deterministic blocklist (gov/mil/edu/int TLDs + 50+ major
+   domains) that fails an un-scoped run closed — a bare `google.com` typo stays refused. For a
+   legitimate AUTHORIZED engagement (e.g. a HackerOne program you're enrolled in) it can be
+   overridden PER-HOST by a deliberate operator signal: an operator-loaded `--scope` program
+   file (marked authoritative; in-scope hosts are allowed) or the `VIPER_AUTHORIZED_TARGETS`
+   env allowlist (`host`, `*.wildcard`, or `*`). A target-derived AUTO-scope can NOT authorize
+   itself, so the blocklist still catches typos/un-scoped runs; every override is audited
+   (`guardrail.authorized_override`). `is_blocked(target, authorized=...)` — the blocklist is
+   evaluated before any safe-target heuristic and `_normalize` reduces a URL to its true
+   authority host (scheme/userinfo/backslash/IPv6/port can't dodge it).
 2. No destructive actions — read-only PoCs only
 3. Verify every finding before reporting (`finding_validator.py` — 37 vuln-type behavioral checks)
 4. Rate limiting enforced (`rate_limiter.py` — token bucket + human timing). The

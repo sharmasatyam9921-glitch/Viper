@@ -530,7 +530,9 @@ async def run_hunt(target, full, minutes, scope, output_file, secrets=False, wav
             blocked, reason = is_blocked(target)
             if blocked:
                 print(f"\n[GUARDRAIL] Target blocked: {reason}")
-                print("Use --no-guardrail for lab/CTF targets")
+                print("For an AUTHORIZED engagement, add the host to VIPER_AUTHORIZED_TARGETS "
+                      "(e.g. VIPER_AUTHORIZED_TARGETS=example.com) or load its program scope.")
+                print("Use --no-guardrail for lab/CTF targets.")
                 graph_engine.close()
                 return
         except ImportError:

@@ -562,7 +562,11 @@ def _build_scope_reasoner(scope_file: Optional[str], db_path: str) -> Optional[S
         if not ok:
             print(f"[WARN] failed to load scope file: {scope_file}", file=sys.stderr)
             return None
-    return ScopeReasoner(scope_manager=sm, db_path=Path(db_path))
+    r = ScopeReasoner(scope_manager=sm, db_path=Path(db_path))
+    # An operator-supplied --scope program file is proof of authorization: it may override
+    # the hard guardrail's protected-domain blocklist for hosts it marks in-scope.
+    r.viper_authoritative = bool(scope_file)
+    return r
 
 
 def _auto_scope_reasoner(target: str, db_path: str) -> ScopeReasoner:
@@ -586,7 +590,11 @@ def _auto_scope_reasoner(target: str, db_path: str) -> ScopeReasoner:
     # A 'domain' entry matches the host and all of its subdomains.
     scope.in_scope.append(ScopeEntry(target=host, asset_type="domain"))
     sm.active_scope = scope
-    return ScopeReasoner(scope_manager=sm, db_path=Path(db_path))
+    r = ScopeReasoner(scope_manager=sm, db_path=Path(db_path))
+    # A target-derived auto-scope is NOT authorization — it must never let a protected
+    # target authorize itself past the hard guardrail. It still governs the worker gate.
+    r.viper_authoritative = False
+    return r
 
 
 if __name__ == "__main__":
