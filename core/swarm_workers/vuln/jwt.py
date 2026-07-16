@@ -167,7 +167,10 @@ async def _fetch_pubkey_pem(root: str, kid: Optional[str], timeout: float) -> Op
         keys = data.get("keys") if isinstance(data, dict) else None
         if keys is None and isinstance(data, dict) and data.get("jwks_uri"):
             juri = str(data["jwks_uri"])
-            if juri.startswith(root):        # same host only — never chase off-scope
+            from ._http import _host_key
+            # Compare HOSTS, not a string prefix: startswith(root) let
+            # target.com.attacker.com and target.com@attacker.com through.
+            if _host_key(juri) == _host_key(root):   # same host only — never chase off-scope
                 jr = await fetch("GET", juri, timeout=timeout)
                 try:
                     keys = (json.loads(jr.body) or {}).get("keys") if jr and jr.body else None
@@ -197,6 +200,13 @@ def _parse_jwt(token: str) -> Optional[tuple[dict, dict, str]]:
     except Exception:
         return None
     return h, p, parts[2]
+
+
+def _mask_key(k: str) -> str:
+    """Redact a recovered credential for report/title/evidence text — no chars of the
+    secret leak (Ethical Rule #6). The full value stays in the finding's `_jwt_key`
+    (underscore-prefixed → skipped by disk/notification serializers) for the operator."""
+    return f"<{len(k)}-char key, redacted>" if k else "<redacted>"
 
 
 def _try_weak_keys(token: str) -> Optional[str]:
@@ -313,7 +323,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 findings.append({
                     "type": "jwt_weak_key",
                     "vuln_type": "jwt:weak_key",
-                    "title": f"JWT HMAC key crackable: {cracked!r}",
+                    "title": f"JWT HMAC key crackable: {_mask_key(cracked)}",
                     "severity": "critical",
                     "url": url,
                     "cwe": "CWE-326",
@@ -322,12 +332,12 @@ async def run(agent: SwarmAgent) -> List[dict]:
                     # confirmation (opt-in, operator-supplied endpoint). Cracking the
                     # key OFFLINE proves the key is weak, not that the SERVER accepts a
                     # forged token — the gate closes that gap when given an endpoint.
-                    "jwt_token": tok,
-                    "jwt_key": cracked,
+                    "_jwt_token": tok,
+                    "_jwt_key": cracked,
                     "jwt_alg": alg,
                     "jwt_source": cookie_name or "authorization",
                     "evidence": (
-                        f"HMAC signature verified locally with key={cracked!r}. "
+                        f"HMAC signature verified locally with key={_mask_key(cracked)}. "
                         f"alg={alg}. Token can be forged with arbitrary claims. "
                         "Source: server-set session credential (Set-Cookie / "
                         f"Authorization) carrying an identity claim "
@@ -341,14 +351,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 findings.append({
                     "type": "jwt_weak_key_noauth",
                     "vuln_type": "jwt:weak_key_noauth",
-                    "title": f"Non-identity JWT cookie cracks with {cracked!r}",
+                    "title": f"Non-identity JWT cookie cracks with {_mask_key(cracked)}",
                     "severity": "info",
                     "url": url,
                     "cwe": "CWE-326",
                     "confidence": 0.5,
                     "evidence": (
                         f"Server-set cookie {cookie_name or '<unnamed>'!r} is a JWT "
-                        f"verified locally with key={cracked!r} (alg={alg}), but its "
+                        f"verified locally with key={_mask_key(cracked)} (alg={alg}), but its "
                         f"payload carries NO identity claim "
                         f"(keys={list(payload.keys())[:10]}) — it looks like an "
                         "anti-CSRF nonce / feature-flag / consent record. Forging it "
@@ -359,14 +369,14 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 findings.append({
                     "type": "jwt_weak_key_sample",
                     "vuln_type": "jwt:weak_key_sample",
-                    "title": f"Sample JWT in page body cracks with {cracked!r}",
+                    "title": f"Sample JWT in page body cracks with {_mask_key(cracked)}",
                     "severity": "info",
                     "url": url,
                     "cwe": "CWE-326",
                     "confidence": 0.4,
                     "evidence": (
                         f"A JWT found in the response body verified locally with "
-                        f"key={cracked!r} (alg={alg}). This token is NOT a "
+                        f"key={_mask_key(cracked)} (alg={alg}). This token is NOT a "
                         "server-issued credential (no Set-Cookie/Authorization "
                         "source) and is almost certainly documentation/example "
                         "text — verify manually before treating as forgeable."
@@ -416,7 +426,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
                 "url": url,
                 "cwe": "CWE-347",
                 "confidence": 0.5,
-                "jwt_token": rs_tok,
+                "_jwt_token": rs_tok,
                 "jwt_pubkey_pem": pem,
                 "jwt_source": cookie_names.get(rs_tok, "") or "authorization",
                 "evidence": (

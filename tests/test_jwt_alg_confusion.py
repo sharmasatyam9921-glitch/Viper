@@ -88,7 +88,10 @@ def test_worker_emits_alg_confusion_lead_with_pubkey_pem():
             return await get_worker_runner("vuln", "jwt")(_agent())
     findings = asyncio.run(go())
     ac = [f for f in findings if f["vuln_type"] == "jwt:alg_confusion"]
-    assert ac and ac[0]["jwt_pubkey_pem"] == _PEM and ac[0]["jwt_token"] == _RS_TOKEN
+    # Credential token is now underscore-prefixed (serializers skip it); public-key PEM
+    # stays plain (a published RSA public key is not a secret).
+    assert ac and ac[0]["jwt_pubkey_pem"] == _PEM and ac[0]["_jwt_token"] == _RS_TOKEN
+    assert "jwt_token" not in ac[0]
     assert ac[0]["confidence"] == 0.5          # a LEAD until the gate confirms
 
 

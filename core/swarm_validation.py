@@ -771,7 +771,9 @@ async def _recheck_jwt_alg_confusion(finding, fetch, timeout):
         return False, 0.3, ("RS256->HS256 alg-confusion candidate (RSA public key published + "
                             "an identity token) — supply jwt_probe_endpoint (an in-scope authed "
                             "GET) to confirm the forged HS256 token is accepted (lead)")
-    tok = finding.get("jwt_token") or ""
+    # Credential fields are underscore-prefixed so serializers skip them; keep a plain-name
+    # fallback for externally-supplied / imported findings.
+    tok = finding.get("_jwt_token") or finding.get("jwt_token") or ""
     pem = finding.get("jwt_pubkey_pem") or ""
     if not tok or not pem:
         return False, 0.0, "alg-confusion finding missing token / public-key PEM (lead)"
@@ -809,8 +811,10 @@ async def _recheck_jwt(finding, fetch, timeout):
         return False, 0.3, ("weak HMAC key recovered OFFLINE, but the server's acceptance "
                             "of a forged token is unproven — supply jwt_probe_endpoint (an "
                             "in-scope authed GET) to confirm forgeability (lead)")
-    tok = finding.get("jwt_token") or ""
-    key = finding.get("jwt_key")
+    tok = finding.get("_jwt_token") or finding.get("jwt_token") or ""
+    key = finding.get("_jwt_key")
+    if key is None:
+        key = finding.get("jwt_key")
     alg = (finding.get("jwt_alg") or "").upper()
     if not tok or key is None or alg not in ("HS256", "HS384", "HS512"):
         return False, 0.0, "jwt finding missing token/key/alg for a forge-probe (lead)"
