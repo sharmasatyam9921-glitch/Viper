@@ -185,23 +185,23 @@ _ml.register("core.chain_of_custody", "ChainOfCustody")
 # Bug-bounty + automation modules (load lazily so missing creds don't break recon)
 _ml.register("core.bounty_optimizer", "BountyOptimizer")
 _ml.register("core.account_pool", "AccountPool")
-_ml.register("core.auto_submit", "AutoSubmitter", "SubmissionConfig")
+_ml.register("core.auto_submit", "AutoSubmitPipeline")
 _ml.register("core.session_manager", "SessionManager")
 _ml.register("core.attack_orchestrator", "AttackOrchestrator")
 
 # Vuln-class fuzzers / scanners that the orchestrator picks at runtime
-_ml.register("core.bola_scanner", "BOLAScanner")
+_ml.register("core.bola_scanner", "BolaScanner")
 _ml.register("core.graphql_fuzzer", "GraphQLFuzzer")
 _ml.register("core.web3_auditor", "Web3Auditor")
 _ml.register("core.cloud_agent", "CloudAgent")
 
 # Targeting + service-data helpers
-_ml.register("core.cidr_targeting", "CIDRTargeting", "expand_cidr")
-_ml.register("core.iana_services", "lookup_service", "lookup_port")
+_ml.register("core.cidr_targeting", "CIDRTargeting")
+_ml.register("core.iana_services", "IANAServices")
 
 # Recon tool wrappers
 _ml.register("recon.hakrawler_spider", "HakrawlerSpider")
-_ml.register("recon.puredns_filter", "PureDNSFilter")
+_ml.register("recon.puredns_filter", "PurednsFilter")
 _ml.register("recon.tls_checker", "TLSChecker")
 
 # Scanners
@@ -210,9 +210,9 @@ _ml.register("scanners.trufflehog_scanner", "TruffleHogScanner")
 # CLI-style tool wrappers (used by ToolManager / kali_shell handler)
 _ml.register("tools.nmap_scanner", "NmapScanner")
 _ml.register("tools.masscan_scanner", "MasscanScanner")
-_ml.register("tools.sqlmap_scanner", "SqlmapScanner")
-_ml.register("tools.google_dork", "GoogleDork")
-_ml.register("tools.web_search", "WebSearch")
+_ml.register("tools.sqlmap_scanner", "SQLMapScanner")
+_ml.register("tools.google_dork", "GoogleDorkTool")
+_ml.register("tools.web_search", "WebSearchTool")
 
 # Dashboard events + multi-session manager
 _ml.register("dashboard.server", "publish_event")

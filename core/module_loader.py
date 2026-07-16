@@ -50,8 +50,17 @@ class ModuleLoader:
                     self._loaded[name] = obj
                 if group:
                     group_results.setdefault(group, True)
-            except (ImportError, AttributeError) as e:
+            except ImportError as e:
+                # Optional dependency genuinely not installed — graceful degradation.
                 logger.debug("Optional module %s unavailable: %s", module_path, e)
+                if group:
+                    group_results[group] = False
+            except AttributeError as e:
+                # The module imported but a REGISTERED symbol name doesn't exist — a typo/rot
+                # in the registration, not a missing dependency. Surface it loudly so a
+                # mis-named registration can't silently resolve to available=False forever.
+                logger.warning("Registered symbol missing in %s: %s — fix the registration",
+                               module_path, e)
                 if group:
                     group_results[group] = False
 

@@ -357,18 +357,24 @@ async def _invoke_guardrail_llm(model_router: Any, user_prompt: str) -> Tuple[bo
     """Send guardrail prompt to LLM via model_router and parse JSON response."""
     for attempt in range(3):
         try:
-            response = await model_router.generate(
+            response = await model_router.complete(
                 prompt=user_prompt,
-                system_prompt=GUARDRAIL_SYSTEM_PROMPT,
+                system=GUARDRAIL_SYSTEM_PROMPT,
                 max_tokens=256,
                 temperature=0.0,
+                json_mode=True,
             )
+            if response is None:      # all providers failed / timed out
+                logger.warning("Guardrail attempt %d: no LLM response", attempt + 1)
+                continue
 
             text = response.text if hasattr(response, "text") else str(response)
             result = _extract_json(text)
 
             if result:
-                allowed = result.get("allowed", True)
+                # Default DENY when the model omits the field — a safety gate must not
+                # silently allow an un-adjudicated target.
+                allowed = result.get("allowed", False)
                 reason = result.get("reason", "No reason provided")
                 logger.info("Guardrail LLM result: allowed=%s, reason=%s", allowed, reason)
                 return bool(allowed), str(reason)
@@ -378,9 +384,10 @@ async def _invoke_guardrail_llm(model_router: Any, user_prompt: str) -> Tuple[bo
         except Exception as e:
             logger.warning("Guardrail attempt %d error: %s", attempt + 1, e)
 
-    # All retries exhausted -- fail open (lenient)
-    logger.error("Guardrail LLM check failed after 3 attempts, failing open")
-    return True, "LLM guardrail check failed after 3 attempts (failing open)."
+    # All retries exhausted -- fail CLOSED (deny). A target-authorization safety gate must
+    # never approve a target it could not adjudicate.
+    logger.error("Guardrail LLM check failed after 3 attempts — failing CLOSED (deny)")
+    return False, "LLM guardrail check failed after 3 attempts (failing closed — denied)."
 
 
 # ---------------------------------------------------------------------------
