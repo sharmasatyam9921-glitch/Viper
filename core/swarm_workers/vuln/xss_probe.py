@@ -104,7 +104,29 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
     payload = f'<{marker}>"\'><svg/onload=1>'
     test_url = add_query(url, param, payload)
     resp = await fetch("GET", test_url, timeout=timeout, follow_redirects=False)
-    if not resp or not resp.body:
+    if resp is None:
+        return []
+    _waf = ""
+    # If a WAF blocked the raw payload, try to slip a mutated variant past it and
+    # re-run the SAME reflection differential on the bypassed response. This runs
+    # ONLY on a block (the happy path is unchanged), and the differential is not
+    # relaxed — a total block emits nothing (never a fabricated success).
+    from core.waf_bypass import is_blocked as _looks_blocked
+    if _looks_blocked(resp):
+        from ._bypass import adaptive_fetch
+
+        def _build(variant: str) -> str:
+            return add_query(url, param, variant)
+
+        res = await adaptive_fetch("GET", _build, payload, timeout=timeout,
+                                   follow_redirects=False)
+        if res.blocked or res.response is None:
+            return []
+        if res.bypassed:
+            resp = res.response
+            test_url = _build(res.payload)
+            _waf = f" (WAF-bypassed via {res.label})"
+    if not resp.body:
         return []
     # Content-type gate: reflection is only XSS in an HTML/XML/SVG (or
     # sniffable) context. JSON/plain/csv/js echoes are inert data, not XSS.
@@ -128,7 +150,7 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
             "payload": payload,
             "cwe": "CWE-79",
             "confidence": 0.9,
-            "evidence": "full HTML payload reflected unencoded in response",
+            "evidence": "full HTML payload reflected unencoded in response" + _waf,
         })
     elif f"<{marker}>" in body:
         # Tier 2: marker tag reflected → angle brackets pass through
@@ -142,7 +164,7 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
             "payload": payload,
             "cwe": "CWE-79",
             "confidence": 0.7,
-            "evidence": f"marker tag <{marker}> reflected; full payload was filtered",
+            "evidence": f"marker tag <{marker}> reflected; full payload was filtered" + _waf,
         })
     elif marker in body:
         # Tier 3: bare marker reflected but tags were stripped
@@ -156,7 +178,7 @@ async def _probe_param(url: str, param: str, timeout: float) -> List[dict]:
             "payload": marker,
             "cwe": "CWE-79",
             "confidence": 0.5,
-            "evidence": "marker reflected as text; HTML tags filtered",
+            "evidence": "marker reflected as text; HTML tags filtered" + _waf,
         })
     return findings
 

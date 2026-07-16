@@ -1303,9 +1303,13 @@ class HackMode:
         planner = self.chain_planner
         if planner is None:
             return 0
-        # Chaining only makes sense when offensive phases are enabled — it
-        # drives exploits deeper. Default recon+vuln runs stay linear.
-        if "exploit" not in self.profile.phases:
+        # Chaining drives confirmed findings deeper. It runs whenever the vuln
+        # (or exploit) phase is enabled — so the default bug-bounty profile, which
+        # is recon+vuln, now RE-DISPATCHES read-only vuln workers against the new
+        # in-scope surface a confirmed finding reveals (leaked path/param/host),
+        # instead of stopping after one flat pass. exploit/post stay gated behind
+        # allow_destructive; a pure recon-only profile still runs linear.
+        if not any(p in self.profile.phases for p in ("vuln", "exploit")):
             return 0
         chain_phases = [p for p in ("vuln", "exploit", "post")
                         if p in self.profile.phases]

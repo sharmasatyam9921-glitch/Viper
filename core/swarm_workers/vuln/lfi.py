@@ -234,15 +234,36 @@ async def run(agent: SwarmAgent) -> List[dict]:
         async with _sem:
             # Baseline with a benign control value: if the signature already shows
             # up here, the page echoes it normally — skip to avoid a false positive.
+            from ._bypass import adaptive_fetch
+
+            def _build(variant: str) -> str:
+                return add_query(url, param, variant)
+
             control_url = add_query(url, param, _CONTROL)
             baseline = await fetch("GET", control_url, timeout=timeout)
             if baseline is not None and _match_signature(baseline.body):
                 return []
+            from core.waf_bypass import is_blocked as _looks_blocked
             for payload in _PAYLOADS:
                 test_url = add_query(url, param, payload)
                 resp = await fetch("GET", test_url, timeout=timeout)
                 if resp is None or not resp.body:
                     continue
+                _waf = ""
+                # Only on a WAF block: retry encoding mutations of the traversal
+                # payload and re-run the SAME signature differential (the OS decodes
+                # the mutated path and leaks the same signature), so a bypass can only
+                # confirm a real file read — precision is untouched; a total block
+                # emits nothing (never a fabricated success). Happy path unchanged.
+                if _looks_blocked(resp):
+                    res = await adaptive_fetch("GET", _build, payload, timeout=timeout)
+                    if res.blocked or res.response is None or not res.response.body:
+                        continue
+                    if res.bypassed:
+                        resp = res.response
+                        test_url = _build(res.payload)
+                        payload = res.payload
+                        _waf = f"; WAF-bypassed via {res.label}"
                 hit = _match_signature(resp.body)
                 if not hit:
                     continue
@@ -267,7 +288,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
                         f"{kind} signature leaked in response: {evidence!r} "
                         f"(absent in control={_CONTROL!r}; token/keyword-only "
                         f"control(s) {_KEYWORD_CONTROLS.get(kind, ())!r} did not "
-                        f"leak it, so not a search/echo artifact)"
+                        f"leak it, so not a search/echo artifact){_waf}"
                     ),
                 }]
             return []

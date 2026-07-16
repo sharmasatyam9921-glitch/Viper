@@ -103,11 +103,26 @@ _CREDENTIAL_VALUE = re.compile(
 
 
 def _candidate_params(url: str) -> list[str]:
-    """URL-like params already present on the target, else a small default set."""
+    """URL-like params already present on the target, plus any URL-shaped param name
+    discovered by recon (openapi/sourcemap/graphql), else a small default set. Only
+    names that look like URL sinks are used (conservative — SSRF payloads shouldn't be
+    fired at arbitrary params); the caller caps the count and the gate still decides."""
     qs = parse_qs(urlsplit(url).query)
     present = [k for k in qs if k.lower() in _URL_PARAMS]
-    if present:
-        return present
+    disc: list[str] = []
+    try:
+        from core.payload_library import get_discovered_params
+        disc = [p for p in get_discovered_params()
+                if p.lower() in _URL_PARAMS
+                or any(tok in p.lower() for tok in
+                       ("url", "uri", "link", "src", "dest", "redirect", "callback",
+                        "webhook", "image", "host", "domain", "site", "feed", "proxy",
+                        "fetch", "load", "next", "return", "target", "endpoint"))]
+    except Exception:  # noqa: BLE001
+        disc = []
+    ordered = list(dict.fromkeys([*present, *disc]))
+    if ordered:
+        return ordered
     # Nothing url-shaped in the query — try the most common injection points.
     return ["url", "uri", "dest", "redirect_uri", "callback"]
 

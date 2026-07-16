@@ -194,7 +194,22 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # never exercised.
     from urllib.parse import parse_qsl, urlsplit
     existing = [k for k, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)]
-    params = list(dict.fromkeys([*existing, *REDIRECT_PARAMS]))
+    # Also probe recon-discovered params whose name looks redirect-ish (a real app's
+    # own ?returnTo=/ ?next= that isn't in the static list). The gate re-injects a fresh
+    # attacker host and requires it to be the actual redirect target, so a non-redirect
+    # param probed here can never confirm — this only widens coverage, never precision.
+    _redirish = ("redirect", "redir", "return", "returnurl", "next", "goto", "dest",
+                 "destination", "continue", "forward", "callback", "url", "target", "rurl")
+    disc: list[str] = []
+    try:
+        from core.payload_library import get_discovered_params
+        disc = [p for p in get_discovered_params()
+                if any(tok in p.lower() for tok in _redirish)]
+    except Exception:  # noqa: BLE001
+        disc = []
+    # Cap total fan-out per URL for parity with cmdi ([:24]) / ssrf ([:5]) — bounded
+    # even on a recon-heavy target; the gate still re-confirms each with a fresh host.
+    params = list(dict.fromkeys([*existing, *disc, *REDIRECT_PARAMS]))[:24]
 
     for param in params:
         for payload in (_ATTACKER_ABS, _ATTACKER_REL):

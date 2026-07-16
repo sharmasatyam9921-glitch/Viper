@@ -103,10 +103,20 @@ _SLEEP_SEPARATORS = [
 
 
 def _target_params(url: str) -> list[str]:
-    """Params present in the URL's own query, else a small default set."""
+    """Params present in the URL's own query, PLUS params discovered by recon
+    (openapi/sourcemap/graphql -> add_discovered_params), else a small default set.
+    Command injection can land in any param, so a discovered param name is a real
+    injection point a static list would miss. Bounded; every candidate still passes
+    the unchanged gate."""
     qs = urllib.parse.parse_qsl(urlsplit(url).query)
     present = [k for k, _ in qs]
-    return present or list(_DEFAULT_PARAMS)
+    try:
+        from core.payload_library import get_discovered_params
+        disc = list(get_discovered_params())
+    except Exception:  # noqa: BLE001
+        disc = []
+    merged = list(dict.fromkeys([*present, *disc]))[:24]
+    return merged or list(_DEFAULT_PARAMS)
 
 
 def _executed_not_reflected(body: str, marker: str, injected_value: str) -> bool:
