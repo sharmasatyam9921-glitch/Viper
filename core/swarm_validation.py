@@ -88,6 +88,25 @@ _PUBLISHABLE = re.compile(
     r"search[_-]?only|sandbox|demo[-_]?token|client_id", re.I)
 # Doc/changelog URLs where a credential-shaped string is usually rotated/sample.
 _DOC_URL = re.compile(r"(changelog|readme|history|release[-_]?notes)|\.(txt|md|rst)(\?|$)", re.I)
+# Sensitive FIELD:VALUE pairs (captures the value so a placeholder can be told from real
+# data — a public API-doc/demo body serves "password":"changeme"; a real leak serves a
+# bcrypt hash / token). Field-name list mirrors _SENSITIVE.
+_SENSITIVE_KV = re.compile(
+    r'"(password|passwordHash|password_hash|ssn|social_security|creditCard|card_number|'
+    r'cardNum|cvv|sessionToken|session_token|access_token|api_?key|private_?key|secret)"'
+    r'\s*:\s*"([^"]{1,200})"', re.I)
+# Placeholder/demo VALUES (a field carrying one of these is example data, not a live leak).
+_PLACEHOLDER_VALUE = re.compile(
+    r"change_?me|^password$|^passw0rd|^123456|^secret$|^test$|^example|^string$|^null$|"
+    r"^none$|^your_|^<|\*{3,}|^admin$|^user$|^pass$|^foo$|^bar$|placeholder|redacted|"
+    r"dummy|^sample|xxxx|^s3cr3t", re.I)
+# A credential-strength VALUE: bcrypt/argon/crypt hash, JWT, AKIA, PEM, long hex/base64.
+_CRED_VALUE = re.compile(
+    r"\$2[aby]\$|\$argon2|^\$[1256]\$|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.|"
+    r"AKIA[0-9A-Z]{16}|-----BEGIN|[0-9a-f]{32,}|[A-Za-z0-9+/]{24,}={0,2}\Z", re.I)
+# API-documentation / schema surfaces (an anonymously-served example body is docs, not BAC).
+_DOC_SURFACE_URL = re.compile(
+    r"swagger|openapi|api[-_]?docs?|redoc|/schema\b|graphiql|/docs?(/|\?|$)", re.I)
 # Static-asset content types where a CORS reflection exposes nothing sensitive.
 _STATIC_CT = ("text/css", "javascript", "font", "image/", "woff", "octet-stream")
 
@@ -244,9 +263,18 @@ async def _recheck_secrets(finding, fetch, timeout):
         tok = mm.group(0)
         ctx = body[max(0, mm.start() - 12):mm.end() + 12]
         # Skip obvious placeholders/examples (AKIA…EXAMPLE, YOUR_KEY, <token>, 0000…).
-        if not _SECRET_PLACEHOLDER.search(tok) and not _SECRET_PLACEHOLDER.search(ctx):
-            return True, 0.75, f"live-looking credential reproduced ({tok[:4]}…)"
-    return False, 0.2, "only placeholder/example credentials (or none) — manual review"
+        if _SECRET_PLACEHOLDER.search(tok) or _SECRET_PLACEHOLDER.search(ctx):
+            continue
+        # PUBLIC-BY-DESIGN shape: a Google `AIza…` key is routinely a browser/Firebase
+        # API key that is MEANT to be served publicly (Maps/Firebase config, JSON or JS) —
+        # its mere presence is NOT proof of a leaked server credential. The gate must not
+        # auto-confirm it (that was a precision-1.00 false positive). Only NEVER-public
+        # shapes (AKIA/ghp_/gho_/sk_live_/xox*/PEM) confirm; AIza stays a lead.
+        if tok.startswith("AIza"):
+            continue
+        return True, 0.75, f"live-looking credential reproduced ({tok[:4]}…)"
+    return False, 0.2, ("only placeholder / public-by-design (e.g. Google browser key) / "
+                        "example credentials (or none) — manual review (lead)")
 
 
 async def _recheck_access_control(finding, fetch, timeout):
@@ -265,8 +293,34 @@ async def _recheck_access_control(finding, fetch, timeout):
     # demo tokens) are intended to be served anonymously — not broken access control.
     if _PUBLISHABLE.search(body):
         return False, 0.3, "anonymous data is a PUBLISHABLE/client-side key (intended public) — lead"
-    if _SENSITIVE.search(body):
-        return True, 0.7, "protected endpoint returns strongly-private data ANONYMOUSLY (2xx)"
+    # API docs / schema specs / GraphiQL serve EXAMPLE bodies (a "password":"changeme"
+    # field, a spec with a `passwordHash` property) anonymously — that is documentation,
+    # not broken access control. (Precision fix: this was a false positive.)
+    ct = (r.headers.get("content-type", "") if getattr(r, "headers", None) else "").lower()
+    is_doc = (_DOC_SURFACE_URL.search(url) or "schema+json" in ct
+              or re.search(r'"(swagger|openapi)"\s*:', body[:2000]))
+    if is_doc:
+        return False, 0.3, ("anonymous body is API-doc/schema/example content, not a live "
+                            "leak — manual review (lead)")
+    # A credential VALUE served anonymously (AKIA…/PEM, not a public AIza) is decisive.
+    ms = _SECRET_SHAPE.search(body)
+    if ms and not ms.group(0).startswith("AIza"):
+        ctx = body[max(0, ms.start() - 12):ms.end() + 12]
+        if not _SECRET_PLACEHOLDER.search(ctx):
+            return True, 0.8, "protected endpoint returns a live credential VALUE anonymously (2xx)"
+    # Sensitive FIELDS: confirm only when a field carries a REAL credential-strength value
+    # (a bcrypt/argon hash, a JWT, ...) or when >=2 DISTINCT sensitive fields appear
+    # together (a single placeholder-valued field is likely a demo/schema example -> lead).
+    pairs = _SENSITIVE_KV.findall(body)
+    real = [(f, v) for f, v in pairs if not _PLACEHOLDER_VALUE.search(v.strip())]
+    distinct = {f.lower() for f, _ in real}
+    strong = any(_CRED_VALUE.search(v.strip()) for _, v in real)
+    if strong or len(distinct) >= 2:
+        return True, 0.7, ("protected endpoint returns real private data ANONYMOUSLY "
+                           f"({sorted(distinct)[:4]})")
+    if pairs:
+        return False, 0.3, ("anonymous body has only placeholder-valued / single sensitive "
+                            "field(s) — likely a demo/schema example (lead)")
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 

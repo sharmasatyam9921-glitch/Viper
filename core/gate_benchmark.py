@@ -164,6 +164,13 @@ def _secret_changelog(m, url, h):
                     f"v1.2: rotated key {_AKIA}", url)
 
 
+def _secret_firebase_aiza(m, url, h):
+    # A Google AIza key is a PUBLIC browser/Firebase key by design — its presence is not
+    # proof of a leaked server credential, so the gate must NOT auto-confirm it.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"apiKey":"AIza' + "b" * 35 + '","authDomain":"x.firebaseapp.com"}', url)
+
+
 def _ac_pwhash(m, url, h):
     return HttpResp(200, {"content-type": "application/json"}, _PWHASH, url)
 
@@ -176,6 +183,14 @@ def _ac_public_email(m, url, h):
 def _ac_publishable(m, url, h):
     return HttpResp(200, {"content-type": "application/json"},
                     '{"api_key":"pk_live_51ABCdefGHIjklMNOpqr"}', url)
+
+
+def _ac_swagger_password(m, url, h):
+    # An OpenAPI spec served anonymously carries a "password":"changeme" EXAMPLE — that is
+    # documentation, not broken access control; the gate must NOT confirm it.
+    return HttpResp(200, {"content-type": "application/json"},
+                    '{"openapi":"3.0.0","paths":{"/login":{"post":{"requestBody":{"content":'
+                    '{"application/json":{"example":{"password":"changeme"}}}}}}}}', url)
 
 
 def _ac_forbidden(m, url, h):
@@ -704,6 +719,12 @@ BENCHMARK = [
     Scenario("access_control", "safe", "endpoint returns 403",
              {"vuln_type": "access_control:missing_authorization", "url": "http://t/api/Users"},
              _ac_forbidden),
+    Scenario("access_control", "safe", "OpenAPI spec with a password example field",
+             {"vuln_type": "access_control:missing_authorization",
+              "url": "http://t/api/openapi.json"}, _ac_swagger_password),
+    Scenario("secrets", "safe", "public-by-design Google AIza browser key (Firebase config)",
+             {"vuln_type": "secret:google_api_key", "url": "http://t/config.json"},
+             _secret_firebase_aiza),
 
     # cors
     Scenario("cors", "vuln", "reflects arbitrary origin + credentials",
