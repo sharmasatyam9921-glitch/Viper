@@ -85,6 +85,43 @@ def get_auth() -> dict[str, str]:
     return _auth_var.get()
 
 
+# --- Host-scoped auth (leaked-credential authenticated re-sweep) -------------
+# A credential harvested from host A is bound to host A ONLY: it is applied when a
+# request's TARGET host matches, and never sent to any other host — even another in-scope
+# host, and never a third-party/cloud API. This is the structural guarantee that a leaked
+# app-session token (JWT) replayed for impact can't leak off-host. Separate from the
+# global session auth above; default empty → no host-scoped auth (legacy behavior).
+_host_auth_var: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "viper_host_auth", default={})
+
+
+def _host_key(url_or_host: str) -> str:
+    # Robust hostname extraction: urlsplit().hostname correctly strips userinfo, port and
+    # IPv6 brackets, so a malformed authority like "user@hostB" can never be mis-keyed to
+    # the wrong host (credential-safety: the key decides which host a credential is bound to).
+    if not url_or_host:
+        return ""
+    from urllib.parse import urlsplit as _us
+    s = (url_or_host if ("://" in url_or_host or url_or_host.startswith("//"))
+         else "//" + url_or_host)
+    return (_us(s).hostname or "").strip().lower()
+
+
+def add_host_auth(host: str, headers: Optional[dict[str, str]]) -> None:
+    """Bind auth headers to ONE host. Applied only to requests whose target host matches;
+    structurally cannot leak to another host. Additive across calls."""
+    h = _host_key(host)
+    if not h or not headers:
+        return
+    d = dict(_host_auth_var.get())
+    d[h] = dict(headers)
+    _host_auth_var.set(d)
+
+
+def clear_host_auth() -> None:
+    _host_auth_var.set({})
+
+
 # --- Upstream proxy (Burp / ZAP) --------------------------------------------
 # A hunt may route every worker request through an intercepting proxy so the
 # operator can watch, log, and match-replace VIPER's traffic in Burp Suite (or
@@ -159,7 +196,41 @@ def _build_opener(*, follow_redirects: bool,
         class _NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **kw): return None
         handlers.append(_NoRedirect())
+    else:
+        handlers.append(_SafeRedirect())
     return urllib.request.build_opener(*handlers)
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never let a credential cross a host boundary.
+
+    urllib's default handler copies every request header (Authorization, Cookie
+    included) verbatim onto a redirect to a DIFFERENT host, and the scope gate in
+    ``fetch`` only sees the first URL. That would let a host-scoped leaked credential
+    (or the operator's global session auth) follow a ``302 -> https://other-host`` off
+    the target — e.g. an open-redirect/logout endpoint. So on every hop we:
+      1. fail CLOSED if the redirect target is out of scope, and
+      2. STRIP Authorization/Cookie whenever the hop crosses hosts.
+    """
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        try:
+            if not is_in_scope(newurl):
+                logger.warning("redirect left scope, dropping: %s -> %s",
+                               getattr(req, "full_url", ""), newurl)
+                return None
+        except Exception:   # noqa: BLE001 — any scope-check error fails closed
+            return None
+        if _host_key(newurl) != _host_key(getattr(req, "full_url", "")):
+            for store in (getattr(new, "headers", None),
+                          getattr(new, "unredirected_hdrs", None)):
+                if not store:
+                    continue
+                for hdr in [k for k in store if k.lower() in ("authorization", "cookie")]:
+                    del store[hdr]
+        return new
 
 
 def _fetch_sync(
@@ -247,7 +318,13 @@ async def fetch(
     # still override (e.g. send no auth, or its own Authorization). Workers doing
     # identity-controlled testing opt out entirely via use_session_auth=False.
     if use_session_auth:
-        auth = _auth_var.get()
+        auth = dict(_auth_var.get())
+        # Host-scoped credential (leaked-cred re-sweep): merged ONLY when the target host
+        # matches the host it was bound to — cannot reach any other host.
+        if url:
+            hs = _host_auth_var.get().get(_host_key(url))
+            if hs:
+                auth = {**auth, **hs}
         if auth:
             headers = {**auth, **(headers or {})}
     slot_held = False

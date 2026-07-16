@@ -131,7 +131,7 @@ def _scan_body(body: str, url: str, *, is_html: bool = False,
             continue
         for m in pat.finditer(body[:512 * 1024]):  # cap body scan
             secret = m.group(0)
-            findings.append({
+            finding = {
                 "type": "secret_leak",
                 "vuln_type": f"secret:{name}",
                 "title": f"Leaked secret: {name}",
@@ -143,7 +143,23 @@ def _scan_body(body: str, url: str, *, is_html: bool = False,
                     # Truncate visibly — never leak the full secret in audit
                     f"{name} found ({secret[:6]}…{secret[-4:]}, {len(secret)} chars)"
                 ),
-            })
+            }
+            # A leaked APP-SESSION token (JWT) can escalate to an authenticated re-sweep of
+            # the SAME host. Stash the full value in the isolated vault (NEVER in the finding
+            # — rule #6) and carry only an opaque, host-bound ref. Restricted to jwt_token:
+            # cloud/provider keys (AKIA…, xoxb-, AIza…) are NEVER replayed (that would be
+            # using a credential against a third-party API — prohibited).
+            if name == "jwt_token":
+                try:
+                    from core.auth_material import stash
+                    host = urlsplit(url).netloc
+                    ref = stash(host, "Authorization", f"Bearer {secret}")
+                    if ref:
+                        finding["auth_ref"] = ref
+                        finding["auth_host"] = host
+                except Exception:  # noqa: BLE001 — escalation is best-effort, never blocks
+                    pass
+            findings.append(finding)
             break  # one finding per pattern per URL
     return findings
 

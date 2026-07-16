@@ -519,6 +519,11 @@ class HackMode:
         # Independent validation gate BEFORE scope/auth/proxy are torn down, so
         # re-tests stay in scope and authenticated. Tags validated/submittable.
         await self._run_validation_gate(result)
+        # Leaked-credential authenticated re-sweep: a SUBMITTABLE app-session token (JWT)
+        # unlocks an authenticated pass of its OWN host (host-scoped, read-only), confirmed
+        # by a second independent gate pass. Runs before the manifest so any authed finding
+        # is in the custody set.
+        await self._run_authed_resweep(result)
         # Tamper-evident chain of custody for the submittable set.
         self._write_evidence_manifest(result)
         # Capture the compact, secret-free session-context summary AFTER the gate
@@ -882,6 +887,14 @@ class HackMode:
         except Exception:
             pass
         try:
+            # Drop any leaked-credential material + host-scoped auth at the hunt boundary.
+            from core.auth_material import clear as _clear_auth_material
+            from .swarm_workers.vuln._http import clear_host_auth
+            _clear_auth_material()
+            clear_host_auth()
+        except Exception:
+            pass
+        try:
             from .tool_gateway import clear_context
             clear_context()
         except Exception:
@@ -1047,6 +1060,77 @@ class HackMode:
     # ------------------------------------------------------------------
     # Phase dispatch
     # ------------------------------------------------------------------
+
+    async def _run_authed_resweep(self, result: "HackResult") -> int:
+        """Authenticated re-sweep with a leaked app-session credential (rule-safe escalation).
+
+        For each SUBMITTABLE secret that carried a host-bound auth ref (a JWT found on a
+        server-side surface), install the credential HOST-SCOPED — by construction it can
+        only ever be sent to that ONE host, never another host and never a third-party/cloud
+        API — and run one READ-ONLY vuln round over that host's discovered surface. New
+        findings pass the SAME gate (a second independent pass, authenticated), so an authed
+        IDOR/BOLA/exposure is confirmed with equal rigor. The credential VALUE is read from
+        the isolated vault (never from a finding) and the host auth is cleared afterwards.
+        Opt out with ``profile.authed_resweep = False``."""
+        if not getattr(self.profile, "authed_resweep", True) or not self._validate:
+            return 0
+        try:
+            from core.auth_material import resolve
+            from core.swarm_validation import validate_findings
+            from .swarm_workers.vuln._http import add_host_auth, clear_host_auth
+        except Exception:   # noqa: BLE001
+            return 0
+        creds = [f for f in result.findings
+                 if f.get("submittable") and f.get("auth_ref") and f.get("auth_host")]
+        if not creds:
+            return 0
+
+        cred_hosts: set[str] = set()
+        origins: list[str] = []
+        for f in creds:
+            r = resolve(f["auth_ref"])
+            if not r:
+                continue
+            rhost, headers = r
+            add_host_auth(rhost, headers)          # host-scoped — only rhost ever gets it
+            cred_hosts.add(rhost.lower())
+            scheme = urlsplit(str(f.get("url") or "")).scheme or "https"
+            origins.append(f"{scheme}://{rhost}/")
+        if not cred_hosts:
+            return 0
+
+        # Re-sweep the discovered endpoints ON the credential's host (authed), not just root.
+        endpoint_urls = [
+            str(f.get("url")) for f in (list(result.surface) + list(result.findings))
+            if f.get("url") and urlsplit(str(f.get("url"))).netloc.lower() in cred_hosts
+        ]
+        assets = list(dict.fromkeys(origins + endpoint_urls))[:40]
+        added = 0
+        try:
+            self.narrator.info(
+                f"authenticated re-sweep with {len(cred_hosts)} leaked app-session "
+                "credential(s)")
+            self.audit.event("authed_resweep.start", target=self.target,
+                             payload={"hosts": sorted(cred_hosts), "assets": len(assets)})
+            pr = await self._run_phase("vuln", assets=assets)
+            new = [f for f in pr.findings if not _is_surface(f)]
+            validated = await validate_findings(
+                new, default_target=self.target, bola_config=self._bola_config,
+                oob_store=(self._oob.store if self._oob is not None else None)
+            ) if new else []
+            for f in validated:
+                f["authed_resweep"] = True
+                (result.surface if _is_surface(f) else result.findings).append(f)
+                added += 1
+            if added:
+                self.audit.event("authed_resweep.findings", target=self.target,
+                                 payload={"count": added})
+                self.narrator.info(f"authed re-sweep surfaced {added} finding(s)")
+        except Exception as exc:   # noqa: BLE001 — escalation must never break teardown
+            logger.warning("authed re-sweep failed: %s", exc)
+        finally:
+            clear_host_auth()      # credential never outlives the re-sweep
+        return added
 
     def _coverage_targets(self) -> list[str]:
         """URLs the coverage critic flags as discovered-but-never-probed (unswept hosts
