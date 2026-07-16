@@ -72,6 +72,38 @@ SERVICE_CNAMES = {
 }
 
 
+def _load_external_fingerprints() -> None:
+    """Merge curated provider fingerprints from data/takeover_fingerprints.json into the
+    built-in lists (a maintained corpus of ~70 providers vs the ~12 hardcoded here).
+    Best-effort: a missing/malformed file, or any bad regex, leaves the built-ins intact —
+    the gate recheck is unchanged, so more fingerprints add RECALL only (each is provider-
+    specific, so a benign 404 still matches none: precision 1.00 is untouched)."""
+    import json as _json
+    from pathlib import Path as _Path
+    path = _Path(__file__).resolve().parents[3] / "data" / "takeover_fingerprints.json"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return
+    have = {s for s, _ in FINGERPRINTS}
+    for p in data.get("providers", []) if isinstance(data, dict) else []:
+        svc = str(p.get("service") or "").strip()
+        fp = p.get("fingerprint")
+        if not svc or not fp or svc in have:
+            continue
+        try:
+            FINGERPRINTS.append((svc, re.compile(fp, re.I)))
+        except re.error:
+            continue
+        cn = p.get("cnames")
+        if isinstance(cn, list) and cn:
+            SERVICE_CNAMES.setdefault(svc, [str(c) for c in cn])
+        have.add(svc)
+
+
+_load_external_fingerprints()
+
+
 def match_fingerprint(body: str):
     """Return the service whose unclaimed-fingerprint is in `body`, else None."""
     if not body:

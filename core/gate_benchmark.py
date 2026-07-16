@@ -269,6 +269,11 @@ def _takeover_safe(m, url, h):
     return HttpResp(404, {}, "<html>404 Not Found - page missing</html>", url)
 
 
+def _takeover_vercel(m, url, h):
+    # A newly-added provider fingerprint (expanded corpus) must confirm through the gate.
+    return HttpResp(404, {}, '<html><body>{"error":{"code":"DEPLOYMENT_NOT_FOUND"}}</body></html>', url)
+
+
 def _s3_public(m, url, h):
     return HttpResp(200, {}, '<?xml version="1.0"?><ListBucketResult xmlns='
                     '"http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name>'
@@ -776,6 +781,9 @@ BENCHMARK = [
     Scenario("subdomain_takeover", "safe", "generic 404 (not a takeover)",
              {"vuln_type": "subdomain_takeover:github_pages", "url": "http://t/"},
              _takeover_safe),
+    Scenario("subdomain_takeover", "vuln", "Vercel DEPLOYMENT_NOT_FOUND (expanded corpus)",
+             {"vuln_type": "subdomain_takeover:vercel", "url": "http://t/"},
+             _takeover_vercel),
 
     # cloud storage exposure
     Scenario("cloud_exposure", "vuln", "public listable S3 bucket",
