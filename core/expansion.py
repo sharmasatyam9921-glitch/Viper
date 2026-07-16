@@ -43,6 +43,15 @@ _ESCALATE = {
     "sqli": ["sqli"],                      # schema / data enumeration (read-only)
     "ssti": ["ssti", "command_injection"],
     "cloud_exposure": ["cloud_exposure"],
+    # Soft-signal pivots — an "almost worked" endpoint is where a real hacker digs in.
+    # A param whose value reflects unencoded (tags/full payload filtered) or that gave a
+    # near-threshold blind signal is a proven-HOT injection point: re-fire SIBLING classes
+    # on that exact URL+param (not the same class, which would just reproduce the soft
+    # signal and dedup). Every re-probe still passes the unchanged gate.
+    "xss_text": ["ssti", "sqli", "lfi", "command_injection"],  # reflected as text, tags filtered
+    "xss_tag": ["ssti", "sqli"],           # angle brackets pass; full payload filtered
+    "sqli_blind": ["sqli"],                # near-threshold blind -> fuller re-probe
+    "sqli_error": ["sqli"],
 }
 # Discovery of a new host -> a full sweep of the new target (recon + vuln).
 _NEW_HOST = {"subdomain", "subdomain_alive", "dns_a", "dns_aaaa", "dns_cname", "asset"}

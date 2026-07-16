@@ -60,3 +60,26 @@ def test_plan_expansions_dedupes_by_target_and_techniques():
 def test_plan_expansions_respects_max_tasks():
     findings = [{"vuln_type": "lfi", "url": f"http://t/{i}?f=1"} for i in range(50)]
     assert len(plan_expansions(findings, max_tasks=5)) == 5
+
+
+# ── #7(b) soft-signal pivots ─────────────────────────────────────────────────
+def test_filtered_reflection_pivots_to_sibling_injection_classes():
+    # A param reflected as text (tags filtered) is a proven-hot injection point:
+    # re-fire SIBLING classes on that exact URL, not xss again (which would dedup).
+    t = expand({"vuln_type": "xss_text:q", "type": "xss_reflection",
+                "url": "http://t/s?q=x"})
+    assert t is not None
+    assert t.target == "http://t/s?q=x"
+    assert set(t.techniques) == {"ssti", "sqli", "lfi", "command_injection"}
+    assert "xss" not in t.techniques        # not the class that produced the soft signal
+
+
+def test_xss_tag_and_blind_sqli_pivot():
+    assert set(expand({"vuln_type": "xss_tag:q", "url": "http://t/s?q=x"}).techniques) \
+        == {"ssti", "sqli"}
+    assert expand({"vuln_type": "sqli_blind:id", "url": "http://t/a?id=1"}).techniques == ["sqli"]
+
+
+def test_confirmed_classes_unaffected():
+    # A confirmed reflected XSS is not a soft signal — behavior unchanged (no pivot).
+    assert expand({"vuln_type": "xss:q", "url": "http://t/s?q=x"}) is None
