@@ -110,7 +110,14 @@ def test_run_clean_page_finds_nothing():
 # ── gate: PP stays an actionable lead ──
 
 def test_gate_keeps_pp_as_actionable_lead():
-    out = asyncio.run(validate_findings(
-        [{"vuln_type": "prototype_pollution:client", "url": "http://t/app.js"}]))
+    # Without a browser DOM oracle (Playwright absent), client-side prototype pollution
+    # stays a manual-review lead. Force the no-browser path so the test is deterministic
+    # regardless of whether Playwright happens to be installed in the environment.
+    from unittest.mock import patch
+
+    from core.browser import viper_browser
+    with patch.object(viper_browser, "available", lambda: False):
+        out = asyncio.run(validate_findings(
+            [{"vuln_type": "prototype_pollution:client", "url": "http://t/app.js"}]))
     assert not out[0]["submittable"]
-    assert "browser/DOM" in out[0]["validation_reason"]
+    assert "browser/DOM oracle" in out[0]["validation_reason"]

@@ -324,6 +324,47 @@ async def _recheck_access_control(finding, fetch, timeout):
     return False, 0.2, "anonymous access returns no strongly-private content"
 
 
+async def _recheck_proto_pollution(finding, fetch, timeout):
+    """Confirm client-side prototype pollution with a real headless-browser DOM oracle.
+
+    When Playwright is available, navigate the candidate URL with a ``__proto__`` payload
+    carrying a unique marker and read it back off ``Object.prototype`` — an UNFORGEABLE
+    observation (a random marker is undefined on a normal page), so a confirmation is never
+    a false positive. Without a browser it returns a LEAD, so the class stays manual-review
+    exactly as before and gate precision never depends on a browser being installed.
+    Read-only navigation, in-scope only."""
+    url = finding.get("url") or ""
+    if not url:
+        return False, 0.0, "no url to re-test"
+    try:
+        from core.browser import viper_browser
+    except Exception:   # noqa: BLE001
+        viper_browser = None
+    if viper_browser is None or not viper_browser.available():
+        return False, 0.3, ("client-side prototype-pollution gadget — confirming needs a "
+                            "browser/DOM oracle (Playwright not installed); verify manually "
+                            "(lead)")
+    import secrets as _secrets
+    from core.swarm_workers.vuln._http import is_in_scope
+    marker = "vp" + _secrets.token_hex(6)
+    try:
+        result = await viper_browser.probe_proto_pollution(
+            url, marker, scope_guard=is_in_scope,
+            timeout_ms=int((timeout or 15) * 1000))
+    except Exception:   # noqa: BLE001 — the oracle must never raise into the gate
+        result = None
+    if result is True:
+        return True, 0.9, ("client-side prototype pollution CONFIRMED — a __proto__ payload "
+                           "in the URL polluted Object.prototype in a real headless browser "
+                           "(the injected marker was observed on the global prototype) "
+                           "(CWE-1321)")
+    if result is False:
+        return False, 0.3, ("prototype-pollution gadget present, but the DOM oracle did not "
+                            "observe global pollution via the URL on this page — manual "
+                            "review (lead)")
+    return False, 0.3, "DOM oracle unavailable/errored — manual review (lead)"
+
+
 async def _recheck_clickjacking(finding, fetch, timeout):
     """Re-fetch and confirm the page is genuinely framable: an HTML 2xx with NO
     X-Frame-Options and NO CSP frame-ancestors. A static asset, a non-HTML body,
@@ -1190,15 +1231,12 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
                             "field on a self-owned object. Confirming requires a WRITE "
                             "(PATCH the field + read back), which the read-only gate will "
                             "not perform — verify manually with your own account (lead)")
-    # Client-side prototype pollution is found by STATIC JS analysis (a user-input
-    # source reaching a prototype-touching sink). Confirming it needs a real browser
-    # to pollute and observe the DOM — the read-only gate does not drive one, and
-    # polluting server-side would be destructive — so it stays a manual-review lead.
+    # Client-side prototype pollution: confirm with a real headless-browser DOM oracle
+    # when Playwright is installed (navigate a __proto__ marker payload, read it back off
+    # Object.prototype — unforgeable). Without a browser it stays a manual-review LEAD, so
+    # precision never depends on a browser being present.
     if head == "prototype_pollution":
-        return False, 0.3, ("client-side prototype-pollution gadget (user-input source + "
-                            "prototype-reaching sink in the page's JS). Confirming needs a "
-                            "browser/DOM probe the read-only gate does not run — verify "
-                            "manually (lead)")
+        return await _recheck_proto_pollution(finding, fetch, timeout)
     # Read-only surface detections whose CONFIRMATION would be destructive (an RCE
     # gadget for deserialization, poisoning a shared cache) or is inherently a config
     # observation (OAuth metadata) — all stay actionable manual-review leads.

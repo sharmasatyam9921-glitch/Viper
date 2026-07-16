@@ -34,6 +34,75 @@ def available() -> bool:
         return False
 
 
+async def probe_proto_pollution(
+    url: str,
+    marker: str,
+    *,
+    scope_guard: Optional[Callable[[str], bool]] = None,
+    timeout_ms: int = 15000,
+) -> Optional[bool]:
+    """DOM oracle for client-side prototype pollution (read-only).
+
+    Navigate a headless browser to `url` with a ``__proto__`` payload carrying a unique
+    `marker`, then read ``Object.prototype[marker]``. Returns:
+      * ``True``  — the global prototype was ACTUALLY polluted (the marker landed on
+        Object.prototype). Unforgeable: a random marker is ``undefined`` on any normal
+        page, so this only happens if the page's own JS walked the URL into a prototype
+        write — a definitive confirmation, never a false positive.
+      * ``False`` — navigated but the prototype was not polluted.
+      * ``None``  — Playwright unavailable, out of scope, or an error (caller keeps it a lead).
+
+    Only GET navigations are issued; no form is submitted, no state is mutated."""
+    if not available():
+        return None
+    if scope_guard is not None:
+        try:
+            if not scope_guard(url):
+                return None
+        except Exception:
+            return None
+
+    sep = "&" if "?" in url.split("#", 1)[0] else "?"
+    # Common client-side PP entry points: query and hash __proto__ / constructor.prototype.
+    targets = [
+        f"{url}{sep}__proto__[{marker}]={marker}",
+        f"{url}{sep}constructor[prototype][{marker}]={marker}",
+        f"{url}#__proto__[{marker}]={marker}",
+    ]
+    from playwright.async_api import async_playwright
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                for target in targets:
+                    ctx = await browser.new_context()
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(target, timeout=timeout_ms, wait_until="load")
+                        # A benign in-scope URL could 302 off-scope; the read-only GET is
+                        # harmless, but don't evaluate/confirm against an off-scope page.
+                        if scope_guard is not None:
+                            try:
+                                if not scope_guard(page.url):
+                                    continue
+                            except Exception:
+                                continue
+                        await page.wait_for_timeout(300)   # let a client router parse it
+                        val = await page.evaluate("(m) => Object.prototype[m]", marker)
+                        if val == marker:
+                            return True
+                    except Exception as exc:   # noqa: BLE001
+                        logger.debug("proto-pollution probe %s failed: %s", target, exc)
+                    finally:
+                        await ctx.close()
+                return False
+            finally:
+                await browser.close()
+    except Exception as exc:   # noqa: BLE001 — never let the oracle raise into the gate
+        logger.debug("proto-pollution browser probe errored: %s", exc)
+        return None
+
+
 async def capture_roles(
     seed_urls: List[str],
     accounts: Dict[str, dict],
