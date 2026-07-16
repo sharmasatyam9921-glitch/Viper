@@ -105,3 +105,52 @@ def test_adaptive_fetch_bypasses_real_waf():
         assert res.response.status == 200
     finally:
         srv.shutdown()
+
+
+# ── WAF-family fingerprint + family-ordered mutation (adaptive, #4b) ──────────
+def test_waf_family_detects_vendor():
+    from core.waf_bypass import waf_family
+    assert waf_family(HttpResp(403, {}, "Attention Required! | Cloudflare", "")) == "cloudflare"
+    assert waf_family(HttpResp(406, {}, "mod_security action blocked", "")) == "modsecurity"
+    assert waf_family(HttpResp(403, {}, "Incapsula incident id 123", "")) == "imperva"
+    assert waf_family(HttpResp(200, {}, "just a normal page", "")) is None
+
+
+def test_family_order_reaches_bypass_in_fewer_requests():
+    # A cloudflare block should float 'double_url' (cloudflare's preferred) to the front,
+    # so the engine reaches the working mutation in ~2 sends, not ~8.
+    reset_learning()
+    from core.waf_bypass import AdaptiveBypass
+    n = {"i": 0}
+
+    async def send(v):
+        n["i"] += 1
+        if "%2520" in v:                       # the double-URL-encoded variant slips through
+            return HttpResp(200, {}, "ok", "")
+        return HttpResp(403, {}, "Attention Required! Cloudflare", "")   # everything else blocked
+
+    r = asyncio.run(AdaptiveBypass().run(send, "or 1=1", target="cf.host"))
+    assert not r.blocked and r.bypassed
+    assert r.label == "double_url"
+    assert n["i"] <= 3, "cloudflare family ordering should reach double_url early"
+
+
+# ── Block-aware backoff: a corroborated WAF 403 throttles; a benign 403 does not (#4a) ──
+def test_rate_limiter_backs_off_on_corroborated_waf_block():
+    from core.swarm_workers.vuln._rate_limit import HostRateLimiter
+    lim = HostRateLimiter(rate_per_s=30.0)
+    asyncio.run(lim.acquire("waf.host"))
+    b = lim._buckets["waf.host"]
+    r0 = b.rate_per_s
+    asyncio.run(lim.record("waf.host", 403, waf_block=True))
+    assert b.rate_per_s < r0, "a corroborated WAF block must back the host off"
+
+
+def test_rate_limiter_ignores_benign_403():
+    from core.swarm_workers.vuln._rate_limit import HostRateLimiter
+    lim = HostRateLimiter(rate_per_s=30.0)
+    asyncio.run(lim.acquire("auth.host"))
+    b = lim._buckets["auth.host"]
+    r0 = b.rate_per_s
+    asyncio.run(lim.record("auth.host", 403, waf_block=False))
+    assert b.rate_per_s == r0, "a benign auth-403 (no WAF marker) must not throttle"

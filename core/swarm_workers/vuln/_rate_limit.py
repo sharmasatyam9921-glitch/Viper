@@ -155,13 +155,16 @@ class HostRateLimiter:
             if bucket and bucket.in_flight > 0:
                 bucket.in_flight -= 1
 
-    async def record(self, url_or_host: str, status: int) -> None:
+    async def record(self, url_or_host: str, status: int, *,
+                     waf_block: bool = False) -> None:
         """Feed a response status back so the host's rate adapts to the target's own
-        overload signals: multiplicative backoff on 429/503 (down to _MIN_RATE_PER_S),
-        gradual additive recovery toward the configured base after sustained healthy
-        responses. Only adapts a host that already has a bucket (created on acquire);
-        never raises. FP-safe: this changes ONLY request pacing, nothing about
-        findings or the validation gate."""
+        overload signals: multiplicative backoff on 429/503 — OR a corroborated WAF block
+        (``waf_block=True``, a 403/406 whose BODY carries a WAF marker, so a benign
+        auth-403 does NOT throttle) — down to _MIN_RATE_PER_S, with gradual additive
+        recovery toward the configured base after sustained healthy responses. Backing off
+        on a WAF block is politeness/anti-ban: a real hacker eases off when the WAF starts
+        blocking rather than hammering into an IP ban. Only adapts a host that already has
+        a bucket; never raises. FP-safe: changes ONLY request pacing, never a finding."""
         host = self._host_of(url_or_host)
         if not host:
             return
@@ -170,7 +173,7 @@ class HostRateLimiter:
             if bucket is None:
                 return
             base = bucket.base_rate or self.rate_per_s
-            if status in _OVERLOAD_STATUSES:
+            if status in _OVERLOAD_STATUSES or waf_block:
                 new_rate = max(_MIN_RATE_PER_S, bucket.rate_per_s * _BACKOFF_FACTOR)
                 new_conc = max(_MIN_CONCURRENCY, bucket.conc_limit // 2)
                 if new_rate < bucket.rate_per_s or new_conc < bucket.conc_limit:
@@ -217,14 +220,16 @@ async def wait_for_token(url_or_host: str, *, cost: float = 1.0) -> bool:
     return await _DEFAULT.acquire(url_or_host, cost=cost)
 
 
-async def record_response(url_or_host: str, status: int) -> None:
-    """Feed a response status to the default limiter so a host that returns 429/503
-    is automatically backed off (and recovers on sustained success). No-op when
-    unthrottled or on any error — pacing must never break a request."""
+async def record_response(url_or_host: str, status: int, *,
+                          waf_block: bool = False) -> None:
+    """Feed a response status to the default limiter so a host that returns 429/503 — or a
+    corroborated WAF block (``waf_block=True``) — is automatically backed off (and recovers
+    on sustained success). No-op when unthrottled or on any error — pacing must never break
+    a request."""
     if _unthrottled:
         return
     try:
-        await _DEFAULT.record(url_or_host, status)
+        await _DEFAULT.record(url_or_host, status, waf_block=waf_block)
     except Exception:   # noqa: BLE001 — adaptive pacing is never load-bearing
         pass
 

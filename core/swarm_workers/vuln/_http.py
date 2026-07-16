@@ -273,7 +273,18 @@ async def fetch(
     # overload signals (429/503 -> back off; sustained success -> recover). Best-effort.
     if rate_limit and url and resp is not None:
         from ._rate_limit import record_response
-        await record_response(url, getattr(resp, "status", 0))
+        status = getattr(resp, "status", 0)
+        # Corroborate a WAF block: only a 403/406/501 whose BODY carries a vendor WAF
+        # marker throttles the host — a benign auth-403 (no marker) does not. Anti-ban:
+        # ease off when the WAF starts blocking instead of hammering into a ban.
+        waf_block = False
+        if status in (403, 406, 501):
+            try:
+                from core.waf_bypass import waf_family
+                waf_block = waf_family(resp) is not None
+            except Exception:   # noqa: BLE001
+                waf_block = False
+        await record_response(url, status, waf_block=waf_block)
     return resp
 
 
