@@ -200,7 +200,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # params are never crowded out by seeded access-control param names.
         params = list(dict.fromkeys(params + list(_DEFAULT_PARAMS) + disc))[:32]
     else:
-        params = params[:5]
+        # Progressive escalation: widen the probed-param cap on a later (barren) pass.
+        _lvl = int((agent.payload or {}).get("escalation_level", 0) or 0)
+        params = params[:5 + _lvl * 6]
 
     # Each param's probe is fully self-contained (its own unique marker, its own
     # request/differential), so they run concurrently (bounded) for speed without

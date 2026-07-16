@@ -15,6 +15,7 @@ Typical worker usage::
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Dict, List
@@ -101,6 +102,50 @@ def get_discovered_params() -> List[str]:
 
 def clear_discovered_params() -> None:
     _discovered_params.clear()
+
+
+# ── Object-reference pool (feed-forward for IDOR/BOLA) ───────────────────────
+# Object IDs (numeric + UUID) seen in one response become test values elsewhere —
+# "harvest an ID here, replay it there", the classic IDOR-enumeration move. Only
+# harvested from ID-ish CONTEXTS ("id":123, /users/123, UUIDs) so the pool is real
+# object refs, not every number on the page. Read-only downstream; the gate/lead
+# discipline is unchanged (single-session IDOR stays a lead for manual review).
+_object_refs: set = set()
+_OBJREF_CAP = 60
+_OBJREF_CTX_RE = re.compile(
+    r'(?:"[a-z_]*id"\s*:\s*"?(\d{1,12})"?)'                       # "user_id": 123
+    r'|(?:\b[a-z_]*id\s*=\s*(\d{1,12})\b)'                        # id=123
+    r'|(?:/(?:users?|accounts?|orders?|items?|products?|invoices?'
+    r'|documents?|files?|records?|profiles?|tickets?)/(\d{1,12}))'  # /users/123
+    r'|(?:\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b)',  # UUID
+    re.I)
+
+
+def add_object_refs(text: str) -> None:
+    """Harvest object IDs (numeric in an id-ish context, or any UUID) from a response
+    body into the cross-worker pool. Best-effort; capped; never raises."""
+    if not text:
+        return
+    try:
+        for m in _OBJREF_CTX_RE.finditer(text[:200_000]):
+            val = next((g for g in m.groups() if g), None)
+            if not val:
+                continue
+            if val.isdigit() and len(val) < 2:      # skip 1-digit noise
+                continue
+            if len(_object_refs) >= _OBJREF_CAP:
+                break
+            _object_refs.add(val)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def get_object_refs() -> List[str]:
+    return list(_object_refs)
+
+
+def clear_object_refs() -> None:
+    _object_refs.clear()
 
 
 def get_param_hints() -> List[str]:

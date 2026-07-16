@@ -269,6 +269,9 @@ class HackMode:
             "iteration": 0,
             "findings": [],
             "findings_per_iteration": [],
+            # Progressive escalation: raised on each barren iteration so workers WIDEN
+            # (more params/assets/encodings) instead of re-running the identical scan.
+            "escalation_level": 0,
         }
 
     # ------------------------------------------------------------------
@@ -867,6 +870,18 @@ class HackMode:
         except Exception:
             pass
         try:
+            # Per-hunt discovery pools (discovered params + harvested object ids) are
+            # module globals like the sibling state above — reset them at the hunt
+            # boundary so a second in-process hunt starts clean and the object-id
+            # feed-forward's "this hunt" provenance stays truthful (no cross-hunt bleed).
+            from core.payload_library import (
+                clear_discovered_params, clear_object_refs,
+            )
+            clear_discovered_params()
+            clear_object_refs()
+        except Exception:
+            pass
+        try:
             from .tool_gateway import clear_context
             clear_context()
         except Exception:
@@ -1003,6 +1018,15 @@ class HackMode:
                     return
 
             self._state["findings_per_iteration"].append(findings_this_iter)
+            # Progressive escalation: a barren iteration (0 new findings) raises the level
+            # so the NEXT pass hunts harder (workers widen their param/asset/encoding sets)
+            # instead of re-running the byte-identical scan the dedup guarantees is empty.
+            # Capped at 2; reset the instant a pass finds something. Pre-gate only.
+            if findings_this_iter == 0:
+                self._state["escalation_level"] = min(
+                    2, self._state.get("escalation_level", 0) + 1)
+            else:
+                self._state["escalation_level"] = 0
             # After the first iteration, drop the resume-skip flag so
             # subsequent iterations re-run the full pipeline.
             first_iter_after_resume = False
@@ -1230,6 +1254,9 @@ class HackMode:
             # Shared per-hunt session/reachability state (additive; workers that
             # don't read it are unaffected).
             "session_context": self._session_context,
+            # Progressive-escalation level (0 normally; raised after barren iterations).
+            # Workers that read it widen their candidate sets; others ignore it.
+            "escalation_level": self._state.get("escalation_level", 0),
         }
         # Two-account BOLA/IDOR specialist config — only the vuln phase's
         # bola_multi worker consumes it; harmless on other phases. The captured

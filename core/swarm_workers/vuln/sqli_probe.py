@@ -274,7 +274,11 @@ async def run(agent: SwarmAgent) -> List[dict]:
         return []
     timeout = min(agent.timeout_s, 8.0)
 
-    params = _candidate_params(url)[:5]
+    # Progressive escalation: a barren iteration raises escalation_level, so a later pass
+    # probes MORE params instead of re-running the identical top-5 (which the dedup makes
+    # empty). Pre-gate widening only — the confirmation differential is unchanged.
+    _lvl = int((agent.payload or {}).get("escalation_level", 0) or 0)
+    params = _candidate_params(url)[:5 + _lvl * 6]
     # Per-param work is independent (own baseline differential; OOB canaries are
     # unique tokens), so params probe concurrently (bounded). Order preserved.
     _sem = asyncio.Semaphore(6)

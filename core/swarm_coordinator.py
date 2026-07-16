@@ -624,6 +624,9 @@ class VulnSwarmCoordinator(SwarmCoordinator):
                         # Two-account BOLA config (consumed only by bola_multi,
                         # which self-gates to [] when absent).
                         "bola": context.get("bola"),
+                        # Progressive-escalation level (0 normally; raised after barren
+                        # iterations). Workers that read it widen; others ignore it.
+                        "escalation_level": context.get("escalation_level", 0),
                     },
                 ))
         return manifest

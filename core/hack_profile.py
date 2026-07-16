@@ -184,7 +184,7 @@ def CTFProfile(*, time_budget_s: float = 1800.0, allow_destructive: bool = True)
         phases=["recon", "vuln", "exploit", "post", "report"],
         workers={
             "recon": ["subdomain", "port_scan", "wappalyzer", "dns", "wayback",
-                      "endpoints", "openapi", "sourcemap"],
+                      "endpoints", "openapi", "sourcemap", "param_brute"],
             "vuln": [],     # all
             "exploit": [],  # all (gated by allow_destructive)
             "post": ["flag_hunter", "linpeas", "gtfobins"],
