@@ -524,6 +524,19 @@ class HackMode:
         # by a second independent gate pass. Runs before the manifest so any authed finding
         # is in the custody set.
         await self._run_authed_resweep(result)
+        # Public-disclosure dedup: flag any finding matching the program's already-disclosed
+        # issues (operator-supplied VIPER_DISCLOSED_ISSUES cache) as likely_duplicate so the
+        # drafts/report sort known dupes below novel bugs. Read-only, best-effort, no-op
+        # without a cache; never changes submittable/scope.
+        try:
+            from core.disclosure_dedup import DisclosureCache
+            n_dup = DisclosureCache.autoload().annotate(result.findings)
+            if n_dup:
+                self.narrator.info(f"{n_dup} finding(s) match a public disclosure (likely dup)")
+                self.audit.event("findings.likely_duplicate", target=self.target,
+                                 payload={"count": n_dup})
+        except Exception:  # noqa: BLE001 — dedup is advisory, never blocks teardown
+            pass
         # Tamper-evident chain of custody for the submittable set.
         self._write_evidence_manifest(result)
         # Capture the compact, secret-free session-context summary AFTER the gate

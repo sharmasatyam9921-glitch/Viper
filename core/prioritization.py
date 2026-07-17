@@ -88,7 +88,14 @@ def priority_score(finding: dict) -> float:
     vt = finding.get("vuln_type") or finding.get("type")
     prior = _class_prior(vt)
     bounty = _bounty_tier(vt)
-    return round(min(100.0, base + confirmed + conf_pts + prior + bounty), 1)
+    score = min(100.0, base + confirmed + conf_pts + prior + bounty)
+    # A finding matching one of the program's PUBLIC disclosures is very likely a known
+    # duplicate — sort it BELOW novel findings so the operator triages fresh bugs first
+    # (submitting a public-disclosure dupe wastes triage + costs reputation). It is not
+    # dropped; ordering only, and never affects confirmation.
+    if finding.get("likely_duplicate"):
+        score = max(0.0, score - 40)
+    return round(score, 1)
 
 
 def priority_label(score: float) -> str:

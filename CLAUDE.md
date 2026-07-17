@@ -396,6 +396,10 @@ core/chain_recipes.py      Low→critical escalation correlation (submittable if
                            every component is submittable)
 core/prioritization.py     P1-P4 scoring (submittable + severity + gate confidence)
 core/submission_ledger.py  Cross-hunt duplicate suppression
+core/disclosure_dedup.py    Public-disclosure dedup: flags a finding matching the PROGRAM's
+                           already-disclosed issues (operator VIPER_DISCLOSED_ISSUES cache)
+                           as likely_duplicate so drafts/report sort known dupes below novel
+                           bugs. Read-only/offline, no gate impact (ordering only).
 core/hack_mode.py          Swarm HackMode orchestrator (threads OOB + MCP + gate)
 core/attack_priors.py      Closes the evograph write->read loop: records each
                            technique's per-hunt outcome and reorders phase dispatch
