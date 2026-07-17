@@ -16,9 +16,25 @@ def test_submittable_high_conf_outranks_unconfirmed_critical():
 
 
 def test_score_components():
-    assert priority_score({"severity": "medium"}) == 20.0          # 20 + 0 + 0
+    # A classless finding gets the neutral bounty-tier default (5).
+    assert priority_score({"severity": "medium"}) == 25.0            # 20 + 0 + 0 + 5
     assert priority_score({"severity": "critical", "submittable": True,
-                           "validation_confidence": 0.9}) == 97.0  # 40+30+27
+                           "validation_confidence": 0.9}) == 100.0  # 40+30+27+5 -> capped
+
+
+def test_bounty_tier_breaks_ties_within_a_severity_band():
+    # Two equally-confirmed HIGH findings: an auth/access bug must outrank a clickjacking
+    # (real-world payout tier), and a low-tier class must not leapfrog a high-payout one.
+    authz = {"vuln_type": "graphql_authz", "severity": "high", "submittable": True,
+             "validation_confidence": 0.85}
+    click = {"vuln_type": "clickjacking", "severity": "high", "submittable": True,
+             "validation_confidence": 0.85}
+    assert priority_score(authz) > priority_score(click)
+    bola = {"vuln_type": "bola", "severity": "high", "submittable": True,
+            "validation_confidence": 0.85}
+    oredir = {"vuln_type": "open_redirect", "severity": "high", "submittable": True,
+              "validation_confidence": 0.85}
+    assert priority_score(bola) > priority_score(oredir)
 
 
 def test_labels():

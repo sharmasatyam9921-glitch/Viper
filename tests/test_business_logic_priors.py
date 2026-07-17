@@ -39,8 +39,8 @@ def test_class_prior_maps_aliases():
 
 
 def test_prior_nudges_ranking_without_changing_base_semantics():
-    # no vuln_type -> prior 0 -> exact legacy scores preserved
-    assert priority_score({"severity": "medium"}) == 20.0
+    # no vuln_type -> prior 0, neutral bounty-tier default (5)
+    assert priority_score({"severity": "medium"}) == 25.0
     # access-control finding ranks above an equal-grade no-prior finding
     base = {"severity": "high", "submittable": True, "validation_confidence": 0.8}
     assert priority_score({**base, "vuln_type": "idor"}) > \

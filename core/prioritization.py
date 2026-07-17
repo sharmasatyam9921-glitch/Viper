@@ -44,16 +44,51 @@ def _class_prior(vuln_type) -> float:
     return round(float(info.get("impact_prior", 0.0)) * 10, 1) if info else 0.0
 
 
+# Expected-BOUNTY tier per class (0-12) — real-world payout weighting that refines
+# ordering WITHIN a severity band, so a confirmed auth/injection/access-control bug
+# outranks a same-severity clickjacking / CORS / open-redirect. Offline, deterministic;
+# ORDERING only — never touches the gate, scope, or whether a finding is submittable.
+_BOUNTY_TIER = {
+    # Tier A — command / data / identity compromise (highest payouts)
+    "rce": 12, "cmdi": 12, "command_injection": 12, "sqli": 12, "login_sqli": 12,
+    "auth_bypass": 12, "ssrf": 11, "ssti": 11, "nosql_injection": 11, "xxe": 10,
+    "idor": 10, "bola": 10, "bola_multi": 10, "bfla": 10, "bfla_multi": 10,
+    "broken_access_control": 10, "access_control": 10, "graphql_authz": 10, "jwt": 10,
+    "lfi": 9, "path_traversal": 9, "web_cache_deception": 8,
+    # Tier B — meaningful, usually mid-tier
+    "xss": 8, "cloud_exposure": 8, "subdomain_takeover": 8, "secret": 8, "secrets": 8,
+    "env_exposed": 8, "git_exposed": 7, "host_header": 7, "cors": 6,
+    "xss_text": 5, "xss_tag": 5,
+    # Tier C — lower payout / frequently informational
+    "cache_poisoning": 4, "open_redirect": 3, "crlf": 3, "csrf": 3, "clickjacking": 2,
+    "graphql": 2, "graphql_introspection": 2, "graphql_ide": 2, "information_disclosure": 2,
+    "dir_listing": 2, "directory_listing": 2,
+}
+
+
+def _bounty_tier(vuln_type) -> float:
+    """Expected-payout weight (0-12) for the finding's class — see _BOUNTY_TIER."""
+    head = str(vuln_type or "").lower().split(":")[0]
+    if head in _BOUNTY_TIER:
+        return float(_BOUNTY_TIER[head])
+    aliased = _ALIAS.get(head, head)
+    return float(_BOUNTY_TIER.get(aliased, 5))
+
+
 def priority_score(finding: dict) -> float:
     """0-100 priority. submittable (+30) + severity (5-40) + gate confidence (0-30)
-    + class impact prior (0-10, from disclosed-report prevalence x criticality)."""
+    + class impact prior (0-10, disclosed-report prevalence x criticality) + expected
+    bounty tier (0-12, real-world payout weighting that breaks ties within a severity
+    band). All ORDERING signals — none affects confirmation."""
     sev = str(finding.get("severity") or "info").lower()
     base = _SEV_PTS.get(sev, 5)
     confirmed = 30 if finding.get("submittable") else 0
     conf = finding.get("validation_confidence")
     conf_pts = float(conf) * 30 if isinstance(conf, (int, float)) else 0.0
-    prior = _class_prior(finding.get("vuln_type") or finding.get("type"))
-    return round(min(100.0, base + confirmed + conf_pts + prior), 1)
+    vt = finding.get("vuln_type") or finding.get("type")
+    prior = _class_prior(vt)
+    bounty = _bounty_tier(vt)
+    return round(min(100.0, base + confirmed + conf_pts + prior + bounty), 1)
 
 
 def priority_label(score: float) -> str:
