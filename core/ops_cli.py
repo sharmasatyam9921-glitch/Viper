@@ -21,7 +21,7 @@ _GATE_CONFIRMED = {
     "open_redirect", "graphql", "graphql_authz", "nosql_injection", "jwt",
     "ldap_injection", "xpath_injection",
 }
-_OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header"}
+_OOB_CAPABLE = {"ssrf", "command_injection", "xxe", "sqli", "host_header", "jwt", "ssti"}
 
 
 def _load_vuln_techniques() -> List[str]:

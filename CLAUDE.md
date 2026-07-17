@@ -296,8 +296,9 @@ The only way to confirm blind SSRF / RCE / XXE / OAST-SQLi / Host-header SSRF.
 interactions for tokens IT issued (no false confirms from background traffic).
 Blind-capable workers (`ssrf`, `command_injection`, `xxe`, `host_header`, `ssti_probe`
 — the last fires engine-specific template payloads across Jinja/Twig/Freemarker/Smarty/
-ERB under one canary) fire a canary; a callback flips the finding to submittable at the
-gate. Before the gate
+ERB under one canary — and `jwt` `:jku_inject`, which fires a canary through a forged
+token's `jku`/`x5u` header) fire a canary; a callback flips the finding to submittable at
+the gate. Before the gate
 decides, `HackMode._await_late_oob_callbacks` waits a bounded window (only while
 canary tokens are still outstanding) so a LATE callback — arriving just after the
 hunt — still rescues a genuine blind vuln instead of it being filed as a lead.
@@ -331,7 +332,11 @@ opt-in forge-accept probe as weak-key) and **JWT `kid` header injection** (`jwt.
 `:kid_inject` — a JWT carrying a `kid` (Key ID) header is forgeable when the verifier
 resolves `kid` to a key FILE; the gate forges with `alg:HS256`, a path-traversal `kid`
 (-> `/dev/null`) and an EMPTY HMAC key and confirms via the SAME opt-in forge-accept probe;
-CWE-347, GET-only, no privilege escalation).
+CWE-347, GET-only, no privilege escalation) and **JWT jku/x5u header injection**
+(`jwt.py` `:jku_inject` — OUT-OF-BAND: forges a token whose `jku`/`x5u` header points at an
+OOB canary; a verifier that fetches the unvalidated JWKS URL calls the listener back and the
+gate confirms via the OOB token — attacker-controlled key => full forgery. Blind: a lead
+until the callback, so no offline-precision impact).
 and **Response-based SSRF** (`ssrf.py` `ssrf:<param>` — re-runs the read-only metadata
 differential: an internal payload must return the service's own body with a credential
 VALUE co-occurring with >=1 cloud-metadata marker, or >=2 distinct markers, absent from
