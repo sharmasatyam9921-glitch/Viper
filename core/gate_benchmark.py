@@ -499,6 +499,24 @@ def _jwt_forge_accept(m, url, h):
             else HttpResp(401, {}, "unauthorized", url))
 
 
+def _jwt_kid_forge_accept(m, url, h):
+    # kid-injection vulnerable: the verifier resolves `kid` (path-traversal to /dev/null) to
+    # an EMPTY key, so a token signed with an empty HMAC key is accepted; a bad-signature
+    # control is rejected. The forge-accept differential a real kid bypass produces.
+    import base64 as _b64
+    import hashlib as _hashlib
+    import hmac as _hmac
+    tok = h.get("Authorization", "").replace("Bearer ", "")
+    parts = tok.split(".")
+    if len(parts) != 3:
+        return HttpResp(401, {}, "unauthorized", url)
+    want = _b64.urlsafe_b64encode(
+        _hmac.new(b"", (parts[0] + "." + parts[1]).encode(), _hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    return (HttpResp(200, {}, '{"ok":true}', url) if parts[2] == want
+            else HttpResp(401, {}, "unauthorized", url))
+
+
 def _jwt_accept_all(m, url, h):
     # Accepts ANY token (no signature verification / no auth) — forging proves nothing.
     return HttpResp(200, {}, '{"ok":true}', url)
@@ -987,6 +1005,17 @@ BENCHMARK = [
     Scenario("jwt", "safe", "endpoint accepts any token (no signature verification)",
              {"vuln_type": "jwt:weak_key", "url": "http://t/api/me",
               "_jwt_token": _JWT_TOKEN, "_jwt_key": _JWT_KEY, "jwt_alg": "HS256",
+              "jwt_probe_endpoint": "http://t/api/me"}, _jwt_accept_all),
+    Scenario("jwt", "vuln", "kid path-traversal -> empty key forged token accepted",
+             {"vuln_type": "jwt:kid_inject", "url": "http://t/api/me",
+              "_jwt_token": _JWT_TOKEN, "jwt_source": "authorization",
+              "jwt_probe_endpoint": "http://t/api/me"}, _jwt_kid_forge_accept),
+    Scenario("jwt", "safe", "kid-inject candidate but no probe endpoint (stays lead)",
+             {"vuln_type": "jwt:kid_inject", "url": "http://t/",
+              "_jwt_token": _JWT_TOKEN, "jwt_source": "authorization"}, _ok),
+    Scenario("jwt", "safe", "kid-inject: endpoint accepts any token (no sig verification)",
+             {"vuln_type": "jwt:kid_inject", "url": "http://t/api/me",
+              "_jwt_token": _JWT_TOKEN, "jwt_source": "authorization",
               "jwt_probe_endpoint": "http://t/api/me"}, _jwt_accept_all),
 
     # xxe — the gate re-runs the worker (patched offline via patch_workers): confirm a

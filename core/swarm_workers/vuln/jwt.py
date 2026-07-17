@@ -395,6 +395,27 @@ async def run(agent: SwarmAgent) -> List[dict]:
             "evidence": f"token payload keys: {list(payload.keys())[:10]}",
         })
 
+        # Detection 3b: `kid` (Key ID) header injection. A verifier that resolves `kid` to
+        # a KEY FILE and HMAC-verifies with its contents is forgeable with a KNOWN (empty)
+        # key via a path-traversal kid (e.g. -> /dev/null). Opt-in LEAD; the gate confirms
+        # via the SAME forge-accept probe as weak-key/alg-confusion (jwt_probe_endpoint).
+        if forgeable and header.get("kid"):
+            findings.append({
+                "type": "jwt_kid_inject",
+                "vuln_type": "jwt:kid_inject",
+                "title": "JWT kid-header injection candidate",
+                "severity": "high",
+                "url": url,
+                "cwe": "CWE-347",
+                "confidence": 0.5,
+                "_jwt_token": tok,     # underscore-prefixed: serializers skip the credential
+                "jwt_source": cookie_name or "authorization",
+                "needs_manual_verification": True,
+                "evidence": ("the JWT carries a `kid` (Key ID) header; a verifier that "
+                             "resolves it to a key file is forgeable with a path-traversal "
+                             "kid + an empty key — supply jwt_probe_endpoint to confirm."),
+            })
+
     # Detection 4: RS256->HS256 algorithm confusion. A server that issues an
     # RSA-signed identity token verifies with an RSA PUBLIC key it publishes at
     # jwks.json. If its verifier trusts the token's `alg` header, an attacker can

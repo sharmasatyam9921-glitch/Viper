@@ -327,7 +327,11 @@ bad-signature control is rejected; opt-in, GET-only, no privilege escalation) an
 **JWT RS256->HS256 algorithm confusion** (`jwt.py` `:alg_confusion` — reconstructs the
 RSA public key from jwks.json into a PEM via a hand-rolled DER encoder, dependency-free;
 forges an HS256 token with that public key as the HMAC secret and confirms via the SAME
-opt-in forge-accept probe as weak-key).
+opt-in forge-accept probe as weak-key) and **JWT `kid` header injection** (`jwt.py`
+`:kid_inject` — a JWT carrying a `kid` (Key ID) header is forgeable when the verifier
+resolves `kid` to a key FILE; the gate forges with `alg:HS256`, a path-traversal `kid`
+(-> `/dev/null`) and an EMPTY HMAC key and confirms via the SAME opt-in forge-accept probe;
+CWE-347, GET-only, no privilege escalation).
 and **Response-based SSRF** (`ssrf.py` `ssrf:<param>` — re-runs the read-only metadata
 differential: an internal payload must return the service's own body with a credential
 VALUE co-occurring with >=1 cloud-metadata marker, or >=2 distinct markers, absent from
@@ -342,7 +346,7 @@ gate-confirmed — a tokenless SameSite-less form is only forgeable if the serve
 an Origin/Referer or double-submit defence, which is invisible read-only, so it stays an
 actionable lead (adversarially confirmed FP vector; same rationale as mass-assignment).
 `viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
-finding was demoted. The scorecard measures 26 classes / 28 confirmed scenarios /
+finding was demoted. The scorecard measures 26 classes / 29 confirmed scenarios /
 precision 1.00 / 0 FP (xxe + crlf are scored offline too — the benchmark patches
 those workers' module `fetch`, since their gate recheck re-runs the worker), and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)

