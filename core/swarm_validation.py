@@ -640,6 +640,84 @@ async def _recheck_idor(finding, fetch, timeout, bola_config):
     return False, 0.2, "two-account replay did not confirm cross-user access"
 
 
+async def _recheck_graphql_authz(finding, fetch, timeout, bola_config):
+    """GraphQL FIELD-LEVEL AUTHORIZATION bypass — BOLA/BFLA over a GraphQL query
+    (OWASP API#1/#5). Opt-in and two-identity, mirroring the IDOR/BOLA discipline:
+
+    given the operator's owner+attacker sessions (bola_config) and a READ-ONLY query that
+    returns the OWNER's private data (``finding['graphql_query']``), it is a real bypass iff
+    the owner's private marker appears in the owner's response AND the ATTACKER's response,
+    but NOT in an ANONYMOUS control (if anon sees it too, the field is public data — not an
+    authorization flaw). Read queries only: a mutation is refused outright (the gate never
+    mutates target state). Without both sessions + a marker it stays a lead."""
+    import json as _json
+    url = finding.get("url") or ""
+    query = (finding.get("graphql_query") or "").strip()
+    if not url or not query:
+        return False, 0.0, "graphql-authz candidate missing endpoint / query (lead)"
+    # Never send a mutation/subscription — read-only gate.
+    _lead = query.lower().lstrip().split("{", 1)[0].split("(", 1)[0]
+    if "mutation" in _lead or "subscription" in _lead:
+        return False, 0.0, "refusing to send a GraphQL mutation/subscription (read-only) (lead)"
+    cfg = bola_config or {}
+    owner_h, att_h = cfg.get("owner_headers"), cfg.get("attacker_headers")
+    markers = [m for m in (cfg.get("owner_markers") or []) if m]
+    if not (owner_h and att_h and markers):
+        return False, 0.3, ("GraphQL field-authz candidate — supply two sessions "
+                            "(owner + attacker) + --owner-marker to auto-confirm (lead)")
+    body = _json.dumps({"query": query}).encode("utf-8")
+    # A marker that is literally present in the QUERY we send would be echoed back in an
+    # error message ("Not authorized to access <marker>") — that is a reflection of our own
+    # input, not leaked data. Drop such markers so an authZ *error* body can't false-confirm.
+    q_low = query.lower()
+    eff_markers = [m for m in markers if m.lower() not in q_low]
+    if not eff_markers:
+        return False, 0.3, ("the private marker(s) also appear in the query itself — an "
+                            "error echo could false-confirm; choose a marker NOT present in "
+                            "the query (lead)")
+
+    async def _post(headers):
+        h = dict(headers or {})
+        h.setdefault("Content-Type", "application/json")
+        return await fetch("POST", url, headers=h, body=body, timeout=timeout,
+                           use_session_auth=False)
+
+    def _has_marker(resp) -> bool:
+        """The marker must appear inside the response's non-null JSON ``data`` — NOT in an
+        ``errors`` message (GraphQL returns HTTP 200 for authz errors, and an authorization
+        resolver idiomatically echoes the requested id, which would otherwise false-confirm
+        a bypass that never returned data). Falls back to a raw body test only for a
+        non-JSON body."""
+        b = (getattr(resp, "body", "") if resp else "") or ""
+        if not b:
+            return False
+        try:
+            parsed = _json.loads(b)
+        except (ValueError, TypeError):
+            return any(m in b for m in eff_markers)   # non-JSON body: best-effort
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        if not data:                                   # null/absent data (error-only) -> no leak
+            return False
+        blob = _json.dumps(data)
+        return any(m in blob for m in eff_markers)
+
+    owner_r = await _post(owner_h)
+    if not _has_marker(owner_r):
+        return False, 0.2, ("the query did not return the owner's private marker for the "
+                            "OWNER session — can't establish a baseline (lead)")
+    anon_r = await _post(None)
+    if _has_marker(anon_r):
+        return False, 0.2, ("the field is returned ANONYMOUSLY (public data, not an "
+                            "authorization bypass) — lead")
+    att_r = await _post(att_h)
+    if _has_marker(att_r):
+        return True, 0.9, ("GraphQL field-level authorization bypass: a DIFFERENT identity "
+                           "read the owner's private field data (BOLA/BFLA over GraphQL, "
+                           "CWE-639)")
+    return False, 0.2, ("the attacker identity did not receive the owner's private data — "
+                        "field authorization holds (lead)")
+
+
 async def _recheck_open_redirect(finding, fetch, timeout):
     """Confirm an open redirect (CWE-601) by injecting a FRESH random attacker host
     into the redirect parameter and requiring the server to actually REDIRECT there.
@@ -1220,6 +1298,8 @@ async def _reconfirm(finding: dict, fetch, timeout: float,
         return await _recheck_idor(finding, fetch, timeout, bola_config)
     if head == "open_redirect":
         return await _recheck_open_redirect(finding, fetch, timeout)
+    if head == "graphql_authz":     # two-identity field-authz — BEFORE the graphql* catch-all
+        return await _recheck_graphql_authz(finding, fetch, timeout, bola_config)
     if head.startswith("graphql"):
         return await _recheck_graphql(finding, fetch, timeout)
     if head == "nosql_injection":

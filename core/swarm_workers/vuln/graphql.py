@@ -266,6 +266,29 @@ async def run(agent: SwarmAgent) -> List[dict]:
         # hammer every alias)
         if findings:
             break
+
+    # Opt-in FIELD-LEVEL AUTHORIZATION candidate: when the operator supplies a READ-ONLY
+    # query that returns their own private data (agent.payload['graphql_query']) and a live
+    # GraphQL endpoint was found, emit a graphql_authz LEAD. The gate confirms a real bypass
+    # via a two-identity differential (owner vs attacker vs anon); it is never submittable
+    # on its own. Same opt-in discipline as the JWT forge-probe.
+    q = (getattr(agent, "payload", None) or {}).get("graphql_query")
+    if q and findings:
+        endpoint = findings[0].get("url") or base
+        findings.append({
+            "type": "graphql_authz",
+            "vuln_type": "graphql_authz",
+            "title": "GraphQL field-level authorization — candidate",
+            "severity": "high",
+            "url": endpoint,
+            "cwe": "CWE-639",
+            "confidence": 0.5,
+            "graphql_query": str(q),
+            "needs_manual_verification": True,
+            "evidence": ("operator-supplied read-only query targeting owner-private data on "
+                         "a live GraphQL endpoint; the gate confirms a bypass only via a "
+                         "two-identity (owner vs attacker vs anonymous) differential."),
+        })
     return findings
 
 

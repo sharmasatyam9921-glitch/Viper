@@ -278,7 +278,7 @@ swarm worker (candidate) → swarm_validation.py gate (_reconfirm, fail-closed)
   findings can NEVER use a trust short-circuit), and OOB-token confirmation. A
   malformed/un-reproducible finding fails closed to a lead.
 - `core/gate_benchmark.py` — `viper.py scorecard`: labeled per-class precision/
-  recall. Currently 25 classes at precision 1.00 (0 false positives).
+  recall. Currently 26 classes at precision 1.00 (0 false positives).
 - `core/confirm_gate.py` — reusable ThreeGateConfirmer (baseline→attack→
   differential + reproducibility re-test).
 - `core/adversarial_verifier.py` — a REFUTATION pass after the gate: independently
@@ -313,7 +313,12 @@ two-identity), **CRLF**, **clickjacking**, **Open Redirect** (CWE-601 — the ga
 re-injects a FRESH random attacker host and requires it to be the real redirect
 target, absent under a benign control), **GraphQL** introspection / exposed IDE
 (independent introspection re-query requiring a genuine __Schema: named queryType +
-canonical __TypeKind), **NoSQL operator-injection auth bypass** (`nosql_injection.py`
+canonical __TypeKind) and **GraphQL field-level authorization** bypass (`graphql.py`
+`graphql_authz` — BOLA/BFLA over GraphQL: opt-in + two-identity, the gate POSTs an
+operator-supplied READ-ONLY query and confirms iff the owner's private marker appears in
+the OWNER *and* ATTACKER responses' non-null `data` but NOT anonymously; a mutation is
+refused and a marker reflected from the query is vetoed, so an authZ error-echo can't
+false-confirm; CWE-639), **NoSQL operator-injection auth bypass** (`nosql_injection.py`
 `:login` — re-runs the token differential: a bogus credential mints no token, the
 operator body does; an $eq-to-bogus control proves it's operator-driven), and **JWT
 weak-key forgery** (`jwt.py` `:weak_key` — a cracked key stays a LEAD until an
@@ -337,7 +342,7 @@ gate-confirmed — a tokenless SameSite-less form is only forgeable if the serve
 an Origin/Referer or double-submit defence, which is invisible read-only, so it stays an
 actionable lead (adversarially confirmed FP vector; same rationale as mass-assignment).
 `viper.py classes` lists coverage; `viper.py leads` explains why any non-submittable
-finding was demoted. The scorecard measures 25 classes / 26 confirmed scenarios /
+finding was demoted. The scorecard measures 26 classes / 28 confirmed scenarios /
 precision 1.00 / 0 FP (xxe + crlf are scored offline too — the benchmark patches
 those workers' module `fetch`, since their gate recheck re-runs the worker), and
 `core/gate_mutations.py` (`python -m core.gate_mutations --strict`)

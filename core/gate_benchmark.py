@@ -648,6 +648,39 @@ def _graphql_ide_prose(m, url, h):
                     "<html><p>We previously offered a GraphiQL explorer here.</p></html>", url)
 
 
+# GraphQL field-level authz (two-identity): the response returns alice's private field by
+# Cookie identity. bypass = both identities (and only they) see it; ok = only the owner;
+# public = everyone incl. anon.
+_GQL_DATA = '{"data":{"user":{"email":"%s"}}}' % _A_MARKER
+_GQL_NULL = '{"data":{"user":null}}'
+
+
+def _gql_authz_bypass(m, url, h):
+    c = h.get("Cookie", "")
+    return HttpResp(200, {}, _GQL_DATA if ("s=alice" in c or "s=bob" in c) else _GQL_NULL, url)
+
+
+def _gql_authz_ok(m, url, h):
+    c = h.get("Cookie", "")
+    return HttpResp(200, {}, _GQL_DATA if "s=alice" in c else _GQL_NULL, url)
+
+
+def _gql_authz_public(m, url, h):
+    return HttpResp(200, {}, _GQL_DATA, url)   # served to everyone incl. anon -> public
+
+
+def _gql_authz_error_echo(m, url, h):
+    # Owner sees real data; the attacker's authZ ERROR echoes the marker but returns NO
+    # data (GraphQL errors are HTTP 200). Matching the whole body would false-confirm; the
+    # gate matches only non-null `data`, so this must stay a LEAD.
+    c = h.get("Cookie", "")
+    if "s=alice" in c:
+        return HttpResp(200, {}, _GQL_DATA, url)
+    return HttpResp(200, {},
+                    '{"errors":[{"message":"Not authorized to access user %s"}],"data":null}'
+                    % _A_MARKER, url)
+
+
 # --- the labeled benchmark -------------------------------------------------
 
 @dataclass(frozen=True)
@@ -843,6 +876,24 @@ BENCHMARK = [
     Scenario("graphql", "safe", "prose merely mentioning GraphiQL",
              {"vuln_type": "graphql_ide:/graphql", "url": "http://t/graphql"},
              _graphql_ide_prose),
+
+    # graphql_authz — two-identity field-level authorization (BOLA over GraphQL)
+    Scenario("graphql_authz", "vuln", "attacker identity reads owner's private field",
+             {"vuln_type": "graphql_authz", "url": "http://t/graphql",
+              "graphql_query": "{ user(id:1){ email } }"}, _gql_authz_bypass, _BOLA_CFG),
+    Scenario("graphql_authz", "safe", "attacker gets no owner data (authz holds)",
+             {"vuln_type": "graphql_authz", "url": "http://t/graphql",
+              "graphql_query": "{ user(id:1){ email } }"}, _gql_authz_ok, _BOLA_CFG),
+    Scenario("graphql_authz", "safe", "field is public (anon sees it too)",
+             {"vuln_type": "graphql_authz", "url": "http://t/graphql",
+              "graphql_query": "{ user(id:1){ email } }"}, _gql_authz_public, _BOLA_CFG),
+    Scenario("graphql_authz", "safe", "no two-account config -> lead",
+             {"vuln_type": "graphql_authz", "url": "http://t/graphql",
+              "graphql_query": "{ user(id:1){ email } }"}, _gql_authz_bypass),
+    Scenario("graphql_authz", "safe", "authZ error echoes the marker but returns no data",
+             {"vuln_type": "graphql_authz", "url": "http://t/graphql",
+              "graphql_query": "{ user(id:1){ email } }"}, _gql_authz_error_echo, _BOLA_CFG),
+
 
     # cmdi defense-in-depth — a non-reproducible RCE must stay a lead EVEN when the
     # operator lowers the confidence threshold (structural, not a threshold accident)
