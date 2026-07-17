@@ -103,6 +103,85 @@ async def probe_proto_pollution(
         return None
 
 
+async def probe_dom_xss(
+    url: str,
+    param: Optional[str] = None,
+    *,
+    marker: str,
+    scope_guard: Optional[Callable[[str], bool]] = None,
+    timeout_ms: int = 15000,
+) -> Optional[bool]:
+    """DOM execution oracle for XSS (read-only).
+
+    Navigate a headless browser with a payload that, IF its JavaScript executes in the
+    page's origin, sets ``window[marker]`` to the same random `marker`; then read it back.
+    A match proves the payload actually RAN — reflected XSS, a JS-context break, or a
+    DOM-sourced sink reading ``location.hash`` — and is UNFORGEABLE: a benign page can't
+    set an unpredictable global to a specific unpredictable value, so there is no false
+    positive. Returns True (executed), False (navigated, no execution), None (Playwright
+    unavailable / out of scope / error — caller keeps it a lead).
+
+    GET navigations only; no form submitted, no state mutated. Payloads are placed in the
+    query param (if given) and the URL hash (the DOM-source sink)."""
+    if not available():
+        return None
+    if scope_guard is not None:
+        try:
+            if not scope_guard(url):
+                return None
+        except Exception:
+            return None
+
+    from urllib.parse import quote
+    js = "window['%s']='%s'" % (marker, marker)
+    vectors = [
+        '<img src=x onerror="%s">' % js,
+        '<svg onload="%s">' % js,
+        '<script>%s</script>' % js,
+        '"><img src=x onerror="%s">' % js,   # attribute break-out
+        "';%s;//" % js,                       # JS-string context break-out
+    ]
+    base = url.split("#", 1)[0]
+    sep = "&" if "?" in base else "?"
+    targets = []
+    for v in vectors:
+        if param:
+            targets.append("%s%s%s=%s" % (base, sep, quote(param), quote(v)))
+        targets.append("%s#%s" % (base, v))   # location.hash DOM-source sink
+
+    from playwright.async_api import async_playwright
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                for target in targets:
+                    ctx = await browser.new_context()
+                    page = await ctx.new_page()
+                    page.on("dialog", lambda d: d.dismiss())   # never block on alert()
+                    try:
+                        await page.goto(target, timeout=timeout_ms, wait_until="load")
+                        if scope_guard is not None:
+                            try:
+                                if not scope_guard(page.url):   # a 302 must not confirm off-scope
+                                    continue
+                            except Exception:
+                                continue
+                        await page.wait_for_timeout(300)
+                        val = await page.evaluate("(m) => window[m]", marker)
+                        if val == marker:
+                            return True
+                    except Exception as exc:   # noqa: BLE001
+                        logger.debug("dom-xss probe %s failed: %s", target, exc)
+                    finally:
+                        await ctx.close()
+                return False
+            finally:
+                await browser.close()
+    except Exception as exc:   # noqa: BLE001 — never let the oracle raise into the gate
+        logger.debug("dom-xss browser probe errored: %s", exc)
+        return None
+
+
 async def capture_roles(
     seed_urls: List[str],
     accounts: Dict[str, dict],

@@ -129,13 +129,36 @@ def _ok2xx(resp) -> bool:
 
 
 async def _recheck_xss(finding, fetch, timeout):
-    """Confirm the reflection lands as LIVE, UNENCODED markup in an HTML context —
-    not entity-encoded (the secure outcome) and not a non-HTML body."""
+    """Confirm XSS. When a headless browser (Playwright) is available, the definitive
+    oracle runs FIRST: if the payload's JS actually EXECUTES in the page origin (reflected,
+    JS-context, or a DOM-sourced location.hash sink) it is confirmed — this catches
+    DOM-XSS and filtered-but-bypassed reflections the read-only differential misses.
+    With no browser it falls back to the read-only reflection differential below (a
+    reflection that lands as LIVE, unencoded markup in an HTML context), so precision
+    NEVER depends on a browser being installed."""
     import secrets
     from core.swarm_workers.vuln._http import add_query
     param = finding.get("parameter")
     url = finding.get("url") or ""
-    if not param or not url:
+    if not url:
+        return False, 0.0, "no url to re-test"
+
+    # Browser execution oracle (superset confirmation; unforgeable via a random marker).
+    try:
+        from core.browser import viper_browser
+        if viper_browser.available():
+            from core.swarm_workers.vuln._http import is_in_scope
+            _m = "vx" + secrets.token_hex(6)
+            _res = await viper_browser.probe_dom_xss(
+                url, param, marker=_m, scope_guard=is_in_scope)
+            if _res is True:
+                return True, 0.9, ("payload EXECUTED in a headless browser (window marker "
+                                   "set) — XSS confirmed (reflected or DOM-sourced)")
+            # False/None -> fall through to the read-only reflection differential.
+    except Exception:  # noqa: BLE001 — the oracle must never break the gate
+        pass
+
+    if not param:
         return False, 0.0, "no parameter to re-test"
     tag = "vgx" + secrets.token_hex(3)
     r = await fetch("GET", add_query(url, param, f"<{tag}>x</{tag}>"), timeout=timeout)
