@@ -97,11 +97,15 @@ class ScopeEntry:
             return target_domain == entry_lower or target_domain.endswith('.' + entry_lower)
         
         elif self.asset_type in ('url', 'api'):
-            # URL/API match — compare domains (scope entries often lack scheme)
+            # A URL/API asset designates a SPECIFIC host — match the EXACT host, NEVER
+            # subdomains. A program that lists https://www.example.com means that host,
+            # not *.example.com; treating it as a subdomain wildcard is scope creep (it
+            # let a hunt probe 1.www.flipkart.com for an exact www.flipkart.com entry).
+            # Use the 'domain' or 'wildcard' asset_type for deliberate subdomain coverage.
             if '://' in entry_lower:
                 return target_lower.startswith(entry_lower)
-            # Entry has no scheme — match against extracted domain
-            return target_domain == entry_lower or target_domain.endswith('.' + entry_lower)
+            entry_host = entry_lower.split('/', 1)[0]     # host[/path] with no scheme
+            return target_domain == entry_host
         
         elif self.asset_type == 'ip':
             # IP match
@@ -236,8 +240,11 @@ class ScopeManager:
             print(f"[{timestamp}] [SCOPE] [{level}] {msg}")
     
     def load_scope(self, filename: str) -> bool:
-        """Load scope from file"""
-        filepath = SCOPE_DIR / filename
+        """Load scope from file. Accepts a full/relative path AS GIVEN (so
+        --scope scopes/current_scope.json works), falling back to the SCOPE_DIR
+        convention only for a bare filename."""
+        p = Path(filename)
+        filepath = p if p.exists() else (SCOPE_DIR / filename)
         if not filepath.exists():
             self.log(f"Scope file not found: {filepath}", "ERROR")
             return False
