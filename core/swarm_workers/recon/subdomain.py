@@ -34,6 +34,29 @@ def _domain_from_target(target: str) -> str:
     return t.split(":", 1)[0].rstrip(".")
 
 
+# Reserved / lab / non-public suffixes that have no enumerable public subdomains. Notably
+# *.localhost resolves to loopback on most OSes (RFC 6761), so a wordlist brute-force
+# "finds" EVERY word as a live host and wastes the entire vuln phase on phantom targets.
+_RESERVED_SUFFIXES = (".localhost", ".local", ".internal", ".test", ".lan", ".home",
+                      ".example", ".invalid", ".localdomain")
+
+
+def _is_enumerable_domain(domain: str) -> bool:
+    """A real registrable FQDN worth subdomain-enumerating. Excludes single-label hosts
+    (localhost), bare IPs (loopback/RFC1918 or public), and reserved/lab suffixes."""
+    d = (domain or "").strip().lower().rstrip(".")
+    if not d or "." not in d:                       # single-label -> no subdomains
+        return False
+    if d.endswith(_RESERVED_SUFFIXES):
+        return False
+    import ipaddress
+    try:
+        ipaddress.ip_address(d)                     # a bare IP has no subdomains
+        return False
+    except ValueError:
+        return True
+
+
 async def _crtsh_query(domain: str, *, timeout: float = 15.0) -> set[str]:
     """Cheap HTTPS query to crt.sh — works without API keys."""
     url = f"https://crt.sh/?q=%25.{urllib.parse.quote(domain)}&output=json"
@@ -63,7 +86,10 @@ async def _crtsh_query(domain: str, *, timeout: float = 15.0) -> set[str]:
 
 async def run(agent: SwarmAgent) -> List[dict]:
     domain = _domain_from_target(agent.target)
-    if not domain:
+    if not _is_enumerable_domain(domain):
+        # localhost / bare IP / lab suffix — nothing to enumerate (and *.localhost would
+        # otherwise resolve every wordlist entry to loopback). Skip cleanly.
+        logger.debug("subdomain enum skipped for non-FQDN/reserved target: %s", domain)
         return []
 
     payload = agent.payload or {}
@@ -86,6 +112,9 @@ async def run(agent: SwarmAgent) -> List[dict]:
     # Path B — direct crt.sh fallback (always cheap)
     if not found:
         found = await _crtsh_query(domain, timeout=min(agent.timeout_s, 20.0))
+
+    # Drop any phantom reserved-suffix host a source might return (e.g. *.localhost).
+    found = {s for s in found if "." in s and not s.endswith(_RESERVED_SUFFIXES)}
 
     # Filter to in-scope, if a scope reasoner was provided
     if scope is not None:
