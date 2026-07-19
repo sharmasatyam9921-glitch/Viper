@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -72,9 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", help="Bug-bounty scope JSON file path")
     p.add_argument("--auth-bearer", metavar="TOKEN",
                    help="Session Bearer token applied to every request "
-                        "(tests the app as a logged-in user).")
+                        "(tests the app as a logged-in user). Or set env "
+                        "VIPER_AUTH_BEARER to keep it off the command line.")
     p.add_argument("--cookie", metavar="COOKIE",
-                   help="Session Cookie header applied to every request.")
+                   help="Session Cookie header applied to every request. Or set "
+                        "env VIPER_SESSION_COOKIE to keep it off the command line.")
     p.add_argument("--auth-header", action="append", default=[], metavar="K:V",
                    help="Extra auth header 'Name: value' (repeatable).")
     p.add_argument("--proxy", metavar="URL",
@@ -251,11 +254,17 @@ def run_hack_cli(argv: list[str]) -> int:
 
     # Session auth (operator-supplied) — applied to every worker request so the
     # hunt tests the app authenticated, where IDOR/BOLA/business-logic live.
+    # Credential hygiene: a session token/cookie can ALSO be supplied via env var
+    # (VIPER_AUTH_BEARER / VIPER_SESSION_COOKIE / VIPER_AUTH_BEARER_B /
+    # VIPER_SESSION_COOKIE_B) so it never appears on the command line, in shell
+    # history, or in `ps` output. An explicit CLI flag still wins if both are set.
+    bearer = args.auth_bearer or os.environ.get("VIPER_AUTH_BEARER")
+    cookie = args.cookie or os.environ.get("VIPER_SESSION_COOKIE")
     auth_headers: dict[str, str] = {}
-    if args.auth_bearer:
-        auth_headers["Authorization"] = f"Bearer {args.auth_bearer.strip()}"
-    if args.cookie:
-        auth_headers["Cookie"] = args.cookie.strip()
+    if bearer:
+        auth_headers["Authorization"] = f"Bearer {bearer.strip()}"
+    if cookie:
+        auth_headers["Cookie"] = cookie.strip()
     for raw in (args.auth_header or []):
         if ":" in raw:
             k, v = raw.split(":", 1)
@@ -435,9 +444,11 @@ def _build_bola_config(args, owner_headers: dict) -> Optional[dict]:
     BOLA (the worker would self-gate off anyway) so a half-wired run is loud,
     not silently inert.
     """
+    # Identity B may also come from env (credential hygiene — never on the CLI):
+    # VIPER_SESSION_COOKIE_B / VIPER_AUTH_BEARER_B. Explicit flags win.
     attacker_headers = _parse_headers(
-        getattr(args, "cookie_b", None),
-        getattr(args, "auth_bearer_b", None),
+        getattr(args, "cookie_b", None) or os.environ.get("VIPER_SESSION_COOKIE_B"),
+        getattr(args, "auth_bearer_b", None) or os.environ.get("VIPER_AUTH_BEARER_B"),
         getattr(args, "auth_header_b", []) or [],
     )
     markers = [m.strip() for m in (getattr(args, "owner_marker", []) or [])
