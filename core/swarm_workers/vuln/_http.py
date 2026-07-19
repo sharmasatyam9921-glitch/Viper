@@ -329,6 +329,13 @@ async def fetch(
             headers = {**auth, **(headers or {})}
     slot_held = False
     if rate_limit and url:
+        # Circuit breaker: if this host has been flagged edge-blocked (a CDN/WAF tarpit or
+        # IP blackhole — see _rate_limit.record_timeout), fast-fail instead of hanging on the
+        # timeout ceiling. Self-heals after a cooldown, so a transient tarpit is re-probed.
+        from ._rate_limit import is_host_edge_blocked
+        if is_host_edge_blocked(url):
+            logger.debug("edge-block fast-fail: %s %s", method, url)
+            return None
         # Lazy import to keep this module dependency-light at top of file
         from ._rate_limit import enter_host, wait_for_token
         ok = await wait_for_token(url)                 # RPS pacing
@@ -346,22 +353,30 @@ async def fetch(
         if slot_held:
             from ._rate_limit import leave_host
             await leave_host(url)
-    # Feed the response back so the per-host rate + concurrency adapt to the target's own
+    # Feed the outcome back so the per-host rate + concurrency adapt to the target's own
     # overload signals (429/503 -> back off; sustained success -> recover). Best-effort.
-    if rate_limit and url and resp is not None:
-        from ._rate_limit import record_response
-        status = getattr(resp, "status", 0)
-        # Corroborate a WAF block: only a 403/406/501 whose BODY carries a vendor WAF
-        # marker throttles the host — a benign auth-403 (no marker) does not. Anti-ban:
-        # ease off when the WAF starts blocking instead of hammering into a ban.
-        waf_block = False
-        if status in (403, 406, 501):
-            try:
-                from core.waf_bypass import waf_family
-                waf_block = waf_family(resp) is not None
-            except Exception:   # noqa: BLE001
-                waf_block = False
-        await record_response(url, status, waf_block=waf_block)
+    if rate_limit and url:
+        if resp is not None:
+            from ._rate_limit import record_response
+            status = getattr(resp, "status", 0)
+            # Corroborate a WAF block: only a 403/406/501 whose BODY carries a vendor WAF
+            # marker throttles the host — a benign auth-403 (no marker) does not. Anti-ban:
+            # ease off when the WAF starts blocking instead of hammering into a ban.
+            waf_block = False
+            if status in (403, 406, 501):
+                try:
+                    from core.waf_bypass import waf_family
+                    waf_block = waf_family(resp) is not None
+                except Exception:   # noqa: BLE001
+                    waf_block = False
+            await record_response(url, status, waf_block=waf_block)
+        else:
+            # No response after a real network attempt = timeout/unreachable. Feed the
+            # edge-block detector so a tarpitting/blackholed host (benign requests hang while
+            # attack paths get an instant 403) is recognized and further requests fast-fail
+            # instead of burning the whole time budget on the timeout ceiling.
+            from ._rate_limit import record_timeout
+            await record_timeout(url)
     return resp
 
 

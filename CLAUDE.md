@@ -457,6 +457,18 @@ Terminal security: allowlist-only pentest tools, shell metacharacter blocking, n
    throttle its request RATE down (to a 0.5 req/s floor) AND halve its CONCURRENCY
    ceiling (simultaneous in-flight, floor 1), both recovering gradually on sustained
    healthy responses — fast on healthy targets, automatically gentle on fragile ones
-   / connection-limited WAFs.
+   / connection-limited WAFs. The same path has an EDGE-BLOCK CIRCUIT BREAKER: a
+   hardened CDN/WAF edge (e.g. Akamai) can null-route/tarpit benign requests to the
+   timeout ceiling while instant-403ing attack signatures — so `_rate_limit` counts
+   CONSECUTIVE request TIMEOUTS per host and, after 5 in a row with ZERO intervening
+   responses, flags the host `edge_blocked` and `_http.fetch` FAST-FAILS further
+   requests (instead of hanging every worker for the whole budget). Recall-safe: ANY
+   real status (even a 403/429/503 — proof of reachability) resets the streak, so a
+   healthy/slow target never trips (gate scorecard unaffected); the flag self-heals
+   after a 120s cooldown re-probe. `hack_mode` breaks the iteration loop early and
+   reports an honest `stop_reason=edge_blocked` + `edge_status` (needs an authenticated
+   session or a WAF allowlist) instead of a misleading "0 findings", and the bug-bounty
+   exhaustion stop now counts only real vuln findings (not re-discovered recon surface),
+   so an unproductive target stops in ~3 iterations rather than burning the full budget.
 5. Tool confirmation gate for dangerous operations
 6. Findings redacted — no PII/credentials in reports

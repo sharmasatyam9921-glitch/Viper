@@ -97,6 +97,11 @@ class HackResult:
     elapsed_s: float = 0.0
     stop_reason: str = ""
     timed_out: bool = False
+    # Hosts whose edge (CDN/WAF) tarpitted or blackholed our traffic — benign requests hung
+    # to the timeout ceiling while attack paths got an instant block. When non-empty, a
+    # "0 findings" result means reconnaissance was blocked at the edge, NOT that the target is
+    # clean; the real remediation is an authenticated session or a WAF allowlist for our IP.
+    edge_blocked_hosts: list[str] = field(default_factory=list)
     # Compact, secret-free summary of the per-hunt SessionContext (roles seen,
     # endpoints observed, reachability entries). Set at teardown.
     session_context: dict = field(default_factory=dict)
@@ -128,6 +133,14 @@ class HackResult:
             "findings_count": self.findings_count,
             "submittable_count": self.submittable_count,
             "surface_count": self.surface_count,
+            "edge_blocked_hosts": list(self.edge_blocked_hosts),
+            "edge_status": (
+                "could not effectively probe — target edge (CDN/WAF) tarpitted or blackholed "
+                "our traffic; a 0-finding result reflects blocked reconnaissance, not a clean "
+                "target. Unlocks: an authenticated session (--auth-bearer/--cookie) so requests "
+                "ride a legitimate login, or a program WAF allowlist for the source IP."
+                if self.edge_blocked_hosts else ""
+            ),
             "session_context": self.session_context,
             # Normalized findings list so consumers (reports, the benchmark
             # scorer) can read individual findings, not just the count.
@@ -496,10 +509,20 @@ class HackMode:
             )
         except asyncio.TimeoutError:
             result.timed_out = True
-            result.stop_reason = "time_budget"
-            self.narrator.warn(
-                f"time budget ({self.profile.time_budget_s/60:.1f} min) exhausted"
-            )
+            # If the budget was exhausted BECAUSE the target edge tarpitted our traffic (the
+            # loop may have been stuck mid-phase when time ran out, never reaching the between-
+            # iteration breaker), report that honestly rather than a bare "time_budget".
+            if self._note_edge_block(result):
+                result.stop_reason = "edge_blocked"
+                self.narrator.warn(
+                    "time budget exhausted while the target edge tarpitted/blackholed our "
+                    "traffic (CDN/WAF) — needs an authenticated session or a WAF allowlist"
+                )
+            else:
+                result.stop_reason = "time_budget"
+                self.narrator.warn(
+                    f"time budget ({self.profile.time_budget_s/60:.1f} min) exhausted"
+                )
         finally:
             await self._teardown(result, started_at=t0)
 
@@ -913,6 +936,29 @@ class HackMode:
         except Exception:
             pass
 
+    def _note_edge_block(self, result: "HackResult") -> bool:
+        """Return True if the target host is currently flagged edge-blocked (a CDN/WAF tarpit
+        or IP blackhole: benign requests hang to the timeout ceiling). Records the host on the
+        result (deduped) and emits a `host.edge_blocked` audit event the first time, so the
+        honest 'edge_blocked' status reaches the summary/report instead of a bare '0 findings'.
+        Best-effort; a detector fault never breaks the hunt."""
+        try:
+            from core.swarm_workers.vuln._rate_limit import is_host_edge_blocked
+            if not is_host_edge_blocked(self.target):
+                return False
+            from urllib.parse import urlsplit
+            ref = self.target if "://" in self.target else "//" + self.target
+            host = urlsplit(ref).hostname or self.target
+            if host not in result.edge_blocked_hosts:
+                result.edge_blocked_hosts.append(host)
+                self.audit.event(
+                    "host.edge_blocked", target=self.target,
+                    payload={"host": host, "iteration": result.iterations},
+                )
+            return True
+        except Exception:   # noqa: BLE001 — detection is advisory, never breaks the hunt
+            return False
+
     # ------------------------------------------------------------------
     # The main loop
     # ------------------------------------------------------------------
@@ -992,9 +1038,18 @@ class HackMode:
                 # artifacts (endpoints, DNS, ports) go to result.surface, not the
                 # vulnerability findings count / the validation gate.
                 for f in phase_res.findings:
-                    (result.surface if _is_surface(f) else result.findings).append(f)
+                    is_surf = _is_surface(f)
+                    (result.surface if is_surf else result.findings).append(f)
                     self._state["findings"].append(f)
                     iter_findings.append(f)
+                    # Only real (non-surface) findings count toward exhaustion. Recon
+                    # surface (endpoints/DNS/ports) is re-discovered every iteration, so
+                    # counting it would keep findings_this_iter permanently non-zero and the
+                    # 3-consecutive-zero stop would never fire — burning the whole budget on
+                    # a target that only ever re-yields the same surface (e.g. an edge-blocked
+                    # host). See _bugbounty_exhausted in hack_profile.py.
+                    if not is_surf:
+                        findings_this_iter += 1
                     # Fold every finding into the live belief state (Section 7.2)
                     # so planning/reporting reason over a structured world model,
                     # not just a flat findings list.
@@ -1003,7 +1058,6 @@ class HackMode:
                     except Exception:
                         pass
                     self.narrator.emit_finding(f)
-                findings_this_iter += phase_res.findings_count
                 self.narrator.finish_stage(
                     "success" if phase_res.workers_failed == 0 else "success",
                 )
@@ -1044,6 +1098,17 @@ class HackMode:
                     return
 
             self._state["findings_per_iteration"].append(findings_this_iter)
+            # Edge-block circuit breaker: if the target host has been flagged as edge-blocked
+            # (consecutive request timeouts with no intervening response — a CDN/WAF tarpit or
+            # IP blackhole), stop looping now. Continuing would just hang every worker on the
+            # timeout ceiling for the rest of the budget and re-report the same empty surface.
+            if self._note_edge_block(result):
+                result.stop_reason = "edge_blocked"
+                self.narrator.warn(
+                    "target edge is tarpitting/blackholing our traffic (CDN/WAF) — stopping; "
+                    "needs an authenticated session or a WAF allowlist for this IP"
+                )
+                return
             # Progressive escalation: a barren iteration (0 new findings) raises the level
             # so the NEXT pass hunts harder (workers widen their param/asset/encoding sets)
             # instead of re-running the byte-identical scan the dedup guarantees is empty.

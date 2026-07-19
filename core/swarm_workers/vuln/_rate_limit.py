@@ -44,6 +44,19 @@ _BASE_CONCURRENCY = 8      # max simultaneous in-flight per host at full health
 _MIN_CONCURRENCY = 1       # never below fully-serialized
 _SLOT_POLL_S = 0.02        # re-check cadence while a host is at its concurrency ceiling
 
+# Edge-block circuit breaker. A hardened CDN/WAF edge (e.g. Akamai) can null-route or
+# tarpit our traffic: benign requests hang to the per-request timeout ceiling while attack
+# signatures get an instant 403. Left unchecked, every worker keeps hanging on the timeout
+# for the whole time budget, and the run reports a misleading "0 findings" — indistinguishable
+# from a genuinely clean target. So we count CONSECUTIVE request TIMEOUTS per host: once a host
+# times out this many times in a row WITH ZERO intervening real responses, it is flagged
+# edge-blocked and further requests fast-fail (see _http.fetch) instead of hanging. Recall-safe
+# by construction: ANY real HTTP status (even a 403/429/503 — proof the host is reachable) resets
+# the streak and clears the flag, so a healthy or merely-slow target never trips. The flag
+# self-heals after a cooldown so a transient tarpit is re-probed rather than blocked forever.
+_EDGE_BLOCK_THRESHOLD = 5   # consecutive timeouts (no intervening response) => edge-blocked
+_EDGE_COOLDOWN_S = 120.0    # after this long, allow a re-probe (self-heal)
+
 
 @dataclass
 class _Bucket:
@@ -56,6 +69,9 @@ class _Bucket:
     conc_limit: int = _BASE_CONCURRENCY   # current max simultaneous in-flight
     conc_base: int = _BASE_CONCURRENCY    # ceiling to recover concurrency back toward
     in_flight: int = 0                    # requests currently in flight to this host
+    timeout_streak: int = 0               # consecutive request timeouts (reset by any response)
+    edge_blocked: bool = False            # host is tarpitting/blackholing us (circuit open)
+    blocked_at: float = 0.0               # when edge_blocked tripped (for cooldown self-heal)
 
 
 class HostRateLimiter:
@@ -172,6 +188,12 @@ class HostRateLimiter:
             bucket = self._buckets.get(host)
             if bucket is None:
                 return
+            # A real HTTP status came back — proof the host is reachable (a 403/429/503
+            # still counts). Clear any edge-block state so the circuit re-closes.
+            bucket.timeout_streak = 0
+            if bucket.edge_blocked:
+                bucket.edge_blocked = False
+                logger.debug("edge-block cleared for %s (HTTP %s received)", host, status)
             base = bucket.base_rate or self.rate_per_s
             if status in _OVERLOAD_STATUSES or waf_block:
                 new_rate = max(_MIN_RATE_PER_S, bucket.rate_per_s * _BACKOFF_FACTOR)
@@ -194,6 +216,45 @@ class HostRateLimiter:
                     bucket.ok_streak = 0
             else:                                       # 5xx / network failure: pause recovery
                 bucket.ok_streak = 0
+
+    async def record_timeout(self, url_or_host: str) -> None:
+        """Feed a request TIMEOUT / unreachable outcome (no response) back to the host's
+        bucket. Increments the consecutive-timeout streak; once it reaches
+        _EDGE_BLOCK_THRESHOLD with no intervening real response, flags the host edge-blocked
+        so `_http.fetch` fast-fails further requests instead of hanging. Never raises;
+        changes ONLY request pacing/circuit state, never a finding."""
+        host = self._host_of(url_or_host)
+        if not host:
+            return
+        async with self._lock:
+            bucket = self._buckets.get(host)
+            if bucket is None:
+                bucket = self._new_bucket(time.time())
+                self._buckets[host] = bucket
+            bucket.timeout_streak += 1
+            bucket.ok_streak = 0
+            if bucket.timeout_streak >= _EDGE_BLOCK_THRESHOLD and not bucket.edge_blocked:
+                bucket.edge_blocked = True
+                bucket.blocked_at = time.time()
+                logger.debug("edge-block tripped for %s after %d consecutive timeouts",
+                             host, bucket.timeout_streak)
+
+    def is_edge_blocked(self, url_or_host: str) -> bool:
+        """True while a host is flagged edge-blocked and still within its cooldown. After the
+        cooldown elapses the flag is cleared optimistically so the next request re-probes the
+        host (self-heal) — a transient tarpit is not blocked forever. Read-mostly; a benign
+        race just costs one extra probe (pacing is never load-bearing)."""
+        host = self._host_of(url_or_host)
+        if not host:
+            return False
+        bucket = self._buckets.get(host)
+        if bucket is None or not bucket.edge_blocked:
+            return False
+        if (time.time() - bucket.blocked_at) >= _EDGE_COOLDOWN_S:
+            bucket.edge_blocked = False
+            bucket.timeout_streak = 0
+            return False
+        return True
 
 
 # Module-level singleton — every worker reaches into this one.
@@ -232,6 +293,29 @@ async def record_response(url_or_host: str, status: int, *,
         await _DEFAULT.record(url_or_host, status, waf_block=waf_block)
     except Exception:   # noqa: BLE001 — adaptive pacing is never load-bearing
         pass
+
+
+async def record_timeout(url_or_host: str) -> None:
+    """Feed a request timeout/unreachable outcome to the default limiter's edge-block
+    detector. No-op when unthrottled or on any error — pacing must never break a request."""
+    if _unthrottled:
+        return
+    try:
+        await _DEFAULT.record_timeout(url_or_host)
+    except Exception:   # noqa: BLE001 — edge-block detection is never load-bearing
+        pass
+
+
+def is_host_edge_blocked(url_or_host: str) -> bool:
+    """True if the default limiter has flagged this host edge-blocked (tarpit/blackhole)
+    and it is still within cooldown. Always False when unthrottled or on any error, so a
+    detector fault can never suppress a legitimate request."""
+    if _unthrottled:
+        return False
+    try:
+        return _DEFAULT.is_edge_blocked(url_or_host)
+    except Exception:   # noqa: BLE001
+        return False
 
 
 async def enter_host(url_or_host: str) -> bool:
